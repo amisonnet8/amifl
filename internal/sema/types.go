@@ -57,10 +57,34 @@ func isFloatType(name string) bool {
 	return name == "Float32" || name == "Float64"
 }
 
-// intLitMax is the largest value an IntLit can hold for each integer
-// type. Step 2 has no unary minus yet (amifl-spec.md's arithmetic
-// operators land in step 3), so every IntLit is non-negative and only an
-// upper bound needs checking.
+func isUIntType(name string) bool {
+	switch name {
+	case "UInt8", "UInt16", "UInt32", "UInt64":
+		return true
+	}
+	return false
+}
+
+func isSignedIntType(name string) bool {
+	switch name {
+	case "Int8", "Int16", "Int32", "Int64":
+		return true
+	}
+	return false
+}
+
+// isOrderedType reports whether name has the Ordered capability
+// (amifl-spec.md section 2.3: `< <= > >=`) — every numeric type plus
+// String (Go's native string comparison is already lexicographic, so no
+// special codegen is needed beyond the plain LT/LTE/GT/GTE instructions).
+func isOrderedType(name string) bool {
+	return isIntType(name) || isFloatType(name) || name == "String"
+}
+
+// intLitMax is the largest value a bare (non-negated) IntLit can hold for
+// each integer type. A literal directly under unary `-` gets one extra bit
+// of headroom for signed types (resolveNegatedIntLit) since e.g. -128 is a
+// valid Int8 even though the literal "128" alone isn't.
 var intLitMax = map[string]uint64{
 	"Int8":   math.MaxInt8,
 	"Int16":  math.MaxInt16,

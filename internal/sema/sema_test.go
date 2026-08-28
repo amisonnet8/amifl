@@ -314,6 +314,224 @@ func TestCheck_DuplicateTopLevelConstIsAnError(t *testing.T) {
 	}
 }
 
+func TestCheck_ArithmeticBetweenSameTypesIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "y", Value: &ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "x"}, Right: &ast.IntLit{Value: 1}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	let := f.Decls[0].(*ast.FuncDecl).Body.Exprs[1].(*ast.LetExpr)
+	if let.ResolvedType != "Int8" {
+		t.Fatalf("got ResolvedType %q, want Int8 (the literal 1 should adapt to x's type)", let.ResolvedType)
+	}
+}
+
+func TestCheck_LiteralAdaptsRegardlessOfOperandOrder(t *testing.T) {
+	// 1 + x must type-check exactly like x + 1 — the literal should adapt
+	// to whichever side is concretely typed, not just the left side
+	// (CLAUDE.md's "確定した設計判断" for step 3).
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "y", Value: &ast.BinaryExpr{Op: "+", Left: &ast.IntLit{Value: 1}, Right: &ast.IdentExpr{Name: "x"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ArithmeticBetweenDifferentTypesIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "y", Type: "Int16", Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "z", Value: &ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "x"}, Right: &ast.IdentExpr{Name: "y"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for Int8 + Int16 (no implicit conversion, principle 2)")
+	}
+}
+
+func TestCheck_StringConcatWithPlusIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: &ast.BinaryExpr{Op: "+", Left: &ast.StringLit{Value: "a"}, Right: &ast.StringLit{Value: "b"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	let := f.Decls[0].(*ast.FuncDecl).Body.Exprs[0].(*ast.LetExpr)
+	if let.ResolvedType != "String" {
+		t.Fatalf("got ResolvedType %q, want String", let.ResolvedType)
+	}
+}
+
+func TestCheck_MinusOnStringsIsAnError(t *testing.T) {
+	// Only `+` is Concatenable on String (amifl-spec.md section 6); `-` is
+	// Numeric-only.
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: &ast.BinaryExpr{Op: "-", Left: &ast.StringLit{Value: "a"}, Right: &ast.StringLit{Value: "b"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for \"a\" - \"b\"")
+	}
+}
+
+func TestCheck_BitwiseOnFloatIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Value: &ast.BinaryExpr{Op: "&", Left: &ast.FloatLit{Value: 1}, Right: &ast.FloatLit{Value: 2}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a bitwise operator on Float operands")
+	}
+}
+
+func TestCheck_ShiftCountDefaultsToUInt(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Value: &ast.BinaryExpr{Op: "<<", Left: &ast.IntLit{Value: 1}, Right: &ast.IntLit{Value: 2}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ShiftCountMustBeUInt(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "n", Value: &ast.FloatLit{Value: 2}},
+		&ast.LetExpr{Name: "x", Value: &ast.BinaryExpr{Op: "<<", Left: &ast.IntLit{Value: 1}, Right: &ast.IdentExpr{Name: "n"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a Float shift count")
+	}
+}
+
+func TestCheck_ComparisonProducesBool(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "ok", Type: "Bool", Value: &ast.BinaryExpr{Op: "<", Left: &ast.IntLit{Value: 1}, Right: &ast.IntLit{Value: 2}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_OrderedComparisonOnBoolIsAnError(t *testing.T) {
+	// Bool has no Ordered capability (amifl-spec.md section 2.3) — only
+	// == and != are defined for it.
+	f := mainFile(
+		&ast.LetExpr{Name: "ok", Value: &ast.BinaryExpr{Op: "<", Left: &ast.BoolLit{Value: true}, Right: &ast.BoolLit{Value: false}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for Bool < Bool")
+	}
+}
+
+func TestCheck_EqualityOnBoolIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "ok", Value: &ast.BinaryExpr{Op: "==", Left: &ast.BoolLit{Value: true}, Right: &ast.BoolLit{Value: false}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_LogicalOperatorsRequireBool(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Value: &ast.BinaryExpr{Op: "&&", Left: &ast.IntLit{Value: 1}, Right: &ast.BoolLit{Value: true}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a non-Bool operand to &&")
+	}
+}
+
+func TestCheck_UnaryNotRequiresBool(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Value: &ast.UnaryExpr{Op: "!", Operand: &ast.IntLit{Value: 1}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for !1")
+	}
+}
+
+func TestCheck_UnaryMinusOnLetVariable(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: "Int", Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "y", Value: &ast.UnaryExpr{Op: "-", Operand: &ast.IdentExpr{Name: "x"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_NegatedInt8MinBoundaryIsValid(t *testing.T) {
+	// -128 is Int8's minimum, even though the bare literal 128 alone
+	// overflows Int8's positive range (max 127) — resolveNegatedIntLit's
+	// whole reason to exist.
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.UnaryExpr{Op: "-", Operand: &ast.IntLit{Value: 128}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_NegatedInt8PastMinBoundaryIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.UnaryExpr{Op: "-", Operand: &ast.IntLit{Value: 129}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for -129: Int8 (out of range)")
+	}
+}
+
+func TestCheck_BitwiseNotOnFloatIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Value: &ast.UnaryExpr{Op: "~", Operand: &ast.FloatLit{Value: 1}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for ~1.0")
+	}
+}
+
+func TestCheck_ConstInitializerCanUseOperators(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = []ast.TopLevelDecl{
+		&ast.ConstDecl{Name: "A", Value: &ast.IntLit{Value: 40}},
+		&ast.ConstDecl{Name: "B", Value: &ast.IntLit{Value: 2}},
+		&ast.ConstDecl{Name: "C", Value: &ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "A"}, Right: &ast.IdentExpr{Name: "B"}}},
+		f.Decls[0],
+	}
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ConstInitializerCannotReferenceALetThroughAnOperator(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Value: &ast.IntLit{Value: 1}},
+		&ast.ConstDecl{Name: "Y", Value: &ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "x"}, Right: &ast.IntLit{Value: 1}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a const initializer referencing a `let` through an operator expression")
+	}
+}
+
 func TestCheck_LetBoundToUnitIsAnError(t *testing.T) {
 	f := mainFile(
 		&ast.LetExpr{Name: "x", Value: printStr("a")},

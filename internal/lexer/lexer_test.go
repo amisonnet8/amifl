@@ -164,6 +164,51 @@ func TestNext_ExponentWithoutDigitsIsNotConsumed(t *testing.T) {
 	}
 }
 
+func TestNext_Operators(t *testing.T) {
+	src := "+ - * / % & | ^ &^ ~ << >> && || ! == != < <= > >="
+	want := []Kind{
+		Plus, Minus, Star, Slash, Percent, Amp, Pipe, Caret, AmpCaret, Tilde,
+		Shl, Shr, AndAnd, OrOr, Bang, EqEq, NotEq, Lt, Lte, Gt, Gte,
+		EOF,
+	}
+	toks := tokenize(t, src)
+	if len(toks) != len(want) {
+		t.Fatalf("got %d tokens, want %d: %+v", len(toks), len(want), toks)
+	}
+	for i, k := range want {
+		if toks[i].Kind != k {
+			t.Errorf("token %d: got Kind %v, want %v", i, toks[i].Kind, k)
+		}
+	}
+}
+
+func TestNext_MinusVsArrow(t *testing.T) {
+	toks := tokenize(t, "- ->")
+	if len(toks) != 3 || toks[0].Kind != Minus || toks[1].Kind != Arrow {
+		t.Fatalf("unexpected tokens: %+v", toks)
+	}
+}
+
+func TestNext_SlashIsNotConfusedWithComment(t *testing.T) {
+	toks := tokenize(t, "1 / 2 // trailing comment\n3")
+	want := []Kind{Int, Slash, Int, Newline, Int, EOF}
+	if len(toks) != len(want) {
+		t.Fatalf("got %d tokens, want %d: %+v", len(toks), len(want), toks)
+	}
+	for i, k := range want {
+		if toks[i].Kind != k {
+			t.Errorf("token %d: got Kind %v, want %v", i, toks[i].Kind, k)
+		}
+	}
+}
+
+func TestNext_AmpCaretIsNotAmpThenCaret(t *testing.T) {
+	toks := tokenize(t, "&^")
+	if len(toks) != 2 || toks[0].Kind != AmpCaret {
+		t.Fatalf("unexpected tokens: %+v", toks)
+	}
+}
+
 func TestNext_Underscore(t *testing.T) {
 	toks := tokenize(t, "_")
 	if len(toks) != 2 || toks[0].Kind != Ident || toks[0].Value != "_" {

@@ -1,0 +1,41 @@
+const Base: Int = 40
+const Bonus: Int = 2
+const Combined: Int = Base + Bonus
+
+fn main() -> Int {
+    let greeting: String = "Hello" + ", " + "AmiFL!"
+    print(greeting)
+
+    let a: Int = 10
+    let b: Int = 3
+
+    let sum: Int = a + b
+    let diff: Int = a - b
+    let bits: Int = 6 & 3
+    let orBits: Int = 5 | 2
+    let xorBits: Int = 5 ^ 3
+    let clearBits: Int = 6 &^ 2
+    let shiftedLeft: Int = 1 << 3
+    let shiftedRight: Int = 16 >> 2
+
+    let negFive: Int = -5
+    let doubleNeg: Int = -negFive
+
+    let minInt8: Int8 = -128
+    let notBits: Int8 = ~5
+
+    let isGreater: Bool = a > b
+    let isEqualSum: Bool = sum == 13
+    let logic: Bool = isGreater && isEqualSum || false
+    let notLogic: Bool = !logic
+    let strCmp: Bool = "abc" < "abd"
+    let boolEq: Bool = true == true
+
+    let precedenceCheck: Int = 2 + 3 * 4
+    let grouped: Int = (2 + 3) * 4
+
+    let total: Int = sum + diff + bits + orBits + xorBits + clearBits + shiftedLeft + shiftedRight + doubleNeg
+    let verified: Int = total + (Combined - 42) + (precedenceCheck - 14) + (grouped - 20)
+
+    verified
+}

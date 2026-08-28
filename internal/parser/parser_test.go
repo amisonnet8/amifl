@@ -221,6 +221,160 @@ func TestParse_FloatLiterals(t *testing.T) {
 	}
 }
 
+// parseStmtExpr parses stmtSrc as the sole non-return statement of a
+// function body (its trailing `0` return is fixed), returning that
+// statement's Expr node — for tests that care about exactly what a
+// statement-position expression (assignment, in particular) parses to.
+func parseStmtExpr(t *testing.T, stmtSrc string) ast.Expr {
+	t.Helper()
+	full := "fn main() -> Int {\n    " + stmtSrc + "\n    0\n}\n"
+	f, err := Parse(full)
+	if err != nil {
+		t.Fatalf("Parse(%q) error: %v", stmtSrc, err)
+	}
+	return parseFuncMain(t, f).Body.Exprs[0]
+}
+
+// parseExprSrc parses exprSrc as a discarded value expression (`_ =
+// exprSrc`), returning the parsed Expr — for tests that only care about
+// how a value expression (never itself assignment) parses.
+func parseExprSrc(t *testing.T, exprSrc string) ast.Expr {
+	t.Helper()
+	return parseStmtExpr(t, "_ = "+exprSrc).(*ast.DiscardExpr).Value
+}
+
+func TestParse_ArithmeticPrecedence(t *testing.T) {
+	// 1 + 2 * 3 must read as 1 + (2 * 3), not (1 + 2) * 3.
+	expr := parseExprSrc(t, "1 + 2 * 3")
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != "+" {
+		t.Fatalf("got %#v, want top-level BinaryExpr{Op: \"+\"}", expr)
+	}
+	if _, ok := bin.Left.(*ast.IntLit); !ok {
+		t.Fatalf("left: got %T, want *ast.IntLit", bin.Left)
+	}
+	rightBin, ok := bin.Right.(*ast.BinaryExpr)
+	if !ok || rightBin.Op != "*" {
+		t.Fatalf("right: got %#v, want BinaryExpr{Op: \"*\"}", bin.Right)
+	}
+}
+
+func TestParse_SubtractionIsLeftAssociative(t *testing.T) {
+	// 1 - 2 - 3 must read as (1 - 2) - 3, not 1 - (2 - 3).
+	expr := parseExprSrc(t, "1 - 2 - 3")
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != "-" {
+		t.Fatalf("got %#v, want top-level BinaryExpr{Op: \"-\"}", expr)
+	}
+	if _, ok := bin.Right.(*ast.IntLit); !ok {
+		t.Fatalf("right: got %T, want *ast.IntLit (the associativity is wrong if it's a BinaryExpr)", bin.Right)
+	}
+	leftBin, ok := bin.Left.(*ast.BinaryExpr)
+	if !ok || leftBin.Op != "-" {
+		t.Fatalf("left: got %#v, want BinaryExpr{Op: \"-\"}", bin.Left)
+	}
+}
+
+func TestParse_ComparisonBindsTighterThanEquality(t *testing.T) {
+	// amifl-spec.md section 6: `< <= > >=` sits above `== !=` in the
+	// precedence table, so 1 < 2 == true reads as (1 < 2) == true.
+	expr := parseExprSrc(t, "1 < 2 == true")
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != "==" {
+		t.Fatalf("got %#v, want top-level BinaryExpr{Op: \"==\"}", expr)
+	}
+	leftBin, ok := bin.Left.(*ast.BinaryExpr)
+	if !ok || leftBin.Op != "<" {
+		t.Fatalf("left: got %#v, want BinaryExpr{Op: \"<\"}", bin.Left)
+	}
+}
+
+func TestParse_ParensOverridePrecedence(t *testing.T) {
+	// (1 + 2) * 3 must read as (1 + 2) * 3, not 1 + (2 * 3).
+	expr := parseExprSrc(t, "(1 + 2) * 3")
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != "*" {
+		t.Fatalf("got %#v, want top-level BinaryExpr{Op: \"*\"}", expr)
+	}
+	if _, ok := bin.Left.(*ast.BinaryExpr); !ok {
+		t.Fatalf("left: got %T, want *ast.BinaryExpr (grouping should have survived)", bin.Left)
+	}
+}
+
+func TestParse_UnaryMinusIsRightAssociative(t *testing.T) {
+	expr := parseExprSrc(t, "- -5")
+	outer, ok := expr.(*ast.UnaryExpr)
+	if !ok || outer.Op != "-" {
+		t.Fatalf("got %#v, want top-level UnaryExpr{Op: \"-\"}", expr)
+	}
+	if _, ok := outer.Operand.(*ast.UnaryExpr); !ok {
+		t.Fatalf("operand: got %T, want *ast.UnaryExpr", outer.Operand)
+	}
+}
+
+func TestParse_UnaryBindsTighterThanBinary(t *testing.T) {
+	// -1 + 2 must read as (-1) + 2, not -(1 + 2).
+	expr := parseExprSrc(t, "-1 + 2")
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != "+" {
+		t.Fatalf("got %#v, want top-level BinaryExpr{Op: \"+\"}", expr)
+	}
+	if _, ok := bin.Left.(*ast.UnaryExpr); !ok {
+		t.Fatalf("left: got %T, want *ast.UnaryExpr", bin.Left)
+	}
+}
+
+func TestParse_CallAsBinaryOperand(t *testing.T) {
+	expr := parseExprSrc(t, "f(1) + 2")
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != "+" {
+		t.Fatalf("got %#v, want top-level BinaryExpr{Op: \"+\"}", expr)
+	}
+	if _, ok := bin.Left.(*ast.CallExpr); !ok {
+		t.Fatalf("left: got %T, want *ast.CallExpr", bin.Left)
+	}
+}
+
+func TestParse_AssignWithBinaryRHS(t *testing.T) {
+	stmt := parseStmtExpr(t, "x = 1 + 2")
+	assign, ok := stmt.(*ast.AssignExpr)
+	if !ok {
+		t.Fatalf("got %T, want *ast.AssignExpr", stmt)
+	}
+	if _, ok := assign.Value.(*ast.BinaryExpr); !ok {
+		t.Fatalf("value: got %T, want *ast.BinaryExpr", assign.Value)
+	}
+}
+
+func TestParse_IdentStartsABinaryExpr(t *testing.T) {
+	// A bare identifier not immediately followed by '=' must still be
+	// usable as the left-hand side of a binary expression (x + 1), not
+	// just a call or standalone read.
+	expr := parseExprSrc(t, "x + 1")
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != "+" {
+		t.Fatalf("got %#v, want top-level BinaryExpr{Op: \"+\"}", expr)
+	}
+	if _, ok := bin.Left.(*ast.IdentExpr); !ok {
+		t.Fatalf("left: got %T, want *ast.IdentExpr", bin.Left)
+	}
+}
+
+func TestParse_AllOperatorTokensParse(t *testing.T) {
+	for _, src := range []string{
+		"1 + 2", "1 - 2", "1 * 2", "1 / 2", "1 % 2",
+		"1 & 2", "1 | 2", "1 ^ 2", "1 &^ 2",
+		"1 << 2", "1 >> 2",
+		"true && false", "true || false",
+		"1 == 2", "1 != 2", "1 < 2", "1 <= 2", "1 > 2", "1 >= 2",
+		"!true", "-1", "~1",
+	} {
+		if _, err := Parse("fn main() -> Int {\n    _ = " + src + "\n    0\n}\n"); err != nil {
+			t.Errorf("Parse(%q) error: %v", src, err)
+		}
+	}
+}
+
 func TestParse_IntLiteralIsNotFloat(t *testing.T) {
 	f, err := Parse("fn main() -> Int {\n    let x = 42\n    0\n}\n")
 	if err != nil {

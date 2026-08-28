@@ -17,22 +17,43 @@ func Parse(src string) (*ast.File, error) {
 	return p.parseFile()
 }
 
-// parser is a hand-written recursive-descent parser (amifl-spec.md's
-// operator-precedence table lands with expressions in step 3; the
-// grammar step 1/2 need is small enough that parseExpr doesn't need it
-// yet).
+// parser is a hand-written recursive-descent parser using precedence
+// climbing for amifl-spec.md section 6's binary/unary operators. It keeps
+// one token of lookahead beyond cur (in ahead) so that, at statement
+// position, an identifier can be told apart from a reassignment
+// (`name = expr`) without having to commit to either parse before seeing
+// the token after the name.
 type parser struct {
-	lx  *lexer.Lexer
-	cur lexer.Token
+	lx    *lexer.Lexer
+	cur   lexer.Token
+	ahead *lexer.Token
 }
 
 func (p *parser) advance() error {
+	if p.ahead != nil {
+		p.cur = *p.ahead
+		p.ahead = nil
+		return nil
+	}
 	tok, err := p.lx.Next()
 	if err != nil {
 		return err
 	}
 	p.cur = tok
 	return nil
+}
+
+// peek returns the token after cur without consuming cur, caching it in
+// ahead so the next advance() is free.
+func (p *parser) peek() (lexer.Token, error) {
+	if p.ahead == nil {
+		tok, err := p.lx.Next()
+		if err != nil {
+			return lexer.Token{}, err
+		}
+		p.ahead = &tok
+	}
+	return *p.ahead, nil
 }
 
 func (p *parser) errorf(format string, args ...any) error {
@@ -196,6 +217,13 @@ func (p *parser) parseBlock() (*ast.Block, error) {
 	return block, nil
 }
 
+// parseExpr parses one expression in statement position: a block's
+// top-level `let`/`const`/`_ = ...`/reassignment/value-expression entries
+// (amifl-spec.md section 5). Reassignment (`name = expr`) is deliberately
+// not reachable from within parseOrExpr's operator chain — it isn't listed
+// among amifl-spec.md section 6's operators, and (like let/const/discard)
+// it's Unit-typed, so nesting it inside a larger expression would only
+// ever be legal in a position that itself has to be Unit-typed.
 func (p *parser) parseExpr() (ast.Expr, error) {
 	switch p.cur.Kind {
 	case lexer.KwLet:
@@ -206,6 +234,122 @@ func (p *parser) parseExpr() (ast.Expr, error) {
 			return nil, err
 		}
 		return cd, nil
+	case lexer.Ident:
+		if p.cur.Value == "_" {
+			return p.parseDiscardExpr()
+		}
+		nxt, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if nxt.Kind == lexer.Assign {
+			return p.parseAssignExpr()
+		}
+	}
+	return p.parseOrExpr()
+}
+
+func (p *parser) parseAssignExpr() (ast.Expr, error) {
+	nameTok, err := p.expect(lexer.Ident)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.Assign); err != nil {
+		return nil, err
+	}
+	value, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.AssignExpr{Name: nameTok.Value, Value: value, Line: nameTok.Line}, nil
+}
+
+// binaryLevel parses left-associative left (op right)* where op is any
+// token found in ops, mapped to its AST operator text.
+func (p *parser) binaryLevel(next func() (ast.Expr, error), ops map[lexer.Kind]string) (ast.Expr, error) {
+	left, err := next()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		op, ok := ops[p.cur.Kind]
+		if !ok {
+			return left, nil
+		}
+		line := p.cur.Line
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		right, err := next()
+		if err != nil {
+			return nil, err
+		}
+		left = &ast.BinaryExpr{Op: op, Left: left, Right: right, Line: line}
+	}
+}
+
+// The chain implements amifl-spec.md section 6's precedence table
+// (high to low): unary `! - ~` -> `* / % << >> & &^` -> `+ - | ^` ->
+// `< <= > >=` -> `== !=` -> `&&` -> `||`. `|>` (lowest, step 9) and
+// postfix `. [] ?` (highest, later steps) aren't reachable yet.
+func (p *parser) parseOrExpr() (ast.Expr, error) {
+	return p.binaryLevel(p.parseAndExpr, map[lexer.Kind]string{lexer.OrOr: "||"})
+}
+
+func (p *parser) parseAndExpr() (ast.Expr, error) {
+	return p.binaryLevel(p.parseEqualityExpr, map[lexer.Kind]string{lexer.AndAnd: "&&"})
+}
+
+func (p *parser) parseEqualityExpr() (ast.Expr, error) {
+	return p.binaryLevel(p.parseComparisonExpr, map[lexer.Kind]string{
+		lexer.EqEq: "==", lexer.NotEq: "!=",
+	})
+}
+
+func (p *parser) parseComparisonExpr() (ast.Expr, error) {
+	return p.binaryLevel(p.parseAdditiveExpr, map[lexer.Kind]string{
+		lexer.Lt: "<", lexer.Lte: "<=", lexer.Gt: ">", lexer.Gte: ">=",
+	})
+}
+
+func (p *parser) parseAdditiveExpr() (ast.Expr, error) {
+	return p.binaryLevel(p.parseMultiplicativeExpr, map[lexer.Kind]string{
+		lexer.Plus: "+", lexer.Minus: "-", lexer.Pipe: "|", lexer.Caret: "^",
+	})
+}
+
+func (p *parser) parseMultiplicativeExpr() (ast.Expr, error) {
+	return p.binaryLevel(p.parseUnaryExpr, map[lexer.Kind]string{
+		lexer.Star: "*", lexer.Slash: "/", lexer.Percent: "%",
+		lexer.Shl: "<<", lexer.Shr: ">>", lexer.Amp: "&", lexer.AmpCaret: "&^",
+	})
+}
+
+func (p *parser) parseUnaryExpr() (ast.Expr, error) {
+	var op string
+	switch p.cur.Kind {
+	case lexer.Bang:
+		op = "!"
+	case lexer.Minus:
+		op = "-"
+	case lexer.Tilde:
+		op = "~"
+	default:
+		return p.parsePrimaryExpr()
+	}
+	tok := p.cur
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+	operand, err := p.parseUnaryExpr()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.UnaryExpr{Op: op, Operand: operand, Line: tok.Line}, nil
+}
+
+func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
+	switch p.cur.Kind {
 	case lexer.KwTrue, lexer.KwFalse:
 		tok := p.cur
 		if err := p.advance(); err != nil {
@@ -239,10 +383,19 @@ func (p *parser) parseExpr() (ast.Expr, error) {
 		}
 		return &ast.FloatLit{Value: fv, Line: tok.Line}, nil
 	case lexer.Ident:
-		if p.cur.Value == "_" {
-			return p.parseDiscardExpr()
+		return p.parseIdentOrCall()
+	case lexer.LParen:
+		if err := p.advance(); err != nil {
+			return nil, err
 		}
-		return p.parseIdentOrCallOrAssign()
+		inner, err := p.parseOrExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.RParen); err != nil {
+			return nil, err
+		}
+		return inner, nil
 	default:
 		return nil, p.errorf("unexpected %s, expected an expression", p.cur.Kind)
 	}
@@ -290,29 +443,19 @@ func (p *parser) parseDiscardExpr() (ast.Expr, error) {
 	return &ast.DiscardExpr{Value: value, Line: tok.Line}, nil
 }
 
-// parseIdentOrCallOrAssign parses whatever follows a plain identifier: a
-// call (`name(...)`), a reassignment (`name = expr`), or a bare variable
-// read.
-func (p *parser) parseIdentOrCallOrAssign() (ast.Expr, error) {
+// parseIdentOrCall parses whatever follows a plain identifier used as a
+// value: a call (`name(...)`) or a bare variable read. Reassignment
+// (`name = expr`) is recognized earlier, at statement position in
+// parseExpr, and never reaches here (see parseExpr's doc comment).
+func (p *parser) parseIdentOrCall() (ast.Expr, error) {
 	nameTok, err := p.expect(lexer.Ident)
 	if err != nil {
 		return nil, err
 	}
-	switch p.cur.Kind {
-	case lexer.LParen:
+	if p.cur.Kind == lexer.LParen {
 		return p.parseCallArgs(nameTok)
-	case lexer.Assign:
-		if err := p.advance(); err != nil {
-			return nil, err
-		}
-		value, err := p.parseExpr()
-		if err != nil {
-			return nil, err
-		}
-		return &ast.AssignExpr{Name: nameTok.Value, Value: value, Line: nameTok.Line}, nil
-	default:
-		return &ast.IdentExpr{Name: nameTok.Value, Line: nameTok.Line}, nil
 	}
+	return &ast.IdentExpr{Name: nameTok.Value, Line: nameTok.Line}, nil
 }
 
 func (p *parser) parseCallArgs(nameTok lexer.Token) (ast.Expr, error) {

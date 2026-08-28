@@ -67,12 +67,75 @@ func (l *Lexer) Next() (Token, error) {
 	case c == ':':
 		l.pos++
 		return Token{Kind: Colon, Line: line}, nil
+	case c == '=' && l.byteAt(1) == '=':
+		l.pos += 2
+		return Token{Kind: EqEq, Line: line}, nil
 	case c == '=':
 		l.pos++
 		return Token{Kind: Assign, Line: line}, nil
 	case c == '-' && l.byteAt(1) == '>':
 		l.pos += 2
 		return Token{Kind: Arrow, Line: line}, nil
+	case c == '-':
+		l.pos++
+		return Token{Kind: Minus, Line: line}, nil
+	case c == '+':
+		l.pos++
+		return Token{Kind: Plus, Line: line}, nil
+	case c == '*':
+		l.pos++
+		return Token{Kind: Star, Line: line}, nil
+	case c == '/':
+		l.pos++
+		return Token{Kind: Slash, Line: line}, nil
+	case c == '%':
+		l.pos++
+		return Token{Kind: Percent, Line: line}, nil
+	case c == '&' && l.byteAt(1) == '&':
+		l.pos += 2
+		return Token{Kind: AndAnd, Line: line}, nil
+	case c == '&' && l.byteAt(1) == '^':
+		l.pos += 2
+		return Token{Kind: AmpCaret, Line: line}, nil
+	case c == '&':
+		l.pos++
+		return Token{Kind: Amp, Line: line}, nil
+	case c == '|' && l.byteAt(1) == '|':
+		l.pos += 2
+		return Token{Kind: OrOr, Line: line}, nil
+	case c == '|':
+		l.pos++
+		return Token{Kind: Pipe, Line: line}, nil
+	case c == '^':
+		l.pos++
+		return Token{Kind: Caret, Line: line}, nil
+	case c == '~':
+		l.pos++
+		return Token{Kind: Tilde, Line: line}, nil
+	case c == '<' && l.byteAt(1) == '<':
+		l.pos += 2
+		return Token{Kind: Shl, Line: line}, nil
+	case c == '<' && l.byteAt(1) == '=':
+		l.pos += 2
+		return Token{Kind: Lte, Line: line}, nil
+	case c == '<':
+		l.pos++
+		return Token{Kind: Lt, Line: line}, nil
+	case c == '>' && l.byteAt(1) == '>':
+		l.pos += 2
+		return Token{Kind: Shr, Line: line}, nil
+	case c == '>' && l.byteAt(1) == '=':
+		l.pos += 2
+		return Token{Kind: Gte, Line: line}, nil
+	case c == '>':
+		l.pos++
+		return Token{Kind: Gt, Line: line}, nil
+	case c == '!' && l.byteAt(1) == '=':
+		l.pos += 2
+		return Token{Kind: NotEq, Line: line}, nil
+	case c == '!':
+		l.pos++
+		return Token{Kind: Bang, Line: line}, nil
 	case c == '"':
 		return l.lexString(line)
 	case isDigit(c):

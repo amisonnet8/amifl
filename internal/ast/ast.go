@@ -119,10 +119,10 @@ type StringLit struct {
 	Line  int
 }
 
-// IntLit is an integer literal. Value is uint64 rather than int64 because
-// step 2 has no unary minus yet (arithmetic operators land in step 3), so
-// every literal is non-negative — but representing UInt64's full range
-// needs the extra bit int64 doesn't have.
+// IntLit is an integer literal. Value is uint64, not int64, so it can
+// represent UInt64's full range; a literal is always written without a
+// sign (amifl-spec.md section 3.1), so it's never itself negative — a
+// negative value is a UnaryExpr{Op: "-"} wrapping one of these instead.
 type IntLit struct {
 	Value uint64
 	Line  int
@@ -140,6 +140,36 @@ type BoolLit struct {
 	Line  int
 }
 
+// BinaryExpr is a binary operator expression (amifl-spec.md section 6):
+// arithmetic (+ - * / %), bitwise (& | ^ &^), shift (<< >>), comparison
+// (== != < <= > >=), or logical (&& ||). Op holds the operator's surface
+// text ("+", "==", "&&", ...).
+type BinaryExpr struct {
+	Op    string
+	Left  Expr
+	Right Expr
+	Line  int
+
+	// ResolvedType is filled in by sema: for arithmetic/bitwise/shift/
+	// concatenation operators it's both operands' (equal, per principle 2)
+	// type and the expression's own type; for comparison/logical operators
+	// (whose own type is always Bool) it's still the operands' shared
+	// type, which codegen needs to declare the correct Go type for
+	// whichever operand is a sub-expression requiring its own temp.
+	ResolvedType string
+}
+
+// UnaryExpr is a prefix operator expression (amifl-spec.md section 6): `!`
+// (logical not, Bool only), `-` (arithmetic negate, Numeric), or `~`
+// (bitwise not, integer types only).
+type UnaryExpr struct {
+	Op      string
+	Operand Expr
+	Line    int
+
+	ResolvedType string // filled in by sema
+}
+
 func (*FuncDecl) topLevelDeclNode()  {}
 func (*ConstDecl) topLevelDeclNode() {}
 
@@ -153,6 +183,8 @@ func (*StringLit) exprNode()   {}
 func (*IntLit) exprNode()      {}
 func (*FloatLit) exprNode()    {}
 func (*BoolLit) exprNode()     {}
+func (*BinaryExpr) exprNode()  {}
+func (*UnaryExpr) exprNode()   {}
 
 func (n *ConstDecl) Pos() int   { return n.Line }
 func (n *LetExpr) Pos() int     { return n.Line }
@@ -164,3 +196,5 @@ func (n *StringLit) Pos() int   { return n.Line }
 func (n *IntLit) Pos() int      { return n.Line }
 func (n *FloatLit) Pos() int    { return n.Line }
 func (n *BoolLit) Pos() int     { return n.Line }
+func (n *BinaryExpr) Pos() int  { return n.Line }
+func (n *UnaryExpr) Pos() int   { return n.Line }

@@ -73,7 +73,21 @@ func findMain(f *ast.File) *ast.FuncDecl {
 // declared. Revisit this once goto-producing constructs (switch's break,
 // for-in's continue) exist; see CLAUDE.md's "過去に踏まれた地雷" #1.
 type gen struct {
-	b *strings.Builder
+	b      *strings.Builder
+	tmpSeq int
+}
+
+// newTemp mints a fresh internal variable name for a binary/unary
+// operator's intermediate result. The "amifl_tmp" prefix is reserved for
+// codegen's own use and isn't one a `let`/`const` name can collide with in
+// practice; step 4's nested-scope work (CLAUDE.md's "過去に踏まれた地雷"
+// #4) is the natural place to fold this into a single, fully
+// collision-proof name-minting scheme shared with user declarations (the
+// way Cascade's freshName does), once shadowing makes that necessary
+// anyway.
+func (g *gen) newTemp() string {
+	g.tmpSeq++
+	return fmt.Sprintf("amifl_tmp%d", g.tmpSeq)
 }
 
 // genBlock emits a block's statements, treating the last expression as
@@ -161,15 +175,18 @@ func (g *gen) genAssignStmt(v *ast.AssignExpr) error {
 	return nil
 }
 
-// genDiscardStmt handles `_ = expr`. Step 2's discardable values
-// (literals, variable/const reads) have no side effects, so there's
-// nothing to emit for them — amivm's own unused-variable self-healing
+// genDiscardStmt handles `_ = expr`. A discardable value — a literal, a
+// variable/const read, or (as of step 3) any operator expression built
+// from those — has no side effect, so there's nothing to emit for it at
+// all: not even the instructions that would compute it, since nothing
+// ever reads the result. amivm's own unused-variable self-healing
 // (CLAUDE.md's amivm reference: "未使用変数の救済方法") takes care of any
-// resulting unused Go variable, so codegen doesn't need to synthesize a
-// Go `_ = x` either. A discarded *call*, however, still needs its side
-// effect to run — there's no such call yet since print is already
-// Unit-typed, but this keeps codegen forward-compatible with step 5's
-// general (non-Unit-returning) function calls.
+// resulting unused Go variable for the *operand* declarations that do get
+// emitted elsewhere, so codegen doesn't need to synthesize a Go `_ = x`
+// either. A discarded *call*, however, still needs its side effect to
+// run — there's no such call yet since print is already Unit-typed, but
+// this keeps codegen forward-compatible with step 5's general
+// (non-Unit-returning) function calls.
 func (g *gen) genDiscardStmt(v *ast.DiscardExpr) error {
 	if c, ok := v.Value.(*ast.CallExpr); ok {
 		return g.genCallStmt(c)
@@ -197,8 +214,162 @@ func (g *gen) genValue(e ast.Expr) (string, error) {
 			return g.genValue(v.ConstValue)
 		}
 		return "%" + v.Name, nil
+	case *ast.BinaryExpr:
+		return g.genBinaryValue(v)
+	case *ast.UnaryExpr:
+		return g.genUnaryValue(v)
 	default:
 		return "", fmt.Errorf("codegen: %T is not a value expression (sema should have rejected this)", e)
+	}
+}
+
+// binaryInstr maps a BinaryExpr's Op to its AMIVM instruction. "+" is
+// special-cased in genBinaryValue: it's ADD for Numeric operands but
+// CONCAT for String's Concatenable "+" (amifl-spec.md section 6).
+var binaryInstr = map[string]string{
+	"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "MOD",
+	"&": "BAND", "|": "BOR", "^": "BXOR", "&^": "BCLEAR",
+	"<<": "SHL", ">>": "SHR",
+	"==": "EQ", "!=": "NEQ", "<": "LT", "<=": "LTE", ">": "GT", ">=": "GTE",
+	"&&": "AND", "||": "OR",
+}
+
+// binaryResultIsBool is the set of operators whose AMIVM instruction
+// always produces a bool, regardless of their operands' (equal) type —
+// comparisons and logical operators. Every other operator's result has
+// the same type as its operands (BinaryExpr.ResolvedType).
+var binaryResultIsBool = map[string]bool{
+	"==": true, "!=": true, "<": true, "<=": true, ">": true, ">=": true,
+	"&&": true, "||": true,
+}
+
+// genBinaryValue lowers a BinaryExpr to a sequence of instructions
+// computing it into a fresh temp variable, returning that variable as the
+// value token for the enclosing context — AMIVM's arithmetic/comparison/
+// logical instructions are strictly three-address (`single = a op b`),
+// so a nested expression like `a + b * c` has to be flattened into one
+// instruction per operator, each writing to its own temp.
+func (g *gen) genBinaryValue(v *ast.BinaryExpr) (string, error) {
+	leftVal, err := g.genValue(v.Left)
+	if err != nil {
+		return "", err
+	}
+	rightVal, err := g.genValue(v.Right)
+	if err != nil {
+		return "", err
+	}
+
+	instr, ok := binaryInstr[v.Op]
+	if !ok {
+		return "", fmt.Errorf("codegen: unsupported operator %q", v.Op)
+	}
+	if v.Op == "+" && v.ResolvedType == "String" {
+		instr = "CONCAT"
+	}
+
+	resultType := v.ResolvedType
+	if binaryResultIsBool[v.Op] {
+		resultType = "Bool"
+	}
+	goType, ok := goTypeNames[resultType]
+	if !ok {
+		return "", fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", resultType)
+	}
+
+	tmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, goType)
+	fmt.Fprintf(g.b, "\t%s\t%%%s\t%s\t%s\n", instr, tmp, leftVal, rightVal)
+	return "%" + tmp, nil
+}
+
+// unaryInstr maps a UnaryExpr's Op to its AMIVM instruction. There is no
+// entry for "-": AMIVM has no unary-negate instruction (only BNOT/NOT for
+// ~/!), so genUnaryValue synthesizes it instead — either as an inline
+// negative literal token when possible, or via SUB otherwise (see
+// genUnaryValue's doc comment).
+var unaryInstr = map[string]string{
+	"!": "NOT",
+	"~": "BNOT",
+}
+
+// genUnaryValue lowers a UnaryExpr. `!`/`~` map directly to AMIVM's
+// NOT/BNOT. `-` has no AMIVM instruction of its own (CLAUDE.md's "AMIVM-IR
+// の書き方" instruction list has no unary negate) — but amivm's `integer`/
+// `number` operand categories directly accept a leading '-'
+// (`ignored/amivm/amivm_spec.md` section 5's `integer1 integer2` /
+// `number1 number2` rows), so a `-` applied to a literal (or a chain of
+// `-` over a literal, or a const that ultimately is one — literalToken
+// unwraps all of that) needs no instruction at all: it's just rendered as
+// a signed literal token, exactly like any other literal. Only `-` applied
+// to a non-literal value (a variable, a call, another operator's result)
+// needs an actual instruction, synthesized as `0 - operand` since that's
+// the one arithmetic instruction AMIVM does have.
+func (g *gen) genUnaryValue(v *ast.UnaryExpr) (string, error) {
+	if v.Op == "-" {
+		if tok, ok := literalToken(v, false); ok {
+			return tok, nil
+		}
+	}
+
+	operandVal, err := g.genValue(v.Operand)
+	if err != nil {
+		return "", err
+	}
+	goType, ok := goTypeNames[v.ResolvedType]
+	if !ok {
+		return "", fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", v.ResolvedType)
+	}
+
+	tmp := g.newTemp()
+	switch v.Op {
+	case "!", "~":
+		fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, goType)
+		fmt.Fprintf(g.b, "\t%s\t%%%s\t%s\n", unaryInstr[v.Op], tmp, operandVal)
+	case "-":
+		zero := "0"
+		if v.ResolvedType == "Float32" || v.ResolvedType == "Float64" {
+			zero = "0.0"
+		}
+		fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, goType)
+		fmt.Fprintf(g.b, "\tSUB\t%%%s\t%s\t%s\n", tmp, zero, operandVal)
+	default:
+		return "", fmt.Errorf("codegen: unsupported unary operator %q", v.Op)
+	}
+	return "%" + tmp, nil
+}
+
+// literalToken tries to render e as a single inline signed AMIVM literal
+// token, following const references and collapsing any chain of unary `-`
+// over a literal (toggling negate each time) into one sign. It reports
+// false when e isn't reducible this way (a variable, a call, a binary
+// expression, ...), meaning the caller must fall back to emitting real
+// instructions.
+func literalToken(e ast.Expr, negate bool) (string, bool) {
+	switch v := e.(type) {
+	case *ast.IntLit:
+		s := strconv.FormatUint(v.Value, 10)
+		if negate {
+			return "-" + s, true
+		}
+		return s, true
+	case *ast.FloatLit:
+		s := formatFloatLit(v.Value)
+		if negate {
+			return "-" + s, true
+		}
+		return s, true
+	case *ast.IdentExpr:
+		if v.ConstValue != nil {
+			return literalToken(v.ConstValue, negate)
+		}
+		return "", false
+	case *ast.UnaryExpr:
+		if v.Op == "-" {
+			return literalToken(v.Operand, !negate)
+		}
+		return "", false
+	default:
+		return "", false
 	}
 }
 

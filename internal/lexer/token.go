@@ -23,6 +23,29 @@ const (
 	Comma
 	Colon
 	Assign
+
+	// Operators (amifl-spec.md section 6).
+	Plus     // +
+	Minus    // -
+	Star     // *
+	Slash    // /
+	Percent  // %
+	Amp      // &
+	Pipe     // |
+	Caret    // ^
+	AmpCaret // &^
+	Tilde    // ~
+	Shl      // <<
+	Shr      // >>
+	AndAnd   // &&
+	OrOr     // ||
+	Bang     // !
+	EqEq     // ==
+	NotEq    // !=
+	Lt       // <
+	Lte      // <=
+	Gt       // >
+	Gte      // >=
 )
 
 func (k Kind) String() string {
@@ -65,6 +88,48 @@ func (k Kind) String() string {
 		return "':'"
 	case Assign:
 		return "'='"
+	case Plus:
+		return "'+'"
+	case Minus:
+		return "'-'"
+	case Star:
+		return "'*'"
+	case Slash:
+		return "'/'"
+	case Percent:
+		return "'%'"
+	case Amp:
+		return "'&'"
+	case Pipe:
+		return "'|'"
+	case Caret:
+		return "'^'"
+	case AmpCaret:
+		return "'&^'"
+	case Tilde:
+		return "'~'"
+	case Shl:
+		return "'<<'"
+	case Shr:
+		return "'>>'"
+	case AndAnd:
+		return "'&&'"
+	case OrOr:
+		return "'||'"
+	case Bang:
+		return "'!'"
+	case EqEq:
+		return "'=='"
+	case NotEq:
+		return "'!='"
+	case Lt:
+		return "'<'"
+	case Lte:
+		return "'<='"
+	case Gt:
+		return "'>'"
+	case Gte:
+		return "'>='"
 	default:
 		return "unknown token"
 	}
