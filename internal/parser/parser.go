@@ -249,9 +249,46 @@ func (p *parser) parseTypeExpr() (ast.TypeExpr, error) {
 		return p.parseSetType(nameTok)
 	case "Map":
 		return p.parseMapType(nameTok)
+	case "Tuple2", "Tuple3", "Tuple4", "Tuple5", "Tuple6", "Tuple7", "Tuple8":
+		return p.parseTupleType(nameTok)
 	default:
 		return &ast.NamedType{Name: nameTok.Value, Line: nameTok.Line}, nil
 	}
+}
+
+// parseTupleType parses `Tuple2[T1,T2]` ... `Tuple8[T1,...,T8]`
+// (amifl-spec.md section 2.2) — step 11, see ast.TupleType's doc comment
+// for why this arrived later than List/Array/Set/Map's own bracket syntax
+// (step 7/10). nameTok is already known to be one of "Tuple2".."Tuple8"
+// (the switch above), so the digit right after "Tuple" is always exactly
+// one ASCII byte — wantN below reads it directly rather than pulling in
+// strconv/strings for a single-character parse.
+func (p *parser) parseTupleType(nameTok lexer.Token) (ast.TypeExpr, error) {
+	wantN := int(nameTok.Value[len("Tuple")] - '0')
+	if _, err := p.expect(lexer.LBracket); err != nil {
+		return nil, err
+	}
+	var elems []ast.TypeExpr
+	for {
+		elem, err := p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
+		elems = append(elems, elem)
+		if p.cur.Kind != lexer.Comma {
+			break
+		}
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RBracket); err != nil {
+		return nil, err
+	}
+	if len(elems) != wantN {
+		return nil, p.errorf("line %d: %s expects %d type argument(s), got %d", nameTok.Line, nameTok.Value, wantN, len(elems))
+	}
+	return &ast.TupleType{Elems: elems, Line: nameTok.Line}, nil
 }
 
 // parseSetType parses `Set[Elem]` (amifl-spec.md section 2.2) — step 10.
@@ -642,11 +679,16 @@ func (p *parser) parsePipeRHS(lhs ast.Expr) (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
+	typeArg, err := p.parseGenericTypeArgBracket(nameTok)
+	if err != nil {
+		return nil, err
+	}
 	if p.cur.Kind != lexer.LParen {
 		// `a |> f` — f takes lhs as its sole argument (amifl-spec.md
 		// section 9, "省略時は第1引数へ左辺値を注入する", the degenerate
-		// no-other-args case).
-		return &ast.CallExpr{Callee: nameTok.Value, Args: []ast.Expr{lhs}, Line: nameTok.Line}, nil
+		// no-other-args case). Also covers `a |> unwrap[T]`/`a |> cast[T]`
+		// (parseGenericTypeArgBracket already consumed the bracket above).
+		return &ast.CallExpr{Callee: nameTok.Value, Args: []ast.Expr{lhs}, Line: nameTok.Line, TypeArg: typeArg}, nil
 	}
 	if err := p.advance(); err != nil { // consume '('
 		return nil, err
@@ -700,7 +742,7 @@ func (p *parser) parsePipeRHS(lhs ast.Expr) (ast.Expr, error) {
 	} else {
 		args = append([]ast.Expr{lhs}, args...)
 	}
-	return &ast.CallExpr{Callee: nameTok.Value, Args: args, Line: nameTok.Line}, nil
+	return &ast.CallExpr{Callee: nameTok.Value, Args: args, Line: nameTok.Line, TypeArg: typeArg}, nil
 }
 
 // The chain implements amifl-spec.md section 6's precedence table
@@ -809,6 +851,14 @@ func (p *parser) parsePostfixExpr() (ast.Expr, error) {
 			if err != nil {
 				return nil, err
 			}
+		case lexer.Question:
+			// Postfix `?` (amifl-spec.md section 3.3) — error-short-circuit
+			// on a Tuple2[T,Error]/Error-returning expression.
+			questionLine := p.cur.Line
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			expr = &ast.TryExpr{Value: expr, Line: questionLine}
 		default:
 			return expr, nil
 		}
@@ -1578,13 +1628,58 @@ func (p *parser) parseIdentOrCall() (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
+	typeArg, err := p.parseGenericTypeArgBracket(nameTok)
+	if err != nil {
+		return nil, err
+	}
 	if p.cur.Kind == lexer.LParen {
-		return p.parseCallArgs(nameTok)
+		call, err := p.parseCallArgs(nameTok)
+		if err != nil {
+			return nil, err
+		}
+		call.(*ast.CallExpr).TypeArg = typeArg
+		return call, nil
+	}
+	if typeArg != nil {
+		return nil, p.errorf("line %d: expected '(' after %s[...]", p.cur.Line, nameTok.Value)
 	}
 	if p.cur.Kind == lexer.LBrace && !p.noCompositeLit {
 		return p.parseStructLit(nameTok)
 	}
 	return &ast.IdentExpr{Name: nameTok.Value, Line: nameTok.Line}, nil
+}
+
+// genericBuiltinNames is the fixed set of reserved built-in names that take
+// a bracketed type argument (amifl-spec.md sections 13.3/13.9): `cast[T]`/
+// `parse[T]`/`unwrap[T]`/`okOr[T]`. Recognized only for these four reserved
+// names — see ast.CallExpr.TypeArg's doc comment for why this isn't a
+// general user-facing generics grammar. Any other identifier followed by
+// `[` is ordinary indexing (parsePostfixExpr), untouched.
+var genericBuiltinNames = map[string]bool{
+	"cast": true, "parse": true, "unwrap": true, "okOr": true,
+}
+
+// parseGenericTypeArgBracket consumes an optional `[Type]` immediately
+// following nameTok, returning the parsed type (nil if nameTok isn't one of
+// genericBuiltinNames or isn't followed by `[`). Shared by parseIdentOrCall
+// (ordinary call position) and parsePipeRHS (pipe RHS position) so both
+// `cast[Int](v)` and `v |> cast[Int]`/`v |> okOr[Int](0)` parse the same
+// bracket syntax identically.
+func (p *parser) parseGenericTypeArgBracket(nameTok lexer.Token) (ast.TypeExpr, error) {
+	if !genericBuiltinNames[nameTok.Value] || p.cur.Kind != lexer.LBracket {
+		return nil, nil
+	}
+	if err := p.advance(); err != nil { // consume '['
+		return nil, err
+	}
+	typeArg, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RBracket); err != nil {
+		return nil, err
+	}
+	return typeArg, nil
 }
 
 func (p *parser) parseCallArgs(nameTok lexer.Token) (ast.Expr, error) {

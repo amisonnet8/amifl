@@ -80,6 +80,8 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 		return fc.resolveForExpr(v, expected)
 	case *ast.SwitchExpr:
 		return fc.resolveSwitchExpr(v, expected)
+	case *ast.TryExpr:
+		return fc.resolveTryExpr(v)
 	case *ast.ClosureLit:
 		// A ClosureLit only ever reaches resolveType from somewhere other
 		// than resolveLetExpr's own dedicated check (which intercepts it
@@ -160,6 +162,10 @@ func (fc *funcChecker) resolveCallExpr(v *ast.CallExpr) (string, error) {
 		return unitType, nil
 	}
 
+	if typ, ok, err := fc.resolveBuiltinCall(v); ok {
+		return typ, err
+	}
+
 	if b, ok := fc.lookup(v.Callee); ok {
 		if !isFuncType(b.typ) {
 			return "", fmt.Errorf("line %d: %q is not callable (it has type %s)", v.Line, v.Callee, b.typ)
@@ -182,6 +188,45 @@ func (fc *funcChecker) resolveCallExpr(v *ast.CallExpr) (string, error) {
 	}
 
 	return "", fmt.Errorf("line %d: undefined function %q", v.Line, v.Callee)
+}
+
+// resolveTryExpr type-checks the postfix `?` operator (amifl-spec.md
+// section 3.3). v.Value must resolve to Tuple2[U,Error] (the common case —
+// TryExpr's own type is then U, the unwrapped payload) or to bare Error
+// (v.IsBareError — TryExpr's own type is then Unit, since there is no
+// payload to unwrap; nothing in step 11 actually produces a bare
+// Error-returning call yet, but the check is written to accept one
+// uniformly rather than special-casing "unreachable for now" away — step
+// 12's `close`/13.10's file I/O will start reaching it). Either way, the
+// *enclosing* function/closure's own declared return type (fc.retType) —
+// independent of what v.Value's type happens to be — must itself be
+// Tuple2[_,Error] or bare Error, since that's the shape genTryValue's
+// early-return path constructs when propagating (17.2節#1 explicitly rules
+// out generalizing `?` beyond this 2-type convention).
+func (fc *funcChecker) resolveTryExpr(v *ast.TryExpr) (string, error) {
+	valTyp, err := fc.checkExpr(v.Value, "")
+	if err != nil {
+		return "", err
+	}
+
+	var resultTyp string
+	if isErrorType(valTyp) {
+		v.IsBareError = true
+		resultTyp = unitType
+	} else if payload, ok := tuple2ErrorPayload(valTyp); ok {
+		v.ElemType = payload
+		resultTyp = payload
+	} else {
+		return "", fmt.Errorf("line %d: `?` requires a Tuple2[T,Error] or Error-typed expression, got %s", v.Line, valTyp)
+	}
+
+	if !isErrorType(fc.retType) {
+		if _, ok := tuple2ErrorPayload(fc.retType); !ok {
+			return "", fmt.Errorf("line %d: `?` can only be used inside a function/closure returning Tuple2[U,Error] or Error, got %s", v.Line, fc.retType)
+		}
+	}
+
+	return resultTyp, nil
 }
 
 func (fc *funcChecker) checkCallArgs(v *ast.CallExpr, params []string) error {
@@ -728,9 +773,11 @@ func (fc *funcChecker) resolveClosureLit(v *ast.ClosureLit) (string, error) {
 	fc.pushScope()
 	savedLoopDepth := fc.loopDepth
 	fc.loopDepth = 0
+	savedRetType := fc.retType
 
 	typ, err := fc.checkClosureBody(v, depth)
 
+	fc.retType = savedRetType
 	fc.loopDepth = savedLoopDepth
 	fc.popScope()
 	fc.closureDepth--
@@ -767,6 +814,7 @@ func (fc *funcChecker) checkClosureBody(v *ast.ClosureLit, depth int) (string, e
 		return "", err
 	}
 	v.ResolvedReturnType = retType
+	fc.retType = retType
 	if _, err := fc.checkBlock(v.Body, retType); err != nil {
 		return "", err
 	}
@@ -1531,6 +1579,19 @@ func (fc *funcChecker) resolveTypeExpr(te ast.TypeExpr) (string, error) {
 			return "", err
 		}
 		return makeMapType(key, val), nil
+	case *ast.TupleType:
+		elemTypes := make([]string, len(t.Elems))
+		for i, e := range t.Elems {
+			et, err := fc.resolveTypeExpr(e)
+			if err != nil {
+				return "", err
+			}
+			if isTupleType(et) || isFuncType(et) {
+				return "", fmt.Errorf("line %d: a tuple element cannot itself be a tuple or a function value (nested tuples aren't supported yet)", e.Pos())
+			}
+			elemTypes[i] = et
+		}
+		return makeTupleType(elemTypes), nil
 	default:
 		return "", fmt.Errorf("sema: unsupported type expression %T", te)
 	}

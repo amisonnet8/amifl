@@ -1432,3 +1432,135 @@ func TestGenerate_ForTwoVarsOverMapEmitsMpkeysAgetMget(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerate_IsErrorEmitsNeqNil(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "isError", Builtin: "isError", ResolvedType: "Bool",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "e", ResolvedType: "Error", Token: "%e_1"}},
+		ArgTypes: []string{"Error"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "ok", Token: "%ok_1", ResolvedType: "Bool", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{"VAR\t%amifl_tmp1\t^bool", "NEQ\t%amifl_tmp1\t%e_1\tnil"} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_CastEmitsTypeConversionCall(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "cast", Builtin: "cast", ResolvedType: "Float64",
+		Args:     []ast.Expr{&ast.IntLit{Value: 7}},
+		ArgTypes: []string{"Int64"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "x", Token: "%x_1", ResolvedType: "Float64", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{"VAR\t%amifl_tmp1\t^float64", "CALL\t%amifl_tmp1\t:\t?float64\t7"} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_ParseNarrowsResultAndBuildsTuple2(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "parse", Builtin: "parse", ResolvedType: "Tuple(Int8,Error)", ResolvedTypeArg: "Int8",
+		Args:     []ast.Expr{&ast.StringLit{Value: "5"}},
+		ArgTypes: []string{"String"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "r", Token: "%r_1", ResolvedType: "Tuple(Int8,Error)", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	// strconv.ParseInt always returns a raw int64 regardless of T's own
+	// width (parseTargetInfo) — Int8 needs one extra CALL-as-conversion to
+	// narrow amifl_tmp1 down before it goes into the tuple's F0 field.
+	for _, want := range []string{
+		"VAR\t%amifl_tmp1\t^int64",
+		"VAR\t%amifl_tmp2\t^error",
+		"CALL\t%amifl_tmp1\t%amifl_tmp2\t:\t?strconv.ParseInt\t\"5\"\t10\t8",
+		"CALL\t%amifl_tmp3\t:\t?int8\t%amifl_tmp1",
+		"FSET\t%amifl_tmp4\t>F0\t%amifl_tmp3",
+		"FSET\t%amifl_tmp4\t>F1\t%amifl_tmp2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_TryOperatorEmitsEarlyReturnTuple(t *testing.T) {
+	tryExpr := &ast.TryExpr{
+		Value:    &ast.IdentExpr{Name: "r", ResolvedType: "Tuple(Int64,Error)", Token: "%r_1"},
+		ElemType: "Int64",
+	}
+	fn := &ast.FuncDecl{
+		Name:               "f",
+		ResolvedReturnType: "Tuple(Int64,Error)",
+		Body: &ast.Block{Exprs: []ast.Expr{
+			&ast.LetExpr{Name: "x", Token: "%x_2", ResolvedType: "Int64", Value: tryExpr},
+			&ast.IdentExpr{Name: "x", ResolvedType: "Int64", Token: "%x_2"},
+		}},
+	}
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, fn)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"FGET\t%amifl_tmp1\t%r_1\t>F0",
+		"FGET\t%amifl_tmp2\t%r_1\t>F1",
+		"NEQ\t%amifl_tmp3\t%amifl_tmp2\tnil",
+		"IF\t%amifl_tmp3",
+		"FSET\t%amifl_tmp4\t>F1\t%amifl_tmp2",
+		"RET\t%amifl_tmp4",
+		"ENDIF",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_TryOperatorOnBareErrorEmitsEarlyReturnOfErrorItself(t *testing.T) {
+	tryExpr := &ast.TryExpr{
+		Value:       &ast.IdentExpr{Name: "e", ResolvedType: "Error", Token: "%e_1"},
+		IsBareError: true,
+	}
+	fn := &ast.FuncDecl{
+		Name:               "f",
+		ResolvedReturnType: "Error",
+		Body: &ast.Block{Exprs: []ast.Expr{
+			tryExpr,
+			&ast.IdentExpr{Name: "e2", ResolvedType: "Error", Token: "%e2_9"},
+		}},
+	}
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, fn)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"NEQ\t%amifl_tmp1\t%e_1\tnil",
+		"IF\t%amifl_tmp1",
+		"RET\t%e_1",
+		"ENDIF",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+	if strings.Contains(ir, "FGET") {
+		t.Errorf("bare-Error `?` shouldn't FGET anything (no Tuple2 payload to extract); got:\n%s", ir)
+	}
+}

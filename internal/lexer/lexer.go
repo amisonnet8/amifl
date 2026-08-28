@@ -169,6 +169,9 @@ func (l *Lexer) Next() (Token, error) {
 	case c == '!':
 		l.pos++
 		return Token{Kind: Bang, Line: line}, nil
+	case c == '?':
+		l.pos++
+		return Token{Kind: Question, Line: line}, nil
 	case c == '"':
 		return l.lexString(line)
 	case isDigit(c):

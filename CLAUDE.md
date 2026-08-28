@@ -203,7 +203,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 8 ✅ | `enum`・`switch`拡張 | バリアント定義・値生成、`switch`での判定/フィールド取り出し、バリアント網羅性検査 | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` `IF` `ELSE` `ENDIF` `EQ`（新規命令ゼロ、Step 6/4の既存命令のみで実現） | 設計課題4（enum表現、下記「確定した設計判断」参照） |
 | 9 ✅ | パイプ演算子`|>` | `_`プレースホルダー、`for...yield`糖衣、`|>`の優先順位（最低） | （新規命令無し。糖衣構文） | 設計課題7（下記「確定した設計判断」参照） |
 | 10 ✅ | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5（下記「確定した設計判断」参照） |
-| 11 | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開 | （`amiflrt`+ネイティブ命令の混在） | **設計課題6（capability多相の実装方式）** |
+| 11 🚧 | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開。フェーズ分割で進行中：11a✅（`Error`型・`?`演算子・`cast[T]`/`parse[T]`ブラケット構文・`isError`・組み込み関数dispatch基盤）→11b（13.4節データ操作）→11c（13.5/13.6節Set/Map専用）→11d（13.7節数値・`unwrap`/`okOr`） | （`amiflrt`+ネイティブ命令の混在） | **設計課題6（capability多相の実装方式）** |
 | 12 | ファイルI/O・`Stream[T]`・並列処理 | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣、`spawn`/`send`/`recv`/`parallel` | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` `SPAWN` `SEL` `CASESEND` `CASERECV` `DEFAULT` `ENDSEL` `DEFER` | — |
 | 13 | `extern`機構 | Go資産バインド（15.1〜15.4節）、`Any`型境界の実装方式確定 | `ASSERT`（要否は設計課題1による） | **設計課題1（先例無し・最大の山場の1つ）** |
 | 14 | モジュール | `import`/エイリアス/可視性/循環禁止（12節） | — | — |
@@ -534,6 +534,24 @@ Step 7で確立した`for`の下げ方（`?len`→インクリメント優先`LO
 ### 実地検証（`amivm`→`go build`→実行）で確認した項目（Step 10）
 
 `examples/sets_maps.aml`で以下を確認済み：`Set[Int]`型注釈付きリテラル（重複要素の脱重複を含む）とその`for x in s`反復、型注釈無しの`Set`リテラル推論（`{10,20,30}`）、`Map[String,Int]`型注釈付きリテラルとその`for k, v in m`反復、`Map[String,List[Int]]`（値がコレクション型のMap）とそのネストした反復（`for k, xs in m { for x in xs { ... } }`）、型注釈無しの`Set[Tuple2[Int,Int]]`相当（タプル要素のSet、`Tuple2[...]`型注釈構文自体は書けないため`let`の値から推論させ、関数化せず`main`内にインライン化——Step 6の「タプル型注釈構文は実装していない」というスコープ制限がここで初めて実地で影響した）、注釈付き空`{}`（`Set[Int]`・`Map[String,Int]`の両方）。生成されたIRを目視確認し、`Set`/`Map`リテラルがMPMAKE+MSETの繰り返しへ、`for`反復がMPKEYS+既存Listループへ正しく下がっていることを確認。実行結果は終了コード82（`sTotal+emptySetTotal+mTotal+emptyMapTotal+inferredTotal+tsTotal+mmTotal = 6+0+6+0+60+4+6 = 82`という手計算と一致）を確認。加えて、注釈無し空`{}`（型推論不能エラー）・struct要素のSet（比較可能型エラー）・`for k,v in m yield ...`（パースエラー）・Set形リテラルをMap注釈へ束縛（型不一致エラー）の4パターンを手動でCLIから確認し、いずれも期待どおりコンパイルエラーになることを確認した。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。
+
+### Step 11フェーズ11a：`Error`型・`?`演算子・`cast[T]`/`parse[T]`ブラケット構文・組み込み関数dispatch基盤
+
+Step 11着手時にユーザーと合意した設計方針（capability多相はコンパイル時モノモーフィック解決、`Tuple2[T,Error]`は`amiflrt`側がGoネイティブ複数戻り値を返しcodegenがその場で`STTYPE`を組み立てる、`cast[T]`/`parse[T]`/`unwrap[T]`/`okOr[T]`のみブラケット構文を許可）に基づき、まず全体の基盤となる部分から実装した。
+
+**組み込み関数dispatchの基盤**：`ast.CallExpr`に`Builtin string`（解決した組み込み関数の正規名）・`TypeArg`/`ResolvedTypeArg`（ブラケット型引数）・`ArgTypes []string`（各引数の解決済み型、`Args`と並行配列）を追加した。`internal/sema/builtins.go`が`builtinFuncs map[string]builtinResolver`という単一のレジストリを持ち、`resolveCallExpr`は`"print"`の特別扱いの直後・クロージャー/トップレベル`fn`探索の直前でこのレジストリを参照する——「print」が最初から持っていた「組み込みはユーザー宣言より呼び出し箇所で優先される」という前例をそのまま踏襲した（宣言時点でのユーザー宣言拒否はしない）。**13節の組み込み関数名は全て事前に予約した**——Step 11で未実装の名前（`typeName`・`13.8`のChan/Stream系・`13.10`のファイルI/O・`13.1`の`print`以外）も`notYetImplemented(step, reason)`が生成する専用エラーメッセージでレジストリに登録しておくことで、「未定義関数」ではなく「まだ実装されていない予約済み組み込み関数」という区別のつくエラーになる（該当ステップが来るまでの間、ユーザーが同名の関数を書いても静かに何か別の意味になることがない）。`builtinFuncs`は`var`の直接初期化ではなく`init()`内で構築している——各リゾルバー関数が（引数の型検査を通じて）間接的に`resolveBuiltinCall`を呼び戻せる可能性があり、Goの初期化順序解析が「参照される関数の本体まで辿って依存関係とみなす」ため、素朴な`var`初期化だと自己参照サイクルとしてコンパイルエラーになる（`go build`で発覚、`init()`に切り出すことで解消——CLAUDE.mdの「実地検証必須」が効いた一例）。
+
+**`Error`型**：Go の`error`インターフェースとして表現（`codegen.goTypeNames["Error"] = "error"`）。`nil`が「エラー無し」を表し、`VAR`宣言だけで正しいゼロ値になる。`isError(v: Error) -> Bool`は`NEQ %tmp v nil`一発——amiflrtも専用命令も不要。仕様の`isError(v: Any) -> Bool`という記述は、`print`（Step 1）と同じ「呼び出し箇所ごとにモノモーフィックに解決される無制約多相」の`Any`と解釈し、`Error`が既に具象型として存在する以上、素直に`Error`固定引数として実装した。
+
+**`cast[T](v: Numeric) -> T`**：Goの型変換をそのままCALLで呼ぶ（Step 1の`main`/`amifl_main`ブリッジで確立した`CALL %dest : ?<GoType> %src`パターンの再利用）。`T`はNumeric capability（Int系/UInt系/Float系）に制限。
+
+**`parse[T](s: String) -> Tuple2[T, Error]`**：`T`の種類（符号付き/符号無し整数・浮動小数点・Bool）に応じて`strconv.ParseInt`/`ParseUint`/`ParseFloat`/`ParseBool`のいずれかを`CALL`の複数戻り値形（過去に踏まれた地雷#6）で直接呼ぶ。`strconv`の戻り値は常に`int64`/`uint64`/`float64`/`bool`（幅の狭い型を返すエントリポイントが無い）なので、`T`が`Int8`のような狭い型の場合は`cast`と同じCALL-as-conversionをもう一段挟んで narrowing する。得られたpayload/errorペアから、`VAR`+`FSET`×2でTuple2の`STTYPE`をその場で組み立てる——設計方針で決めた「amiflrtはGoネイティブ複数戻り値、codegenがTuple2を組み立てる」パターンの最初の実例。
+
+**`Tuple2[T1,T2]`〜`Tuple8[...]`型注釈構文を新設した（Step 6のスコープ外だった機能の追加）**：`parse[T]`の戻り値を受けるユーザー定義関数の戻り値注釈として`-> Tuple2[Int, Error]`のように書く必要が生じ、実装を始めてから`examples/errors.aml`のコンパイルで初めて発覚した——Step 6は「タプルリテラル自体が要素の型を完全に決定するため、型注釈を書く動機が薄い」という理由でタプルの型注釈構文（`Tuple2[...]`をパースする文法）を意図的に実装していなかったが、**関数シグネチャにはそもそも参照できるリテラルが無い**ため、この前提が成り立たない。`ast.TupleType{Elems []TypeExpr}`を新設し、パーサーの`parseTypeExpr`が`"Tuple2"`〜`"Tuple8"`という名前を特別扱いして`[T1,...,TN]`をパースする（`N`は名前の数字部分と実際の要素数の一致をパーサー自身が検証するため、semaの`resolveTypeExpr`は要素ごとの型解決とネストしたTuple/Func要素の禁止——`resolveTupleLit`と同じ制約——だけを行えばよい）。List/Array/Set/Mapのブラケット構文（Step 7/10）が先に存在した「型注釈用のブラケットジェネリクス」という枠組みにTupleが乗るだけの拡張で、新しい構文カテゴリを増やしたわけではない。
+
+**`?`演算子（postfix、`ast.TryExpr`）**：AmiFLには元々`return`文が無い（式指向、末尾の式が暗黙の戻り値）ため、`?`はAmiFL史上初めて「関数の途中から早期return する」構文になった。実装は次の3段階：(1) `v.Value`を評価し、Tuple2[U,Error]なら`FGET`で`F0`（payload）と`F1`（error）を、bare Errorならそのまま値自体をerrorとして扱う、(2) `NEQ`+`IF`でerrorが非nilかを判定し、真ならその場で早期`RET`する、(3) 分岐を抜けたら（＝errorがnilだったら）payloadを式全体の値として返す。早期returnの値は**自分を囲む関数/クロージャーの宣言済み戻り値型**（`v.Value`自身の型ではない）に依存するため、sema側に`funcChecker.retType`（`checkFunc`で設定、クロージャー境界では`resolveClosureLit`が保存/復元——ループ深度と同じ扱い）、codegen側に`gen.retType`（`genFuncDecl`で設定、`genClosureLitInto`が保存/復元）という、既存の`loopDepth`/`closureDepth`と同型の「現在のコンテキストを表す状態」を新設した。早期return値の構築は、**`VAR`宣言だけで対象の型のGoゼロ値が得られる**という既存の規律（Step 2以来）を利用し、Tuple2[U,Error]なら`VAR`で丸ごとゼロ初期化してから`F1`（error）だけ`FSET`する（`F0`のpayloadはゼロ値のまま——ペイロードの中身はエラー時に意味を持たないため問題ない）、bare Errorなら値そのものを直接`RET`するだけで済む——ゼロ値を明示的に構築するコードが一切不要という、既存の設計判断の再利用がそのまま効いた例。
+
+**実地検証（`amivm`→`go build`→実行）で確認した項目**：`examples/errors.aml`——`?`で最初の`parse[Int]`の失敗を早期returnする関数（`parseSumTry`）、その関数を成功ケース（`"10"`,`"20"`）・失敗ケース（`"not a number"`,`"5"`）の両方で呼び出し`isError`で判定、`cast[Float64]`→`cast[Int64]`の往復キャスト。生成されたIRを目視確認し、`?`が`FGET`×2→`NEQ`→`IF`→`FSET`+`RET`→`ENDIF`という想定どおりの列に展開されていること、`parse`が`strconv.ParseInt`の2値CALLとTuple2の`FSET`組み立てへ正しく下がっていることを確認。実行結果は終了コード142（`r1.0(30) + bonus(100, ok2=true) + roundTrip(12) = 142`という手計算と一致）を確認。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。
 
 ## 開発の進め方
 

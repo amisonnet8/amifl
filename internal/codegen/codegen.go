@@ -37,6 +37,11 @@ var goTypeNames = map[string]string{
 	"UInt8": "uint8", "UInt16": "uint16", "UInt32": "uint32", "UInt64": "uint64",
 	"Float32": "float32", "Float64": "float64",
 	"Bool": "bool", "String": "string",
+	// Error (amifl-spec.md section 2.2, step 11) is Go's own `error`
+	// interface — nil is its zero/no-error value, which is exactly what a
+	// bare `VAR` declaration already produces with no further codegen
+	// needed (see errors.go's emitEarlyReturn).
+	"Error": "error",
 }
 
 // Generate lowers a sema-checked AmiFL file into AMIVM-IR text. Step 5
@@ -136,7 +141,7 @@ func genFuncDecl(prog *program, out *strings.Builder, fn *ast.FuncDecl) error {
 	}
 	out.WriteString("\n")
 
-	g := &gen{b: out, prog: prog}
+	g := &gen{b: out, prog: prog, retType: fn.ResolvedReturnType}
 	if fn.ResolvedReturnType == unitType {
 		if err := g.genStmtBlock(fn.Body.Exprs); err != nil {
 			return err
@@ -170,6 +175,15 @@ type gen struct {
 	b      *strings.Builder
 	tmpSeq int
 	prog   *program
+	// retType is the AmiFL return type of the function/closure body
+	// currently being generated — step 11's postfix `?` (errors.go) needs
+	// it to build the early-return value it RETs when propagating an
+	// error, since that value's shape depends on the *enclosing* function's
+	// own return type, not TryExpr.Value's. Set once in genFuncDecl for a
+	// top-level `fn`, saved/restored around genClosureLitInto exactly like
+	// sema's funcChecker.retType (its doc comment explains why a closure
+	// needs its own, independent value here).
+	retType string
 }
 
 // newTemp mints a fresh internal variable name for a binary/unary
@@ -297,7 +311,8 @@ func (g *gen) genStmt(e ast.Expr) error {
 		// `2` ending the else-branch in the doc comment's example above.
 		return nil
 	case *ast.TupleLit, *ast.StructLit, *ast.FieldExpr,
-		*ast.ListLit, *ast.SetOrMapLit, *ast.IndexExpr, *ast.SliceExpr:
+		*ast.ListLit, *ast.SetOrMapLit, *ast.IndexExpr, *ast.SliceExpr,
+		*ast.TryExpr:
 		// Unlike the pure-value kinds above, these may themselves contain
 		// an effectful call — `_ = Point{x: sideEffecting(), y: 2}` must
 		// still run sideEffecting() even though the resulting Point is
@@ -329,6 +344,9 @@ func (g *gen) genCallStmt(c *ast.CallExpr) error {
 		g.writeCall("", "?fmt.Println", []string{arg})
 		return nil
 	}
+	if c.Builtin != "" {
+		return g.genBuiltinStmt(c)
+	}
 	calleeToken, err := g.calleeToken(c)
 	if err != nil {
 		return err
@@ -345,6 +363,9 @@ func (g *gen) genCallStmt(c *ast.CallExpr) error {
 // (its return type is non-Unit): declares a fresh temp of the call's
 // result type and receives the CALL's result into it.
 func (g *gen) genCallValue(c *ast.CallExpr) (string, error) {
+	if c.Builtin != "" {
+		return g.genBuiltinValue(c)
+	}
 	calleeToken, err := g.calleeToken(c)
 	if err != nil {
 		return "", err
@@ -400,6 +421,24 @@ func (g *gen) writeCall(dest, calleeToken string, args []string) {
 		g.b.WriteString("\t")
 	}
 	g.b.WriteString(":\t")
+	g.b.WriteString(calleeToken)
+	for _, a := range args {
+		g.b.WriteString("\t")
+		g.b.WriteString(a)
+	}
+	g.b.WriteString("\n")
+}
+
+// writeCallMulti is writeCall's counterpart for a callee returning more
+// than one Go value (amivm_spec.md section 4.13's "multi1, multi2 ...")
+// — step 11's built-ins that call a Go stdlib function returning a
+// (value, error)/(value, ok) pair (e.g. strconv.ParseInt, CLAUDE.md's 過去
+// に踏まれた地雷 #6) capture both results directly rather than going
+// through Go's single-value idiom.
+func (g *gen) writeCallMulti(dests []string, calleeToken string, args []string) {
+	g.b.WriteString("\tCALL\t")
+	g.b.WriteString(strings.Join(dests, "\t"))
+	g.b.WriteString("\t:\t")
 	g.b.WriteString(calleeToken)
 	for _, a := range args {
 		g.b.WriteString("\t")
@@ -597,6 +636,8 @@ func (g *gen) genValue(e ast.Expr) (string, error) {
 		return g.genSwitchValue(v)
 	case *ast.ForExpr:
 		return g.genForYieldValue(v)
+	case *ast.TryExpr:
+		return g.genTryValue(v)
 	default:
 		return "", fmt.Errorf("codegen: %T is not a value expression (sema should have rejected this)", e)
 	}

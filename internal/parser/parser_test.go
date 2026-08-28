@@ -1342,3 +1342,118 @@ func TestParse_SwitchWithoutSubjectStillDesugarsToIfExpr(t *testing.T) {
 		t.Fatalf("got %#v, want *ast.IfExpr", parseFuncMain(t, f).Body.Exprs[0])
 	}
 }
+
+func TestParse_PostfixTryOperator(t *testing.T) {
+	src := "fn main() -> Int {\n    let x = parse[Int](s)?\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	tryExpr, ok := let.Value.(*ast.TryExpr)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.TryExpr", let.Value)
+	}
+	if _, ok := tryExpr.Value.(*ast.CallExpr); !ok {
+		t.Fatalf("got %#v, want TryExpr.Value to be *ast.CallExpr", tryExpr.Value)
+	}
+}
+
+func TestParse_GenericBuiltinCallParsesTypeArg(t *testing.T) {
+	src := "fn main() -> Int {\n    let x = cast[Int8](200)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	call, ok := let.Value.(*ast.CallExpr)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.CallExpr", let.Value)
+	}
+	if call.Callee != "cast" {
+		t.Fatalf("got Callee %q, want \"cast\"", call.Callee)
+	}
+	named, ok := call.TypeArg.(*ast.NamedType)
+	if !ok || named.Name != "Int8" {
+		t.Fatalf("got TypeArg %#v, want *ast.NamedType{Name: \"Int8\"}", call.TypeArg)
+	}
+	if len(call.Args) != 1 {
+		t.Fatalf("got %d args, want 1", len(call.Args))
+	}
+}
+
+func TestParse_GenericBuiltinCallWithoutBracketLeavesTypeArgNil(t *testing.T) {
+	src := "fn main() -> Int {\n    let x = len(xs)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	call := let.Value.(*ast.CallExpr)
+	if call.TypeArg != nil {
+		t.Fatalf("got TypeArg %#v, want nil for a non-generic call", call.TypeArg)
+	}
+}
+
+func TestParse_PipeIntoGenericBuiltinNoParens(t *testing.T) {
+	src := "fn main() -> Int {\n    let x = t |> unwrap[Int]\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	call, ok := let.Value.(*ast.CallExpr)
+	if !ok || call.Callee != "unwrap" {
+		t.Fatalf("got %#v, want *ast.CallExpr{Callee: \"unwrap\"}", let.Value)
+	}
+	if len(call.Args) != 1 {
+		t.Fatalf("got %d args, want 1 (lhs injected as the sole argument)", len(call.Args))
+	}
+	if named, ok := call.TypeArg.(*ast.NamedType); !ok || named.Name != "Int" {
+		t.Fatalf("got TypeArg %#v, want *ast.NamedType{Name: \"Int\"}", call.TypeArg)
+	}
+}
+
+func TestParse_PipeIntoGenericBuiltinWithParens(t *testing.T) {
+	src := "fn main() -> Int {\n    let x = t |> okOr[Int](0)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	call := let.Value.(*ast.CallExpr)
+	if call.Callee != "okOr" || len(call.Args) != 2 {
+		t.Fatalf("got Callee=%q len(Args)=%d, want \"okOr\" with 2 args", call.Callee, len(call.Args))
+	}
+}
+
+func TestParse_Tuple2TypeAnnotation(t *testing.T) {
+	src := "fn f() -> Tuple2[Int, Error] {\n    (1, 2)\n}\nfn main() -> Int {\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name == "f" {
+			fn = fd
+		}
+	}
+	if fn == nil {
+		t.Fatal("fn f not found")
+	}
+	tt, ok := fn.ReturnType.(*ast.TupleType)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.TupleType", fn.ReturnType)
+	}
+	if len(tt.Elems) != 2 {
+		t.Fatalf("got %d elems, want 2", len(tt.Elems))
+	}
+}
+
+func TestParse_TupleTypeArityMismatchIsAnError(t *testing.T) {
+	src := "fn f() -> Tuple2[Int, Error, Bool] {\n    (1, 2)\n}\nfn main() -> Int {\n    0\n}\n"
+	if _, err := Parse(src); err == nil {
+		t.Fatal("expected an error for Tuple2[...] given 3 type arguments")
+	}
+}

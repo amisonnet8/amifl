@@ -28,6 +28,8 @@ var scalarTypes = map[string]bool{
 	"UInt8": true, "UInt16": true, "UInt32": true, "UInt64": true,
 	"Float32": true, "Float64": true,
 	"Bool": true, "String": true,
+	// Error (amifl-spec.md section 2.2, step 11) — see isErrorType.
+	"Error": true,
 }
 
 // unitType is the implicit type of a `let`/`const`/assignment/discard
@@ -316,6 +318,25 @@ func forIterableElemType(t string) (string, bool) {
 // for struct-keyed Set/Map appears.
 func isComparableKeyType(t string) bool {
 	return isIntType(t) || isFloatType(t) || t == "Bool" || t == "String" || isTupleType(t)
+}
+
+// isErrorType reports whether t is the built-in Error type (amifl-spec.md
+// section 2.2) — a Go `error` value under the hood (codegen's goTypeNames).
+func isErrorType(t string) bool {
+	return t == "Error"
+}
+
+// tuple2ErrorPayload reports whether t is exactly Tuple2[U,Error] for some
+// U, returning U — amifl-spec.md's "戻り値は常に単数、複数値はTuple2[T,
+// Error]のような統一形で包む" convention (principle 6), used by the `?`
+// operator (resolveTryExpr) and by every built-in function returning one
+// (sema/builtins.go).
+func tuple2ErrorPayload(t string) (payload string, ok bool) {
+	elems, ok := tupleTypeParts(t)
+	if !ok || len(elems) != 2 || elems[1] != "Error" {
+		return "", false
+	}
+	return elems[0], true
 }
 
 func isIntType(name string) bool {

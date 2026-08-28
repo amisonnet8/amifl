@@ -313,6 +313,7 @@ func (c *checker) registerFuncSig(fn *ast.FuncDecl) error {
 func (c *checker) checkFunc(fn *ast.FuncDecl) error {
 	sig := c.funcs[fn.Name]
 	fc := newFuncChecker(c)
+	fc.retType = sig.ret
 	for i, p := range fn.Params {
 		token := fmt.Sprintf("$%d", i+1)
 		if err := fc.declare(p.Name, &binding{typ: sig.params[i], token: token}); err != nil {

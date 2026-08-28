@@ -131,13 +131,19 @@ func (g *gen) genClosureLitInto(token string, lit *ast.ClosureLit) error {
 	}
 	g.b.WriteString("\n")
 
+	savedRetType := g.retType
+	g.retType = lit.ResolvedReturnType
+	var bodyErr error
 	if lit.ResolvedReturnType == unitType {
-		if err := g.genStmtBlock(lit.Body.Exprs); err != nil {
-			return err
+		if bodyErr = g.genStmtBlock(lit.Body.Exprs); bodyErr == nil {
+			g.b.WriteString("\tRET\n")
 		}
-		g.b.WriteString("\tRET\n")
-	} else if err := g.genBlock(lit.Body.Exprs); err != nil {
-		return err
+	} else {
+		bodyErr = g.genBlock(lit.Body.Exprs)
+	}
+	g.retType = savedRetType
+	if bodyErr != nil {
+		return bodyErr
 	}
 	g.b.WriteString("\tENDCLOS\n")
 	return nil

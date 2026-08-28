@@ -65,6 +65,7 @@ const (
 	Gt        // >
 	Gte       // >=
 	PipeArrow // |>
+	Question  // ?
 )
 
 func (k Kind) String() string {
@@ -187,6 +188,8 @@ func (k Kind) String() string {
 		return "'>='"
 	case PipeArrow:
 		return "'|>'"
+	case Question:
+		return "'?'"
 	default:
 		return "unknown token"
 	}

@@ -1,0 +1,221 @@
+// builtins.go type-checks amifl-spec.md section 13's built-in function
+// library (step 11) — everything except "print" (still resolveCallExpr's
+// own step-1 special case) and the handful of syntax-level built-ins that
+// already had dedicated AST nodes before step 11 (`x[i]`/`x[i]=v`/
+// `x[a:b]` -> at/setAt/slice, amifl-spec.md section 3.2 — CLAUDE.md's
+// "確定した設計判断" for step 7 explains why those stay on their own nodes
+// rather than funneling through here).
+//
+// Every built-in name in the *complete* section-13 list is reserved via
+// builtinFuncs below, even ones step 11's approved scope doesn't implement
+// yet (Stream/Chan-facing capabilities, file I/O, typeName — see CLAUDE.md's
+// design-issue-6/-1 notes) — reserving the whole namespace up front means a
+// name step 12/13 later gives real behavior to can never have quietly meant
+// something else (an undefined-function error) in code written today; it
+// instead gives a clear "not yet implemented" error pointing at the actual
+// reason, self-documenting which step will pick it up.
+package sema
+
+import (
+	"fmt"
+
+	"github.com/amisonnet8/amifl/internal/ast"
+)
+
+// builtinResolver type-checks one built-in call (v.Args and, for the four
+// generic ones, v.TypeArg already parsed but not yet resolved) and returns
+// its result type. Each resolver is responsible for its own arity/type
+// checking and for filling v.ArgTypes (and v.ResolvedTypeArg, for a generic
+// one) — codegen/builtins.go's per-capability dispatch reads those back
+// rather than re-deriving them.
+type builtinResolver func(fc *funcChecker, v *ast.CallExpr) (string, error)
+
+// notYetImplemented produces a builtinResolver that always reports a clear
+// "reserved for a later step" error — see the package doc comment above.
+func notYetImplemented(step, reason string) builtinResolver {
+	return func(fc *funcChecker, v *ast.CallExpr) (string, error) {
+		return "", fmt.Errorf("line %d: %q is a reserved built-in name not implemented until %s (%s)", v.Line, v.Callee, step, reason)
+	}
+}
+
+// builtinFuncs is the complete section-13 built-in name registry (minus
+// "print", handled directly in resolveCallExpr — see this file's package
+// doc comment). Everything still out of step 11's approved scope routes
+// through notYetImplemented so the name stays reserved without behaving
+// like an ordinary undefined identifier. Populated by an init() rather than
+// directly in this var's own initializer: every resolver function here
+// transitively calls back into resolveBuiltinCall (via checkExpr on a call
+// argument that might itself be a built-in call) which reads this same map
+// — a literal initializer referencing those functions would make Go's
+// initialization-order analysis see that as a self-referential dependency
+// cycle (it inspects referenced functions' bodies, not just direct
+// variable references) even though nothing is actually read until Check()
+// runs, long after package initialization finishes.
+var builtinFuncs map[string]builtinResolver
+
+func init() {
+	builtinFuncs = map[string]builtinResolver{
+		// 13.1 出力・終了 — "print" is resolveCallExpr's own special case
+		// (unchanged since step 1); the rest of 13.1 was never in step 11's
+		// approved scope (CLAUDE.md's step-11 design note keeps `print`
+		// String-only until a dedicated later pass generalizes 13.1 as a
+		// whole) but is reserved here so it can't be redefined in the
+		// meantime.
+		"eprint":     notYetImplemented("a later pass", "amifl-spec.md section 13.1 generalization, deferred alongside print"),
+		"format":     notYetImplemented("a later pass", "amifl-spec.md section 13.1 generalization, deferred alongside print"),
+		"formatWith": notYetImplemented("a later pass", "amifl-spec.md section 13.1 generalization, deferred alongside print"),
+		"exit":       notYetImplemented("a later pass", "amifl-spec.md section 13.1 generalization, deferred alongside print"),
+
+		// 13.2 型・値判定
+		"typeName": notYetImplemented("step 13", "requires the Any/extern value boundary — CLAUDE.md design issue 1"),
+		"isError":  resolveIsError,
+
+		// 13.3 変換
+		"cast":  resolveCast,
+		"parse": resolveParse,
+
+		// 13.9 エラー処理 (wired up in phase 11d)
+		"unwrap": notYetImplemented("this step's later phase (11d)", "amifl-spec.md section 13.9"),
+		"okOr":   notYetImplemented("this step's later phase (11d)", "amifl-spec.md section 13.9"),
+
+		// 13.8 チャネル・ストリーム・並列
+		"chan":     notYetImplemented("step 12", "requires Chan[T]/goroutines"),
+		"send":     notYetImplemented("step 12", "requires Chan[T]/goroutines"),
+		"recv":     notYetImplemented("step 12", "requires Chan[T]/goroutines"),
+		"spawn":    notYetImplemented("step 12", "requires Chan[T]/goroutines"),
+		"parallel": notYetImplemented("step 12", "requires Chan[T]/goroutines"),
+		"collect":  notYetImplemented("step 12", "requires Stream[T]"),
+		"take":     notYetImplemented("step 12", "requires Stream[T]"),
+		"skip":     notYetImplemented("step 12", "requires Stream[T]"),
+		"tap":      notYetImplemented("step 12", "requires Stream[T]/pipeline DX"),
+		"peek":     notYetImplemented("step 12", "requires Stream[T]/pipeline DX"),
+
+		// 13.10 ファイルI/O
+		"open":     notYetImplemented("step 12", "requires File"),
+		"close":    notYetImplemented("step 12", "requires File"),
+		"read":     notYetImplemented("step 12", "requires File"),
+		"readAll":  notYetImplemented("step 12", "requires File"),
+		"readLine": notYetImplemented("step 12", "requires File"),
+		"lines":    notYetImplemented("step 12", "requires File/Stream[T]"),
+		"write":    notYetImplemented("step 12", "requires File"),
+		"stdin":    notYetImplemented("step 12", "requires File"),
+		"stdout":   notYetImplemented("step 12", "requires File"),
+		"stderr":   notYetImplemented("step 12", "requires File"),
+	}
+}
+
+// resolveBuiltinCall checks whether v.Callee names a section-13 built-in
+// (print excluded — resolveCallExpr's own caller already special-cases it
+// first) and, if so, type-checks it fully and returns (type, true, err).
+// Returns ("", false, nil) for any other name, letting resolveCallExpr fall
+// through to its usual closure-variable/top-level-`fn` lookup — built-ins
+// take priority over a same-named user declaration at a call site exactly
+// the way "print" already does (CLAUDE.md's established precedent; a user
+// `fn`/`let` sharing a built-in's name isn't rejected at declaration time,
+// only shadowed at any call to it, unchanged from how "print" already
+// behaves).
+func (fc *funcChecker) resolveBuiltinCall(v *ast.CallExpr) (string, bool, error) {
+	resolver, ok := builtinFuncs[v.Callee]
+	if !ok {
+		return "", false, nil
+	}
+	typ, err := resolver(fc, v)
+	if err != nil {
+		return "", true, err
+	}
+	v.Builtin = v.Callee
+	v.ResolvedType = typ
+	return typ, true, nil
+}
+
+// resolveIsError type-checks `isError(v: Error) -> Bool` (amifl-spec.md
+// section 13.2). The spec writes this as `(v: Any) -> Bool`, but — exactly
+// like `print`'s own step-1 "確定した設計判断" — that's the "無制約な多相
+// 引数, monomorphized at each call site" sense of Any, not the true dynamic
+// `extern`-boundary Any (section 2.2); since Error is already its own
+// concrete type, the natural monomorphic instantiation here is simply
+// Error itself, not a genuinely unconstrained parameter.
+func resolveIsError(fc *funcChecker, v *ast.CallExpr) (string, error) {
+	if len(v.Args) != 1 {
+		return "", fmt.Errorf("line %d: isError expects exactly 1 argument, got %d", v.Line, len(v.Args))
+	}
+	argTyp, err := fc.checkExpr(v.Args[0], "Error")
+	if err != nil {
+		return "", err
+	}
+	v.ArgTypes = []string{argTyp}
+	return "Bool", nil
+}
+
+// resolveCast type-checks `cast[T](v: Numeric) -> T` (amifl-spec.md section
+// 13.3) — T restricted to the Numeric capability (2.3節: Int系/UInt系/
+// Float系), matching Go's own numeric-conversion rule this compiles
+// directly to (codegen/builtins.go).
+func resolveCast(fc *funcChecker, v *ast.CallExpr) (string, error) {
+	targetTyp, err := fc.requireNumericTypeArg(v, "cast")
+	if err != nil {
+		return "", err
+	}
+	if len(v.Args) != 1 {
+		return "", fmt.Errorf("line %d: cast expects exactly 1 argument, got %d", v.Line, len(v.Args))
+	}
+	argTyp, err := fc.checkExpr(v.Args[0], "")
+	if err != nil {
+		return "", err
+	}
+	if !isIntType(argTyp) && !isFloatType(argTyp) {
+		return "", fmt.Errorf("line %d: cast: argument must be a numeric type, got %s", v.Line, argTyp)
+	}
+	v.ArgTypes = []string{argTyp}
+	return targetTyp, nil
+}
+
+// resolveParse type-checks `parse[T](s: String) -> Tuple2[T, Error]`
+// (amifl-spec.md section 13.3) — T restricted to Numeric or Bool ("文字列
+// →数値/真偽値へのパース").
+func resolveParse(fc *funcChecker, v *ast.CallExpr) (string, error) {
+	targetTyp, err := fc.requireTypeArg(v, "parse")
+	if err != nil {
+		return "", err
+	}
+	if !isIntType(targetTyp) && !isFloatType(targetTyp) && targetTyp != "Bool" {
+		return "", fmt.Errorf("line %d: parse[%s]: T must be a numeric or Bool type", v.Line, targetTyp)
+	}
+	if len(v.Args) != 1 {
+		return "", fmt.Errorf("line %d: parse expects exactly 1 argument, got %d", v.Line, len(v.Args))
+	}
+	if _, err := fc.checkExpr(v.Args[0], "String"); err != nil {
+		return "", err
+	}
+	v.ArgTypes = []string{"String"}
+	return makeTupleType([]string{targetTyp, "Error"}), nil
+}
+
+// requireTypeArg resolves v.TypeArg (already parsed, since v.Callee is one
+// of parser.genericBuiltinNames) to its canonical type and records it on
+// v.ResolvedTypeArg, erroring if the bracket was omitted entirely.
+func (fc *funcChecker) requireTypeArg(v *ast.CallExpr, name string) (string, error) {
+	if v.TypeArg == nil {
+		return "", fmt.Errorf("line %d: %s requires an explicit type argument: %s[T](...)", v.Line, name, name)
+	}
+	typ, err := fc.resolveTypeExpr(v.TypeArg)
+	if err != nil {
+		return "", err
+	}
+	v.ResolvedTypeArg = typ
+	return typ, nil
+}
+
+// requireNumericTypeArg is requireTypeArg plus the Numeric-capability check
+// shared by cast[T] and any other built-in restricted to Int系/UInt系/
+// Float系 (amifl-spec.md section 2.3).
+func (fc *funcChecker) requireNumericTypeArg(v *ast.CallExpr, name string) (string, error) {
+	typ, err := fc.requireTypeArg(v, name)
+	if err != nil {
+		return "", err
+	}
+	if !isIntType(typ) && !isFloatType(typ) {
+		return "", fmt.Errorf("line %d: %s[%s]: T must be a numeric type", v.Line, name, typ)
+	}
+	return typ, nil
+}

@@ -2320,3 +2320,132 @@ func TestCheck_ForSingleVarOverMapIsAnError(t *testing.T) {
 		t.Fatal("expected an error for a single-variable `for` over a Map (needs `for k, v in m`)")
 	}
 }
+
+// tuple2t builds a Tuple2[a,b] type annotation (ast.TupleType) — step 11's
+// counterpart to sett/mapt above.
+func tuple2t(a, b ast.TypeExpr) ast.TypeExpr {
+	return &ast.TupleType{Elems: []ast.TypeExpr{a, b}}
+}
+
+func TestCheck_TupleTypeAnnotationResolves(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name:       "f",
+		ReturnType: tuple2t(nt("Int"), nt("Error")),
+		Body: &ast.Block{Exprs: []ast.Expr{
+			&ast.TupleLit{Elems: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}}},
+		}},
+	})
+	fn := f.Decls[1].(*ast.FuncDecl)
+	// Body deliberately returns a bogus Tuple2[Int,Int] (not Tuple2[Int,
+	// Error]) so this test only exercises ReturnType resolution — a
+	// mismatched body should fail Check, proving ResolvedReturnType really
+	// was compared against.
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: body returns Tuple2[Int,Int], not the declared Tuple2[Int,Error]")
+	}
+	if fn.ResolvedReturnType != "Tuple(Int64,Error)" {
+		t.Fatalf("got ResolvedReturnType %q, want Tuple(Int64,Error)", fn.ResolvedReturnType)
+	}
+}
+
+func TestCheck_IsErrorRequiresErrorArg(t *testing.T) {
+	f := mainFile(
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "isError", Args: []ast.Expr{&ast.IntLit{Value: 1}}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for isError(Int) — Int isn't Error")
+	}
+}
+
+func TestCheck_CastResolvesToTypeArg(t *testing.T) {
+	call := &ast.CallExpr{Callee: "cast", TypeArg: nt("Float64"), Args: []ast.Expr{&ast.IntLit{Value: 7}}}
+	f := mainFile(&ast.LetExpr{Name: "x", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Float64" {
+		t.Fatalf("got ResolvedType %q, want Float64", call.ResolvedType)
+	}
+}
+
+func TestCheck_CastRejectsNonNumericTypeArg(t *testing.T) {
+	call := &ast.CallExpr{Callee: "cast", TypeArg: nt("String"), Args: []ast.Expr{&ast.IntLit{Value: 7}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for cast[String](...) — String isn't Numeric")
+	}
+}
+
+func TestCheck_CastWithoutTypeArgIsAnError(t *testing.T) {
+	call := &ast.CallExpr{Callee: "cast", Args: []ast.Expr{&ast.IntLit{Value: 7}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for cast(...) with no bracketed type argument")
+	}
+}
+
+func TestCheck_ParseReturnsTuple2OfTargetAndError(t *testing.T) {
+	call := &ast.CallExpr{Callee: "parse", TypeArg: nt("Int"), Args: []ast.Expr{&ast.StringLit{Value: "42"}}}
+	f := mainFile(&ast.LetExpr{Name: "r", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Tuple(Int64,Error)" {
+		t.Fatalf("got ResolvedType %q, want Tuple(Int64,Error)", call.ResolvedType)
+	}
+}
+
+func TestCheck_ParseRejectsNonNumericNonBoolTypeArg(t *testing.T) {
+	call := &ast.CallExpr{Callee: "parse", TypeArg: nt("String"), Args: []ast.Expr{&ast.StringLit{Value: "x"}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for parse[String](...) — String is neither Numeric nor Bool")
+	}
+}
+
+func TestCheck_TryOperatorUnwrapsTuple2Payload(t *testing.T) {
+	tryExpr := &ast.TryExpr{Value: &ast.CallExpr{Callee: "parse", TypeArg: nt("Int"), Args: []ast.Expr{&ast.IdentExpr{Name: "s"}}}}
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:       "f",
+			Params:     []ast.Param{{Name: "s", Type: nt("String")}},
+			ReturnType: tuple2t(nt("Int"), nt("Error")),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "x", Value: tryExpr},
+				&ast.TupleLit{Elems: []ast.Expr{&ast.IdentExpr{Name: "x"}, &ast.IdentExpr{Name: "x"}}},
+			}},
+		},
+		&ast.FuncDecl{Name: "main", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}},
+	}}
+	// The tail TupleLit deliberately returns (x, x) (Tuple2[Int,Int]), not
+	// Tuple2[Int,Error] — Check should still fail on *that* mismatch, but
+	// resolveTryExpr's own work (unwrapping the payload type) must already
+	// have completed without error before that final check runs.
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: body's tail returns Tuple2[Int,Int], not the declared Tuple2[Int,Error]")
+	}
+	if tryExpr.ElemType != "Int64" {
+		t.Fatalf("got ElemType %q, want Int64", tryExpr.ElemType)
+	}
+	if tryExpr.IsBareError {
+		t.Fatal("got IsBareError true, want false for a Tuple2[Int,Error] operand")
+	}
+}
+
+func TestCheck_TryOperatorOutsideFallibleFuncIsAnError(t *testing.T) {
+	tryExpr := &ast.TryExpr{Value: &ast.CallExpr{Callee: "parse", TypeArg: nt("Int"), Args: []ast.Expr{&ast.StringLit{Value: "1"}}}}
+	f := mainFile(&ast.DiscardExpr{Value: tryExpr}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: `?` used inside `main`, which returns plain Int, not Tuple2[_,Error]/Error")
+	}
+}
+
+func TestCheck_TryOperatorOnNonTuple2NonErrorIsAnError(t *testing.T) {
+	tryExpr := &ast.TryExpr{Value: &ast.IntLit{Value: 1}}
+	f := mainFile(&ast.DiscardExpr{Value: tryExpr}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: `?` on a plain Int isn't Tuple2[_,Error] or Error")
+	}
+}

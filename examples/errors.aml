@@ -1,0 +1,26 @@
+fn parseSumTry(a: String, b: String) -> Tuple2[Int, Error] {
+    let x = parse[Int](a)?
+    let py = parse[Int](b)
+    (x + py.0, py.1)
+}
+
+fn main() -> Int {
+    let r1 = parseSumTry("10", "20")
+    let ok1 = isError(r1.1)
+
+    let r2 = parseSumTry("not a number", "5")
+    let ok2 = isError(r2.1)
+
+    let roundTrip = cast[Int64](cast[Float64](12))
+
+    let bonus = if ok2 { 100 } else { 0 }
+    let total = r1.0 + bonus + roundTrip
+
+    if ok1 {
+        print("unexpected error on r1")
+    } else {
+        print("r1 ok")
+    }
+
+    total
+}

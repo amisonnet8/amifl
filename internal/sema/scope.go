@@ -180,6 +180,17 @@ type funcChecker struct {
 	loopDepth    int
 	closureDepth int
 	declSeq      int
+	// retType is the declared return type of the function/closure whose
+	// body is currently being checked — step 11's postfix `?`
+	// (resolveTryExpr) needs it to enforce amifl-spec.md section 3.3's
+	// "自分を囲む関数の戻り値がTuple2[U,Error]（またはError単体）の場合に
+	// のみ使用可" restriction. Set once in Check's checkFunc for a
+	// top-level `fn`; saved/restored around checkClosureBody exactly like
+	// loopDepth (a closure's own declared return type governs `?` inside
+	// its body, not the enclosing function's — a `?` can't reach past a
+	// closure boundary any more than break/continue can, amifl-spec.md
+	// section 8's closures being ordinary functions in this respect).
+	retType string
 }
 
 func newFuncChecker(c *checker) *funcChecker {

@@ -80,17 +80,35 @@ type MapType struct {
 	Line  int
 }
 
+// TupleType is `Tuple2[T1,T2]` ... `Tuple8[T1,...,T8]` (amifl-spec.md
+// section 2.2) — step 11, added once a user-defined function's return type
+// needed to spell Tuple2[T,Error] (section 13.9's error-handling
+// convention): step 6 deliberately left Tuple's own type-annotation syntax
+// unimplemented (a tuple *literal* alone fully determines its type — see
+// CLAUDE.md's "確定した設計判断" for step 6), but a bare function signature
+// has no literal to infer from, so parse[T]/cast[T]-style built-ins
+// returning Tuple2[T,Error] turned out to need this after all. The parser
+// (parseTupleType) already validates len(Elems) against the digit in the
+// type name itself ("Tuple2" through "Tuple8"), so sema's resolveTypeExpr
+// never has to re-check arity here.
+type TupleType struct {
+	Elems []TypeExpr
+	Line  int
+}
+
 func (*NamedType) typeExprNode() {}
 func (*ListType) typeExprNode()  {}
 func (*ArrayType) typeExprNode() {}
 func (*SetType) typeExprNode()   {}
 func (*MapType) typeExprNode()   {}
+func (*TupleType) typeExprNode() {}
 
 func (n *NamedType) Pos() int { return n.Line }
 func (n *ListType) Pos() int  { return n.Line }
 func (n *ArrayType) Pos() int { return n.Line }
 func (n *SetType) Pos() int   { return n.Line }
 func (n *MapType) Pos() int   { return n.Line }
+func (n *TupleType) Pos() int { return n.Line }
 
 // TopLevelDecl is a top-level declaration: *FuncDecl or *ConstDecl.
 // AmiFL forbids top-level `let` (amifl-spec.md section 4, principle 5) —
@@ -300,6 +318,20 @@ type CallExpr struct {
 	Callee string
 	Args   []Expr
 	Line   int
+	// TypeArg is the bracketed type argument for the four reserved generic
+	// builtins `cast[T]`/`parse[T]`/`unwrap[T]`/`okOr[T]` (amifl-spec.md
+	// sections 13.3/13.9) — nil for every other call, including a call to a
+	// Builtin that doesn't take one. This is surface syntax the parser
+	// recognizes only for those four reserved names (parseIdentOrCall/
+	// parsePipeRHS), never a general user-facing generics grammar
+	// (principle 4, "ユーザー拡張ポイントを絞る" — no user generics). Always
+	// exactly one type (none of the four ever takes more), unlike AMIVM's
+	// own CALL instruction which allows several — a single field rather
+	// than a slice keeps that arity fixed at the type level.
+	TypeArg TypeExpr
+	// ResolvedTypeArg holds TypeArg after sema resolves it to its canonical
+	// type string (see sema/builtins.go) — "" when TypeArg is nil.
+	ResolvedTypeArg string
 
 	// filled in by sema:
 	ResolvedType string
@@ -313,6 +345,19 @@ type CallExpr struct {
 	// know that internal-naming detail (ast is sema's and codegen's only
 	// shared vocabulary; neither package depends on the other).
 	CalleeToken string
+	// Builtin is the canonical name of the step-11 built-in function this
+	// call resolved to (e.g. "len", "contains", "cast") — empty for
+	// "print" (still its own step-1 special case), a user `fn` call, or a
+	// closure call. See sema/builtins.go's resolveBuiltinCall and
+	// codegen/builtins.go's genBuiltinValue/genBuiltinStmt for the two ends
+	// of this dispatch.
+	Builtin string
+	// ArgTypes is Args' own resolved canonical types, parallel to Args —
+	// filled by sema for every Builtin call so codegen's per-capability
+	// dispatch never has to re-derive an argument's type from the AST
+	// itself (mirroring how every other Resolved* field here exists so
+	// codegen only ever reads what sema already computed).
+	ArgTypes []string
 }
 
 // ClosureLit is `fn(params) -> R { body }` used as an expression — a
@@ -529,6 +574,29 @@ type SliceExpr struct {
 	Line   int
 
 	ResolvedType string // filled by sema: always makeListType(elemType)
+}
+
+// TryExpr is the postfix `?` operator (amifl-spec.md section 3.3): "戻り値
+// がTuple2[T, Error]である呼び出し式の直後にのみ書ける後置演算子" — Value
+// must resolve to Tuple2[U,Error] (IsBareError false, ElemType == U) or to
+// bare Error itself (IsBareError true — a call like `close(f)?` once step
+// 12 adds functions returning a bare Error; nothing produces one yet in
+// step 11, but sema's check is written to accept it uniformly rather than
+// special-casing "not yet reachable" away). Compiles to an early `RET` out
+// of the *enclosing function* (not the enclosing block) when the error is
+// non-nil, propagating a zero value in every earlier return slot alongside
+// it (amifl-spec.md: "エラーがあればゼロ値＋エラーで即returnする糖衣") —
+// which is why sema restricts this to a function whose own return type is
+// itself Tuple2[_,Error] or Error (checked against the enclosing
+// funcChecker's declared return type, not Value's), never generalizing to
+// a 3rd type the way 17.2節#1 explicitly rules out.
+type TryExpr struct {
+	Value Expr
+	Line  int
+
+	// filled by sema:
+	IsBareError bool   // true if Value's type is bare Error, not Tuple2[_,Error]
+	ElemType    string // Value's Tuple2[ElemType,Error] payload type; "" if IsBareError
 }
 
 // ForExpr is `for x in items { ... }` (amifl-spec.md section 7, Body set,
@@ -790,6 +858,7 @@ func (*IndexAssignExpr) exprNode() {}
 func (*SliceExpr) exprNode()       {}
 func (*ForExpr) exprNode()         {}
 func (*SwitchExpr) exprNode()      {}
+func (*TryExpr) exprNode()         {}
 
 func (n *ConstDecl) Pos() int       { return n.Line }
 func (n *LetExpr) Pos() int         { return n.Line }
@@ -818,3 +887,4 @@ func (n *IndexAssignExpr) Pos() int { return n.Line }
 func (n *SliceExpr) Pos() int       { return n.Line }
 func (n *ForExpr) Pos() int         { return n.Line }
 func (n *SwitchExpr) Pos() int      { return n.Line }
+func (n *TryExpr) Pos() int         { return n.Line }
