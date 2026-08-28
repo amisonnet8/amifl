@@ -1,0 +1,35 @@
+fn main() -> Int {
+    let a: Int = 5
+    let b: Int = 12
+    let mn = min(a, b)
+    let mx = max(a, b)
+    let ab = abs(0 - 7)
+    let cl = clamp(15, 0, 10)
+
+    let f: Float = 3.7
+    let rounded = round(f)
+    let floored = floor(f)
+    let ceiled = ceil(f)
+    let sq = sqrt(16.0)
+    let p = pow(2.0, 10.0)
+
+    let okResult = parse[Int]("42")
+    let unwrapped = unwrap(okResult)
+
+    let badResult = parse[Int]("nope")
+    let withDefault = okOr[Int](badResult, -1)
+
+    print("numeric ok")
+
+    let part1 = mn + mx + ab + cl
+    let roundedI = cast[Int64](rounded)
+    let flooredI = cast[Int64](floored)
+    let ceiledI = cast[Int64](ceiled)
+    let sqI = cast[Int64](sq)
+    let part2 = roundedI + flooredI + ceiledI + sqI
+    let pI = cast[Int64](p)
+    let part3 = pI + unwrapped + withDefault
+    let total = part1 + part2 + part3
+
+    total
+}

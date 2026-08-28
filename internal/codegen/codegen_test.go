@@ -1779,3 +1779,129 @@ func TestGenerate_MapEntriesBuildsTuple2ViaMpkeysAndMget(t *testing.T) {
 		}
 	}
 }
+
+// Phase 11d (amifl-spec.md sections 13.7/13.9) codegen tests.
+
+func TestGenerate_MinEmitsLtThenIfElse(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "min", Builtin: "min", ResolvedType: "Int64",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "a", ResolvedType: "Int64", Token: "%a_1"}, &ast.IdentExpr{Name: "b", ResolvedType: "Int64", Token: "%b_2"}},
+		ArgTypes: []string{"Int64", "Int64"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "r", Token: "%r_1", ResolvedType: "Int64", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"LT\t%amifl_tmp1\t%a_1\t%b_2",
+		"IF\t%amifl_tmp1",
+		"SET\t%amifl_tmp2\t%a_1",
+		"ELSE",
+		"SET\t%amifl_tmp2\t%b_2",
+		"ENDIF",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_AbsUsesZeroLiteralMatchingType(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "abs", Builtin: "abs", ResolvedType: "Float64",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "v", ResolvedType: "Float64", Token: "%v_1"}},
+		ArgTypes: []string{"Float64"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "r", Token: "%r_1", ResolvedType: "Float64", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "LT\t%amifl_tmp1\t%v_1\t0.0") {
+		t.Errorf("generated IR missing the 0.0-literal comparison (Float64 must use \"0.0\", not \"0\"); got:\n%s", ir)
+	}
+}
+
+func TestGenerate_PowNarrowsFloat32ThroughFloat64(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "pow", Builtin: "pow", ResolvedType: "Float32",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "base", ResolvedType: "Float32", Token: "%base_1"}, &ast.IdentExpr{Name: "exp", ResolvedType: "Float32", Token: "%exp_2"}},
+		ArgTypes: []string{"Float32", "Float32"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "r", Token: "%r_1", ResolvedType: "Float32", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"CALL\t%amifl_tmp1\t:\t?float64\t%base_1",
+		"CALL\t%amifl_tmp2\t:\t?float64\t%exp_2",
+		"CALL\t%amifl_tmp3\t:\t?math.Pow\t%amifl_tmp1\t%amifl_tmp2",
+		"CALL\t%amifl_tmp4\t:\t?float32\t%amifl_tmp3",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_UnwrapPanicsOnNonNilError(t *testing.T) {
+	tupleType := "Tuple(Int64,Error)"
+	call := &ast.CallExpr{
+		Callee: "unwrap", Builtin: "unwrap", ResolvedType: "Int64",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "t", ResolvedType: tupleType, Token: "%t_1"}},
+		ArgTypes: []string{tupleType},
+	}
+	f := mainFile(&ast.LetExpr{Name: "x", Token: "%x_1", ResolvedType: "Int64", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"FGET\t%amifl_tmp1\t%t_1\t>F0",
+		"FGET\t%amifl_tmp2\t%t_1\t>F1",
+		"NEQ\t%amifl_tmp3\t%amifl_tmp2\tnil",
+		"IF\t%amifl_tmp3",
+		"CALL\t:\t?panic\t%amifl_tmp2",
+		"ENDIF",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_OkOrPicksDefaultOnError(t *testing.T) {
+	tupleType := "Tuple(Int64,Error)"
+	call := &ast.CallExpr{
+		Callee: "okOr", Builtin: "okOr", ResolvedType: "Int64",
+		Args: []ast.Expr{
+			&ast.IdentExpr{Name: "t", ResolvedType: tupleType, Token: "%t_1"},
+			&ast.IntLit{Value: 0},
+		},
+		ArgTypes: []string{tupleType, "Int64"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "x", Token: "%x_1", ResolvedType: "Int64", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"FGET\t%amifl_tmp1\t%t_1\t>F0",
+		"FGET\t%amifl_tmp2\t%t_1\t>F1",
+		"NEQ\t%amifl_tmp3\t%amifl_tmp2\tnil",
+		"IF\t%amifl_tmp3",
+		"SET\t%amifl_tmp4\t0",
+		"ELSE",
+		"SET\t%amifl_tmp4\t%amifl_tmp1",
+		"ENDIF",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+	if strings.Contains(ir, "panic") {
+		t.Errorf("okOr should never panic (that's unwrap's job); got:\n%s", ir)
+	}
+}

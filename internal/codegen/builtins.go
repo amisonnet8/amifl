@@ -93,6 +93,28 @@ func (g *gen) genBuiltinValue(c *ast.CallExpr) (string, error) {
 		return g.genMapEntriesValue(c)
 	case "get":
 		return g.genMapGetValue(c)
+	case "min":
+		return g.genMinMaxValue(c, "LT")
+	case "max":
+		return g.genMinMaxValue(c, "GT")
+	case "abs":
+		return g.genAbsValue(c)
+	case "clamp":
+		return g.genClampValue(c)
+	case "round":
+		return g.genFloatUnaryValue(c, "?math.Round")
+	case "floor":
+		return g.genFloatUnaryValue(c, "?math.Floor")
+	case "ceil":
+		return g.genFloatUnaryValue(c, "?math.Ceil")
+	case "sqrt":
+		return g.genFloatUnaryValue(c, "?math.Sqrt")
+	case "pow":
+		return g.genPowValue(c)
+	case "unwrap":
+		return g.genUnwrapValue(c)
+	case "okOr":
+		return g.genOkOrValue(c)
 	default:
 		return "", fmt.Errorf("codegen: built-in %q has no value-position codegen yet", c.Builtin)
 	}

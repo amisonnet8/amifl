@@ -161,7 +161,7 @@ Seed/Cascadeが通っていない領域、あるいはAmiFL固有の設計判断
 3. ✅ **`Tuple2〜8`の実行時表現**：Step 6で確定。下記「確定した設計判断」参照（型ごとに発行する名前付き`STTYPE`、フィールド名`F0`〜、等値比較は許可）
 4. ✅ **`enum`（タグ付きバリアント）の実行時表現**：`switch`でのバリアント判定・フィールド取り出し専用（2.2節）、値生成は`型名.バリアント名(...)`という通常の式。Goには直接対応するネイティブ機構が無く、タグ（int）+バリアントごとに異なるフィールド集合、という表現が必要——Cascadeの`error`型実装（コンパイラが自動登録する`STTYPE`）や、複数バリアントを1つの`STTYPE`に全フィールドを`Union`的に持たせる案（Goの構造体は値型なので単純にフィールドを足せる）、複数の`STTYPE`+タグによる判別のどちらが良いか検討する。`switch`のバリアント網羅性検査（コンパイル時にバリアント集合が閉じている）はsemaが担う
 5. ✅ **`Set[T]`の実行時表現**：Step 10で確定。下記「確定した設計判断」参照（`MPTYPE ^T ^bool`、Cascadeの実績どおり）。要素順序は不定と明記済み（16.2節で解決済みの検討事項）なので、Goのmapイテレーション順序をそのまま使ってよい（Weaveのようにソートで決定的にする必要はない——`toList(_) |> sort`という運用に統一する方針が既に確定している）
-6. **`capability`（組み込み多相）の実装方式**：ユーザーには一切公開されない、コンパイラ内部限定の多相。各呼び出し箇所で引数の静的型からどの実装（`len`ならString/List/Array/Map/Set/Bytes/Chanのどれか）を使うか**コンパイル時に一意に確定**させ、その型専用のコード（ネイティブ命令 or `amiflrt`関数）を直接生成する——ジェネリクスも動的ディスパッチも不要な、最も単純な「多相」（各呼び出しが実質的にモノモーフィックにコンパイルされる）という理解でよいか、実装時に確認する
+6. ✅ **`capability`（組み込み多相）の実装方式**：Step 11で確定。下記「確定した設計判断」参照（仮説どおり、各呼び出し箇所が引数の静的型からコンパイル時に一意に実装を確定させる、実行時ディスパッチ皆無の完全なモノモーフィック多相として実装できた）
 7. ✅ **パイプ演算子`|>`のコード生成**：糖衣構文（9節）であり新しいAMIVM命令は不要——`a |> f`は単なる`f(a)`、`a |> f(_, b)`は`f(a, b)`への変換で完結する見込み。`for x in items yield expr`が`items |> map(x => expr)`の糖衣という規定（7節）が指す「`x => expr`」の構文自体が仕様の他箇所に明記が無い点は要確認（無名関数`fn(x) -> R {...}`と同じものと推測されるが、仕様側の確認が先）
 8. **`?`演算子とパイプラインDX機能（tap/peek・ステージ番号付きエラー表示）**：`?`自体はCascadeの後置`?`実装（8.6節「エラー処理」）がほぼそのまま参考になる。`tap`/`peek`（13.8節）・パイプラインの型不整合をステージ番号付きで示すコンパイルエラー表示（9.1節）はAmiFL独自のDX機能で先行実装が無く、sema側で新規に設計する必要がある
 
@@ -203,7 +203,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 8 ✅ | `enum`・`switch`拡張 | バリアント定義・値生成、`switch`での判定/フィールド取り出し、バリアント網羅性検査 | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` `IF` `ELSE` `ENDIF` `EQ`（新規命令ゼロ、Step 6/4の既存命令のみで実現） | 設計課題4（enum表現、下記「確定した設計判断」参照） |
 | 9 ✅ | パイプ演算子`|>` | `_`プレースホルダー、`for...yield`糖衣、`|>`の優先順位（最低） | （新規命令無し。糖衣構文） | 設計課題7（下記「確定した設計判断」参照） |
 | 10 ✅ | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5（下記「確定した設計判断」参照） |
-| 11 🚧 | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開。フェーズ分割で進行中：11a✅（`Error`型・`?`演算子・`cast[T]`/`parse[T]`ブラケット構文・`isError`・組み込み関数dispatch基盤）→11b✅（13.4節データ操作28関数）→11c✅（13.5/13.6節Set/Map専用）→11d（13.7節数値・`unwrap`/`okOr`） | （`amiflrt`+ネイティブ命令の混在） | **設計課題6（capability多相の実装方式）** |
+| 11 ✅ | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開。フェーズ分割で実施：11a✅（`Error`型・`?`演算子・`cast[T]`/`parse[T]`ブラケット構文・`isError`・組み込み関数dispatch基盤）→11b✅（13.4節データ操作28関数）→11c✅（13.5/13.6節Set/Map専用）→11d✅（13.7節数値・`unwrap`/`okOr`） | （`amiflrt`+ネイティブ命令の混在） | 設計課題6（capability多相の実装方式、下記「確定した設計判断」参照） |
 | 12 | ファイルI/O・`Stream[T]`・並列処理 | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣、`spawn`/`send`/`recv`/`parallel` | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` `SPAWN` `SEL` `CASESEND` `CASERECV` `DEFAULT` `ENDSEL` `DEFER` | — |
 | 13 | `extern`機構 | Go資産バインド（15.1〜15.4節）、`Any`型境界の実装方式確定 | `ASSERT`（要否は設計課題1による） | **設計課題1（先例無し・最大の山場の1つ）** |
 | 14 | モジュール | `import`/エイリアス/可視性/循環禁止（12節） | — | — |
@@ -589,6 +589,20 @@ Step 11着手時にユーザーと合意した設計方針（capability多相は
 **予約した組み込み名が既存コードと衝突し、実地でテスト失敗として発覚した**：`add`という名前を13.5節どおりSetの組み込み関数として予約したところ、既存の`examples/functions.aml`（Step5から存在する`fn add(a,b) -> Int`という単純な足し算関数）と`internal/sema/sema_test.go`の3つのテストが、`add(3,4)`のような呼び出しを「Setを第1引数に取る組み込みadd」と誤解釈するようになり、型エラーで壊れた——`add`のような一般的な英単語を組み込み名として予約すると、そのステップ以前に書かれた「普通の変数・関数名としての`add`」を使うコードが後から静かに（あるいはこのケースのように派手に）壊れうる、という初めての実例。対策は該当箇所を`addNums`のような衝突しない名前へリネームすること（CLAUDE.md「開発の進め方」7番の「後方互換性は現時点では意識しなくてよい」原則どおり、リネームで解決してよいと判断した）。
 
 **実地検証（`amivm`→`go build`→実行）で確認した項目**：`examples/set_map_ops.aml`——`add`/`discard`でSetを書き換えた後の`union`/`intersect`/`difference`/`toList`、`Map`の`keys`/`values`/`entries`/`get`（存在キー・不在キー両方）/`set`/`delete`を1つの関数内で連鎖させた。生成されたIRを目視確認し、`toList`/`keys`がどちらも同一の`MPKEYS`直呼びへ下がっていること、`get`が`MGET`のokフォーム+`IF`/`ELSE`になっていること、`entries`が`MPKEYS`→ループ内`MGET`+`FSET`になっていることを確認。実行結果は終了コード23（`union長5+intersect長1+difference長2+toList長3=11`＋`keys長3+values長3+entries長3=9`＋`get(存在)1+get(不在)-1+len(m)3=3`の合計）を確認。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み（`add`のリネームを反映した`examples/functions.aml`の終了コード109も再確認済み）。
+
+### Step 11フェーズ11d（最終フェーズ）：13.7節（数値）・13.9節（`unwrap`/`okOr`）——Step 11完了
+
+**`min`/`max`/`abs`/`clamp`は事前の設計方針どおり、型非依存の`IF`/`ELSE`直接生成で実現し、amiflrtを一切使わなかった**：`min(a,b)`は`LT`+`IF`/`ELSE`で勝った方をそのまま返すだけ、`max`は`GT`に差し替えるだけ。`abs(v)`は`IF v<0 THEN 0-v ELSE v`——符号付き/符号無しで分岐する必要が無い（符号無し型は`v<0`が常に偽になるだけで、分岐ロジック自体は同じコードで両方に対応できる。Step3の単項マイナス実装が確立した知見の再確認）。`clamp(v,lo,hi)`は`max(lo, min(v,hi))`という2回の同じ`IF`/`ELSE`パターンの合成で実装し、共通化のため`selectValue`という小さな内部ヘルパーへ切り出した。`min`/`max`は二項演算子と同じ`resolveOperandTypes`（Step3確立、非リテラル側を優先解決してからリテラル側を適応させる）を再利用でき、`min(x, 0)`のような呼び出しでリテラル`0`が`x`の実際の型（`Int8`等）へ正しく適応することを確認した。
+
+**`round`/`floor`/`ceil`/`sqrt`/`pow`は`Float`限定とし、`Float32`は`float64`経由で往復させる**：Goの`math`パッケージは`float64`専用のため、`Float32`引数はまず`?float64`でキャストしてから`math.Xxx`を呼び、結果を`?float32`で戻す——`parse[T]`が`strconv`の固定幅結果をnarrowingしたのと同じ「Goの固定幅API境界をAmiFLの多様な数値幅に合わせて明示キャストで橋渡しする」パターンの再利用。
+
+**`unwrap`/`okOr`は`?`演算子と全く同じ`FGET`×2+`NEQ`のイディオムから始まり、その先だけが分岐する**：`unwrap[T](t)`は非nilエラーを検出したら`CALL : ?panic errVal`でGoの組み込み`panic`をそのまま呼ぶ（新しい命令は不要、`len`/`delete`と同じ「Goの組み込み関数をCALLでそのまま呼ぶ」パターン）。`okOr[T](t,default)`は`IF`/`ELSE`でpayloadかdefaultかを選ぶだけ。**ブラケット型引数`[T]`は省略可能にした**——`t: Tuple2[T,Error]`自体がTをすでに決定しているため、`cast`/`parse`（Tを推論する手がかりが無く必須）とは異なり、`unwrap(t)`/`okOr(t,default)`はブラケット無しでも動く設計にした（ブラケットを書いた場合はpayload型と一致するか検査する）。
+
+**設計課題6（capability多相の実装方式）がStep 11全体を通して実証された**：仮説どおり、各呼び出し箇所は引数の静的型からコンパイル時に一意に実装が確定する、実行時ディスパッチ皆無の完全なモノモーフィック多相になった。約50個の組み込み関数のうち、型ごとに全く異なるcodegenが必要だったのは片手で数えるほど（`contains`/`index`/`slice`/`reverse`/`concat`のString対Listコレクション分岐）で、大半はGoの標準ライブラリ・既存AMIVM命令・amiflrtジェネリクスのいずれか1つへ素直に収束した。
+
+**Step 11のスコープ外に残ったもの**：13.1節の`eprint`/`format`/`formatWith`/`exit`（`print`の一般化と合わせて後日まとめて実装する方針、`sema/builtins.go`にNYIプレースホルダーとして予約済み）、`typeName`（`Any`/`extern`境界が無いと実装できない、Step 13待ち）、13.8節のChan/Stream関連・13.10節のファイルI/O（Step 12待ち）。
+
+**実地検証（`amivm`→`go build`→実行）で確認した項目**：`examples/numeric_ops.aml`——`min`/`max`/`abs`/`clamp`、`Float`の`round`/`floor`/`ceil`/`sqrt`/`pow`、`parse[Int]`の成功結果を`unwrap`（ブラケット省略形）、失敗結果を`okOr[Int]`（ブラケット明示形）で処理。生成されたIRを目視確認し、`clamp`が`min`+`max`相当の2段`IF`/`ELSE`に、`pow`（Float32入力での往復キャストケースは別途codegenテストで確認）が想定どおりのCALL列に下がっていることを確認。実行結果は終了コード90（POSIXの256モジュロ込みで手計算した1114と一致：`part1=34`＋`part2=15`＋`part3=1065`）を確認。加えて、`unwrap`が実際にエラーケースで`panic`することを別の使い捨てサンプルで確認した（`panic: strconv.ParseInt: parsing "not a number": invalid syntax`、終了コード2）。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。**これでStep 11（組み込み関数・`capability`多相・`?`演算子/エラー処理）を完了した。**
 
 ## 開発の進め方
 

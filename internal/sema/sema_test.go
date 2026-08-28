@@ -2767,3 +2767,152 @@ func TestCheck_MapBuiltinsRejectNonMapArg(t *testing.T) {
 		})
 	}
 }
+
+// Phase 11d (amifl-spec.md sections 13.7/13.9) — numeric and error-
+// handling built-ins, the final phase of step 11.
+
+func TestCheck_MinMaxAdaptLiteralToNonLiteralOperand(t *testing.T) {
+	call := &ast.CallExpr{Callee: "min", Args: []ast.Expr{&ast.IdentExpr{Name: "x"}, &ast.IntLit{Value: 0}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: nt("Int8"), Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "r", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Int8" {
+		t.Fatalf("got ResolvedType %q, want Int8 (the literal 0 should adapt to x's own Int8 type)", call.ResolvedType)
+	}
+}
+
+func TestCheck_MinRejectsMismatchedTypes(t *testing.T) {
+	call := &ast.CallExpr{Callee: "min", Args: []ast.Expr{&ast.IdentExpr{Name: "x"}, &ast.IdentExpr{Name: "y"}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: nt("Int8"), Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "y", Type: nt("Int32"), Value: &ast.IntLit{Value: 5}},
+		&ast.DiscardExpr{Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: min(Int8, Int32) — no implicit conversion between differently-sized ints")
+	}
+}
+
+func TestCheck_MinMaxRejectString(t *testing.T) {
+	// 13.7 is specifically the numeric-functions section — min/max are
+	// restricted to Numeric, not the broader Ordered capability (String
+	// included) that `<`/`<=` use.
+	call := &ast.CallExpr{Callee: "min", Args: []ast.Expr{&ast.StringLit{Value: "a"}, &ast.StringLit{Value: "b"}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: min(String, String) — String isn't Numeric")
+	}
+}
+
+func TestCheck_ClampResolvesLoHiAgainstFirstArgType(t *testing.T) {
+	call := &ast.CallExpr{Callee: "clamp", Args: []ast.Expr{&ast.IdentExpr{Name: "v"}, &ast.IntLit{Value: 0}, &ast.IntLit{Value: 100}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "v", Type: nt("UInt16"), Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "r", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "UInt16" {
+		t.Fatalf("got ResolvedType %q, want UInt16", call.ResolvedType)
+	}
+}
+
+func TestCheck_RoundFloorCeilSqrtRejectInt(t *testing.T) {
+	for _, name := range []string{"round", "floor", "ceil", "sqrt"} {
+		t.Run(name, func(t *testing.T) {
+			call := &ast.CallExpr{Callee: name, Args: []ast.Expr{&ast.IdentExpr{Name: "n"}}}
+			f := mainFile(
+				&ast.LetExpr{Name: "n", Value: &ast.IntLit{Value: 5}},
+				&ast.DiscardExpr{Value: call},
+				&ast.IntLit{Value: 0},
+			)
+			if err := Check(f); err == nil {
+				t.Fatalf("expected an error: %s(Int) — restricted to Float", name)
+			}
+		})
+	}
+}
+
+func TestCheck_PowRequiresMatchingFloatTypes(t *testing.T) {
+	call := &ast.CallExpr{Callee: "pow", Args: []ast.Expr{&ast.IdentExpr{Name: "base"}, &ast.FloatLit{Value: 2}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "base", Type: nt("Float32"), Value: &ast.FloatLit{Value: 2}},
+		&ast.LetExpr{Name: "r", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Float32" {
+		t.Fatalf("got ResolvedType %q, want Float32", call.ResolvedType)
+	}
+}
+
+func TestCheck_UnwrapReturnsPayloadType(t *testing.T) {
+	call := &ast.CallExpr{Callee: "unwrap", Args: []ast.Expr{&ast.CallExpr{Callee: "parse", TypeArg: nt("Int"), Args: []ast.Expr{&ast.StringLit{Value: "5"}}}}}
+	f := mainFile(&ast.LetExpr{Name: "x", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Int64" {
+		t.Fatalf("got ResolvedType %q, want Int64", call.ResolvedType)
+	}
+}
+
+func TestCheck_UnwrapWithExplicitTypeArgMustMatchPayload(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "unwrap", TypeArg: nt("String"),
+		Args: []ast.Expr{&ast.CallExpr{Callee: "parse", TypeArg: nt("Int"), Args: []ast.Expr{&ast.StringLit{Value: "5"}}}},
+	}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: unwrap[String](Tuple2[Int,Error]) — explicit type arg doesn't match the payload type")
+	}
+}
+
+func TestCheck_OkOrRequiresDefaultMatchingPayloadType(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "okOr",
+		Args: []ast.Expr{
+			&ast.CallExpr{Callee: "parse", TypeArg: nt("Int"), Args: []ast.Expr{&ast.StringLit{Value: "5"}}},
+			&ast.StringLit{Value: "nope"},
+		},
+	}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: okOr(Tuple2[Int,Error], String) — default must be Int")
+	}
+}
+
+func TestCheck_OkOrReturnsPayloadType(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "okOr",
+		Args: []ast.Expr{
+			&ast.CallExpr{Callee: "parse", TypeArg: nt("Int"), Args: []ast.Expr{&ast.StringLit{Value: "5"}}},
+			&ast.IntLit{Value: 0},
+		},
+	}
+	f := mainFile(&ast.LetExpr{Name: "x", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Int64" {
+		t.Fatalf("got ResolvedType %q, want Int64", call.ResolvedType)
+	}
+}
+
+func TestCheck_UnwrapRejectsNonTuple2Arg(t *testing.T) {
+	call := &ast.CallExpr{Callee: "unwrap", Args: []ast.Expr{&ast.IntLit{Value: 5}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: unwrap(Int) — Int isn't Tuple2[T,Error]")
+	}
+}
