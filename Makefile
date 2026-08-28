@@ -1,0 +1,50 @@
+# AmiFL: .amlソースをAMIVM-IR経由でGoにコンパイルする言語処理系
+
+BINARY := amifl
+PKG    := ./cmd/amifl
+GO     := go
+
+.PHONY: all build install test test-examples fmt vet tidy clean help
+
+all: build ## デフォルトターゲット(ビルドのみ)
+
+build: ## amiflバイナリをビルドする
+	$(GO) build -o $(BINARY) $(PKG)
+
+install: ## amiflバイナリをGOBIN($GOPATH/bin)へインストールする
+	$(GO) install $(PKG)
+
+test: ## go testで全パッケージのユニットテストを実行する
+	$(GO) test ./...
+
+test-examples: build ## examples/配下を全てamifl buildで一括検証する(PATHにamivmが必要)
+	@set -e; \
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	for f in examples/*.aml; do \
+		[ -e "$$f" ] || continue; \
+		echo "build $$f"; \
+		./$(BINARY) build -o "$$tmp/$$(basename "$$f" .aml)" "$$f"; \
+	done; \
+	for d in examples/*/; do \
+		d=$${d%/}; \
+		[ -d "$$d" ] || continue; \
+		echo "build $$d"; \
+		./$(BINARY) build -o "$$tmp/$$(basename "$$d")" "$$d"; \
+	done
+
+fmt: ## *.goをgoimportsで整形する
+	goimports -w .
+
+vet: ## go vetで静的検査する
+	$(GO) vet ./...
+
+tidy: ## go.mod/go.sumを整理する
+	$(GO) mod tidy
+
+clean: ## ビルド成果物を削除する
+	rm -f $(BINARY)
+
+help: ## 使えるターゲット一覧を表示する
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-8s\033[0m %s\n", $$1, $$2}'

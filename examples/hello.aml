@@ -1,0 +1,4 @@
+fn main(args: List[String]) -> Int {
+    print("Hello, AmiFL!")
+    0
+}
