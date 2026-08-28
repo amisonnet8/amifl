@@ -6,25 +6,52 @@ import (
 	"github.com/amisonnet8/amifl/internal/ast"
 )
 
-// binding is a name bound in some scope: either a runtime `let` variable
-// or a compile-time `const`.
+// binding is a name bound in some scope: a runtime `let` variable, a
+// compile-time `const`, or (step 5) a runtime, non-reassignable function
+// parameter or closure parameter.
 type binding struct {
 	isConst bool
-	typ     string
+	// reassignable is true only for a `let` binding (amifl-spec.md
+	// section 4, "再代入可"). A const is rejected for its own reason
+	// (isConst, "cannot assign to a const"); a function/closure parameter
+	// is also not reassignable — the spec grants "再代入可" explicitly and
+	// only to `let`, never to a parameter, and amifl-spec.md's principle
+	// of explicitness ("明示性 > 簡潔さ") argues against silently
+	// extending that to parameters absent a concrete need. If a caller
+	// needs a mutable copy, `let x2 = x` remains available.
+	reassignable bool
+	typ          string
 	// value holds the literal/operator expression to inline at reference
 	// sites when isConst is true (see ast.IdentExpr.ConstValue); unused
-	// for a `let`.
+	// otherwise.
 	value ast.Expr
-	// internalName is the Go variable name a `let` binding compiles to
-	// (see ast.LetExpr.InternalName); unused for a `const` (which has no
-	// runtime storage at all).
-	internalName string
+	// token is the full AMIVM value token this binding reads as — "%x_3"
+	// for a `let`, "$N" for a top-level fn parameter, "&L-N" for a
+	// closure parameter (see ast.LetExpr.Token) — computed once at
+	// declaration time and reused verbatim by every reference, at any
+	// nesting depth (CLAUDE.md's 過去に踏まれた地雷 #9: a closure body is
+	// just a child scope, so a captured outer token needs no special
+	// handling to keep working unchanged inside it). Unused for a const.
+	token string
+}
+
+// funcSig is a top-level `fn`'s signature (amifl-spec.md section 8),
+// resolved once per file — before any function body is checked — so that
+// calls may appear in any order: forward references, mutual recursion,
+// and self-recursion (amifl-spec.md section 8.6) all just work, the way
+// they would for any statically-typed language with whole-file overload-
+// free function declarations.
+type funcSig struct {
+	params []string
+	ret    string
 }
 
 // checker holds state shared across an entire file: the global
-// (top-level) const bindings, visible to every function.
+// (top-level) const bindings and the top-level `fn` signature table, both
+// visible to every function.
 type checker struct {
 	globals map[string]*binding
+	funcs   map[string]funcSig
 }
 
 // scope is one lexical block's bindings, chained to its enclosing scope
@@ -58,16 +85,34 @@ func (s *scope) lookup(name string) (*binding, bool) {
 	return nil, false
 }
 
-// funcChecker checks one function body: its current (innermost) lexical
-// scope, how many `while` bodies currently enclose whatever expression is
-// being checked (loopDepth — used to reject a stray break/continue found
-// outside of any loop), and a function-wide counter used to mint every
-// `let`'s InternalName.
+// funcChecker checks one function (or, step 5, closure) body: its current
+// (innermost) lexical scope, how many `while` bodies currently enclose
+// whatever expression is being checked (loopDepth — used to reject a
+// stray break/continue found outside of any loop), how many CLOS levels
+// deep the expression currently being checked is nested inside its own
+// enclosing FUNC (closureDepth — 0 directly inside the function body, 1
+// inside its outermost closure literal, 2 inside a closure nested in
+// that, ... — used only to compute a closure parameter's "&L-N" token at
+// declaration time), and a function-wide counter used to mint every
+// `let`'s Token.
+//
+// A closure literal reuses this *same* funcChecker (not a fresh one) for
+// its body — resolveClosureLit only pushes a child scope and saves/
+// resets loopDepth/closureDepth around the call — so that its `let`s draw
+// from the identical declSeq counter as the enclosing function's. This is
+// deliberate, not an oversight: it's what guarantees every "%xxx" token
+// anywhere in one compiled Go function (including inside any nested CLOS,
+// itself just a nested Go func literal) stays globally unique, which is
+// exactly the invariant CLAUDE.md's "確定した設計判断" for step 4 (the
+// amivm unused-variable self-healing bug) already established is load-
+// bearing — a closure body is just another place that invariant must
+// keep holding.
 type funcChecker struct {
 	*checker
-	scope     *scope
-	loopDepth int
-	declSeq   int
+	scope        *scope
+	loopDepth    int
+	closureDepth int
+	declSeq      int
 }
 
 func newFuncChecker(c *checker) *funcChecker {
@@ -106,8 +151,8 @@ func (fc *funcChecker) popScope() {
 	fc.scope = fc.scope.parent
 }
 
-// freshInternalName mints name_N, N unique within this function — the Go
-// variable name a `let` actually compiles to (ast.LetExpr.InternalName).
+// freshInternalName mints name_N, N unique within this function — the bare
+// Go variable name a `let` actually compiles to (its Token is "%" + this).
 //
 // This exists because of a real bug found only by running step 4's
 // nested-scope support through the full amivm -> go build pipeline

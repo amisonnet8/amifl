@@ -58,6 +58,15 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 		return fc.resolveBreakExpr(v)
 	case *ast.ContinueExpr:
 		return fc.resolveContinueExpr(v)
+	case *ast.ClosureLit:
+		// A ClosureLit only ever reaches resolveType from somewhere other
+		// than resolveLetExpr's own dedicated check (which intercepts it
+		// before checkExpr is ever called) — a call argument, an if/while
+		// condition, a binary operand, a discard target, and so on. Step
+		// 5 deliberately doesn't support any of those (see the type's doc
+		// comment), so every other path lands here with a clear, specific
+		// rejection instead of the generic "unsupported expression" below.
+		return "", fmt.Errorf("line %d: a closure literal is only allowed as a `let`'s value in step 5 (bind it first: `let f = fn(...) -> R { ... }`, then use f)", v.Line)
 	default:
 		return "", fmt.Errorf("sema: unsupported expression %T", e)
 	}
@@ -104,25 +113,88 @@ func (fc *funcChecker) resolveIdentExpr(v *ast.IdentExpr) (string, error) {
 	if b.isConst {
 		v.ConstValue = b.value
 	} else {
-		v.InternalName = b.internalName
+		v.Token = b.token
 	}
 	return b.typ, nil
 }
 
+// resolveCallExpr type-checks `callee(args...)` (amifl-spec.md section 8).
+// `print` is still its own hardcoded special case, unchanged since step 1
+// (the general built-in function library arrives in step 11). Otherwise
+// Callee is resolved in the same shadowing order as any other name: the
+// current scope chain first (a local closure-valued variable — step 5's
+// "ローカルクロージャー"), then top-level `fn`s (step 5's "トップレベル
+// fn") — mirroring how a local `let`/`const` already shadows a top-level
+// `const` of the same name (funcChecker.lookup).
 func (fc *funcChecker) resolveCallExpr(v *ast.CallExpr) (string, error) {
-	if v.Callee != "print" {
-		return "", fmt.Errorf("line %d: step 2 only supports calling the built-in `print` (general function calls arrive in step 5; the built-in function library arrives in step 11)", v.Line)
+	if v.Callee == "print" {
+		if len(v.Args) != 1 {
+			return "", fmt.Errorf("line %d: print expects exactly 1 argument, got %d", v.Line, len(v.Args))
+		}
+		if _, err := fc.checkExpr(v.Args[0], "String"); err != nil {
+			return "", err
+		}
+		v.ResolvedType = unitType
+		return unitType, nil
 	}
-	if len(v.Args) != 1 {
-		return "", fmt.Errorf("line %d: print expects exactly 1 argument, got %d", v.Line, len(v.Args))
+
+	if b, ok := fc.lookup(v.Callee); ok {
+		if !isFuncType(b.typ) {
+			return "", fmt.Errorf("line %d: %q is not callable (it has type %s)", v.Line, v.Callee, b.typ)
+		}
+		params, ret, _ := funcTypeParts(b.typ)
+		if err := fc.checkCallArgs(v, params); err != nil {
+			return "", err
+		}
+		v.CalleeToken = b.token
+		v.ResolvedType = ret
+		return ret, nil
 	}
-	if _, err := fc.checkExpr(v.Args[0], "String"); err != nil {
-		return "", err
+
+	if sig, ok := fc.funcs[v.Callee]; ok {
+		if err := fc.checkCallArgs(v, sig.params); err != nil {
+			return "", err
+		}
+		v.ResolvedType = sig.ret
+		return sig.ret, nil
 	}
-	return unitType, nil
+
+	return "", fmt.Errorf("line %d: undefined function %q", v.Line, v.Callee)
 }
 
+func (fc *funcChecker) checkCallArgs(v *ast.CallExpr, params []string) error {
+	if len(v.Args) != len(params) {
+		return fmt.Errorf("line %d: %q expects %d argument(s), got %d", v.Line, v.Callee, len(params), len(v.Args))
+	}
+	for i, arg := range v.Args {
+		if _, err := fc.checkExpr(arg, params[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveLetExpr type-checks `let name[: Type] = value` (amifl-spec.md
+// section 4). A ClosureLit value is handled entirely separately, before
+// any of the usual literal-adaptation/type-annotation machinery: its type
+// is always fully self-determined (every parameter and the return type
+// are already explicit in the closure literal itself), so an *additional*
+// type annotation on the `let` would be redundant at best — rejected here
+// with a clear message rather than silently accepted or run through
+// checkExpr's generic (and, for a closure, not even reachable — see
+// resolveType's *ast.ClosureLit case) expected-type machinery.
 func (fc *funcChecker) resolveLetExpr(v *ast.LetExpr) (string, error) {
+	if clos, ok := v.Value.(*ast.ClosureLit); ok {
+		if v.Type != "" {
+			return "", fmt.Errorf("line %d: a closure literal's type is always inferred from its own signature; remove the type annotation on %q", v.Line, v.Name)
+		}
+		typ, err := fc.resolveClosureLit(clos)
+		if err != nil {
+			return "", err
+		}
+		return fc.declareLet(v, typ)
+	}
+
 	var expected string
 	if v.Type != "" {
 		t, ok := canonicalType(v.Type)
@@ -138,12 +210,19 @@ func (fc *funcChecker) resolveLetExpr(v *ast.LetExpr) (string, error) {
 	if typ == unitType {
 		return "", fmt.Errorf("line %d: cannot bind %q to a Unit-typed value", v.Line, v.Name)
 	}
-	internalName := fc.freshInternalName(v.Name)
-	if err := fc.declare(v.Name, &binding{typ: typ, internalName: internalName}); err != nil {
+	return fc.declareLet(v, typ)
+}
+
+// declareLet mints v's Token, declares it (reassignable, unlike a
+// parameter — amifl-spec.md section 4, "再代入可"), and annotates v,
+// shared by resolveLetExpr's closure and non-closure paths.
+func (fc *funcChecker) declareLet(v *ast.LetExpr, typ string) (string, error) {
+	token := "%" + fc.freshInternalName(v.Name)
+	if err := fc.declare(v.Name, &binding{typ: typ, token: token, reassignable: true}); err != nil {
 		return "", fmt.Errorf("line %d: %s", v.Line, err)
 	}
 	v.ResolvedType = typ
-	v.InternalName = internalName
+	v.Token = token
 	return unitType, nil
 }
 
@@ -164,13 +243,17 @@ func (fc *funcChecker) resolveAssignExpr(v *ast.AssignExpr) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("line %d: undefined name %q", v.Line, v.Name)
 	}
-	if b.isConst {
-		return "", fmt.Errorf("line %d: cannot assign to %q: it is a const", v.Line, v.Name)
+	if !b.reassignable {
+		kind := "a function parameter"
+		if b.isConst {
+			kind = "a const"
+		}
+		return "", fmt.Errorf("line %d: cannot assign to %q: it is %s", v.Line, v.Name, kind)
 	}
 	if _, err := fc.checkExpr(v.Value, b.typ); err != nil {
 		return "", err
 	}
-	v.InternalName = b.internalName
+	v.Token = b.token
 	return unitType, nil
 }
 
@@ -272,6 +355,16 @@ func (fc *funcChecker) resolveBinaryExpr(v *ast.BinaryExpr, expected string) (st
 		}
 		if leftTyp != rightTyp {
 			return "", fmt.Errorf("line %d: operator %s requires both operands to have the same type, got %s and %s", v.Line, v.Op, leftTyp, rightTyp)
+		}
+		// amifl-spec.md section 8.3: "関数型どうしの==比較はできない" — every
+		// other same-typed pair (Bool, String, numeric, ...) is legitimately
+		// comparable, so this is the one type family equalityOps must
+		// exclude explicitly rather than relying on isIntType/isFloatType/
+		// etc. (which arithmetic/bitwise/ordered comparison already lean on
+		// to reject Func operands implicitly, having no membership rule to
+		// admit them in the first place).
+		if isFuncType(leftTyp) {
+			return "", fmt.Errorf("line %d: operator %s is not defined for function values", v.Line, v.Op)
 		}
 		v.ResolvedType = leftTyp
 		return "Bool", nil
@@ -554,11 +647,14 @@ func (fc *funcChecker) resolveWhileExpr(v *ast.WhileExpr) (string, error) {
 // Both are Unit-typed rather than the Never type amifl-spec.md gives
 // `return` (section 5) — a deliberate, narrower scope for step 4: Never's
 // "unifies with any type" behavior isn't implemented anywhere yet (no
-// `return` exists until step 5), and break/continue's only real use case
-// here is as a bare Unit-typed statement inside a loop body, which this
-// already covers. Using break/continue as a value-producing if/switch
-// branch (`if done { break } else { 5 }`) is consequently rejected for
-// now — revisit once `return`/Never's design is settled for real.
+// `return` *keyword* exists yet — step 5 adds early function values via
+// `fn`/closures but not early-exit `return`; a function/closure body's
+// tail expression remains the only way to produce its value), and
+// break/continue's only real use case here is as a bare Unit-typed
+// statement inside a loop body, which this already covers. Using break/
+// continue as a value-producing if/switch branch (`if done { break } else
+// { 5 }`) is consequently rejected for now — revisit once `return`/
+// Never's design is settled for real.
 func (fc *funcChecker) resolveBreakExpr(v *ast.BreakExpr) (string, error) {
 	if fc.loopDepth == 0 {
 		return "", fmt.Errorf("line %d: break outside of a loop", v.Line)
@@ -571,6 +667,82 @@ func (fc *funcChecker) resolveContinueExpr(v *ast.ContinueExpr) (string, error) 
 		return "", fmt.Errorf("line %d: continue outside of a loop", v.Line)
 	}
 	return unitType, nil
+}
+
+// resolveClosureLit type-checks `fn(params) -> R { body }` used as a
+// value (amifl-spec.md section 8.1), called only from resolveLetExpr (see
+// ast.ClosureLit's doc comment for why every other position is rejected).
+//
+// It reuses fc itself (not a fresh funcChecker) for the body, pushing
+// only a child scope — the same "a closure body is just a child scope of
+// wherever the literal appears" trick Cascade's implementation notes
+// record (github.com/amisonnet8/cascade's closure.go): a captured outer
+// binding's Token was already computed once, at its own declaration site,
+// and fc.lookup walking the scope chain hands that exact same token back
+// unchanged, however many closures deep the reference turns out to sit —
+// no copying, no dedicated capture instruction, no per-depth adjustment
+// needed. loopDepth is saved and reset to 0 for the duration (break/
+// continue never cross a closure boundary — amifl-spec.md section 7,
+// "クロージャー境界を越えられない" — matching how a `while` isn't
+// "inside" a closure literal nested in its body either way, this simply
+// also covers the reverse: a loop outside the closure isn't reachable by
+// a break/continue written inside it). closureDepth increments for the
+// body so closure parameters get the right "&L-N" token (funcChecker's
+// doc comment); CLAUDE.md's 地雷#9 warning against ever storing a bare
+// "&N" is why this is computed once, fully qualified, right here at
+// declaration time, rather than left for a reference site to work out.
+func (fc *funcChecker) resolveClosureLit(v *ast.ClosureLit) (string, error) {
+	fc.closureDepth++
+	depth := fc.closureDepth
+	fc.pushScope()
+	savedLoopDepth := fc.loopDepth
+	fc.loopDepth = 0
+
+	typ, err := fc.checkClosureBody(v, depth)
+
+	fc.loopDepth = savedLoopDepth
+	fc.popScope()
+	fc.closureDepth--
+
+	if err != nil {
+		return "", err
+	}
+	return typ, nil
+}
+
+func (fc *funcChecker) checkClosureBody(v *ast.ClosureLit, depth int) (string, error) {
+	seen := map[string]bool{}
+	var paramTypes []string
+	for i := range v.Params {
+		p := &v.Params[i]
+		if seen[p.Name] {
+			return "", fmt.Errorf("line %d: duplicate parameter %q", p.Line, p.Name)
+		}
+		seen[p.Name] = true
+		pt, ok := canonicalType(p.Type)
+		if !ok {
+			return "", fmt.Errorf("line %d: unknown type %q", p.Line, p.Type)
+		}
+		p.ResolvedType = pt
+		token := fmt.Sprintf("&%d-%d", depth, i+1)
+		if err := fc.declare(p.Name, &binding{typ: pt, token: token}); err != nil {
+			return "", fmt.Errorf("line %d: %s", p.Line, err)
+		}
+		paramTypes = append(paramTypes, pt)
+	}
+
+	retType, ok := canonicalReturnType(v.ReturnType)
+	if !ok {
+		return "", fmt.Errorf("line %d: unknown type %q", v.Line, v.ReturnType)
+	}
+	v.ResolvedReturnType = retType
+	if _, err := fc.checkBlock(v.Body, retType); err != nil {
+		return "", err
+	}
+
+	typ := makeFuncType(paramTypes, retType)
+	v.ResolvedType = typ
+	return typ, nil
 }
 
 // resolveConstDecl type-checks a const declaration's initializer and

@@ -15,15 +15,42 @@ type TopLevelDecl interface {
 	topLevelDeclNode()
 }
 
-// FuncDecl is a top-level `fn` declaration.
-//
-// Step 1 only supports the parameter-less form `fn name() -> ReturnType {
-// ... }` (amifl-spec.md section 14); parameters land in step 5.
+// FuncDecl is a top-level `fn` declaration (amifl-spec.md section 8).
+// Step 5 lifts step 1-4's "only a parameter-less `fn main`" restriction:
+// any number of top-level functions may be declared, each with any number
+// of parameters, may call each other regardless of declaration order
+// (including mutual/self recursion — sema collects every signature in one
+// pass before checking any body), and `main` itself is just the one
+// function sema additionally requires to exist, take no parameters (the
+// `List[String] args` form is deferred to step 7, once `List` exists),
+// and return `Int`.
 type FuncDecl struct {
 	Name       string
+	Params     []Param
 	ReturnType string
 	Body       *Block
 	Line       int
+
+	// ResolvedReturnType is filled in by sema: canonicalType(ReturnType),
+	// or the Unit sentinel type for a `-> Unit` declaration (amifl-spec.md
+	// section 8.3, "戻り値無しはfn(T1, ...) -> Unit") — the one place a
+	// user-written "Unit" is accepted; see sema's canonicalReturnType.
+	ResolvedReturnType string
+}
+
+// Param is one `name: Type` entry in a FuncDecl's or ClosureLit's
+// parameter list (amifl-spec.md section 8.1). Step 5 restricts Type to a
+// plain scalar type name — a parameter typed `fn(...) -> R` (a function
+// value passed as an argument, i.e. a higher-order function) is not yet
+// supported, a deliberate scope cut documented in CLAUDE.md's "確定した
+// 設計判断" for step 5 (no surface syntax exists yet to write a Func-type
+// annotation at all; see ClosureLit).
+type Param struct {
+	Name string
+	Type string
+	Line int
+
+	ResolvedType string // filled in by sema
 }
 
 // ConstDecl is a `const` declaration (amifl-spec.md section 4): a
@@ -73,17 +100,23 @@ type LetExpr struct {
 	Line  int
 
 	ResolvedType string // filled in by sema
-	// InternalName is the Go variable name codegen emits for this
-	// binding — Name suffixed with a function-wide unique counter (sema's
-	// funcChecker.freshInternalName), never Name verbatim. See
-	// CLAUDE.md's "確定した設計判断" for step 4: two `let`s named the same
-	// (an outer one and a shadowing inner one, now that if/while bodies
-	// get their own nested scope) would otherwise emit two Go variable
-	// declarations with the *identical* generated name — legal Go
-	// (genuine block shadowing), but it broke amivm's unused-variable
-	// self-healing, which locates "the" declaration of a name assuming
-	// there's only ever one per function.
-	InternalName string
+	// Token is the full AMIVM value token codegen emits for this binding
+	// (e.g. "%x_3") — Name suffixed with a function-wide unique counter
+	// (sema's funcChecker.freshInternalName) and prefixed with "%", never
+	// Name verbatim. See CLAUDE.md's "確定した設計判断" for step 4: two
+	// `let`s named the same (an outer one and a shadowing inner one, now
+	// that if/while bodies get their own nested scope) would otherwise
+	// emit two Go variable declarations with the *identical* generated
+	// name — legal Go (genuine block shadowing), but it broke amivm's
+	// unused-variable self-healing, which locates "the" declaration of a
+	// name assuming there's only ever one per function.
+	//
+	// Step 5 generalizes this field from a bare name (always manually
+	// prefixed with "%" at every use site) to the complete token, because
+	// a `let` bound to a closure literal's own parameter or a top-level
+	// `fn`'s parameter needs this same field to carry a "$N" or "&L-N"
+	// token instead — see IdentExpr.Token.
+	Token string
 }
 
 // AssignExpr reassigns an existing `let`-bound local (amifl-spec.md
@@ -96,7 +129,7 @@ type AssignExpr struct {
 	Value Expr
 	Line  int
 
-	InternalName string // filled in by sema; see LetExpr.InternalName
+	Token string // filled in by sema; see LetExpr.Token
 }
 
 // DiscardExpr explicitly discards a non-Unit-typed expression's value
@@ -117,16 +150,74 @@ type IdentExpr struct {
 	// literal to inline in its place — AmiFL constants have no runtime
 	// storage (amifl-spec.md section 4, "参照箇所へインライン展開される").
 	ConstValue Expr
-	// InternalName is set instead of ConstValue when Name resolves to a
-	// `let` — see LetExpr.InternalName.
-	InternalName string
+	// Token is set instead of ConstValue when Name resolves to a runtime
+	// binding — a `let` ("%x_3"), a top-level fn parameter ("$N"), or a
+	// closure parameter ("&L-N"). See LetExpr.Token.
+	Token string
 }
 
-// CallExpr is a function call `callee(args...)`.
+// CallExpr is a function call `callee(args...)` (amifl-spec.md section 8).
+// Callee is always a bare name — never an arbitrary expression — resolved
+// by sema to exactly one of: the built-in `print` (Callee == "print",
+// handled as its own special case throughout, unchanged since step 1 —
+// the general built-in function library arrives in step 11), a top-level
+// `fn`, or a local closure-valued variable (CalleeToken set; a local
+// binding shadows a same-named top-level `fn`, mirroring how a `let`
+// already shadows a top-level `const` — see sema's resolveCallExpr).
+// AmiFL has no syntax for calling the result of an arbitrary expression
+// (`(fn(x: Int) -> Int { x })(5)` isn't reachable — parseIdentOrCall only
+// ever produces a CallExpr from a bare identifier), so Callee never needs
+// to generalize beyond a name.
 type CallExpr struct {
 	Callee string
 	Args   []Expr
 	Line   int
+
+	// filled in by sema:
+	ResolvedType string
+	// CalleeToken is the AMIVM callname operand for a closure call — a
+	// variable token ("%f_3"/"$1"/"&1-1", whatever Callee resolved to)
+	// copied from the resolved binding. Left empty for "print" (its own
+	// hardcoded codegen path never reads this) and for a top-level `fn`
+	// call, which codegen derives directly from Callee instead (`"!" +
+	// Callee`, substituting codegen's internal entry-point name for
+	// `"main"` — see codegen's calleeToken) so that sema never needs to
+	// know that internal-naming detail (ast is sema's and codegen's only
+	// shared vocabulary; neither package depends on the other).
+	CalleeToken string
+}
+
+// ClosureLit is `fn(params) -> R { body }` used as an expression — a
+// local, unnamed function value (amifl-spec.md section 8.1, "let square =
+// fn(x: Int) -> Int { x * x }"). Unlike a top-level FuncDecl, a
+// ClosureLit's own Params/ReturnType are always themselves plain scalar
+// types (see Param) and, per step 5's scope, a ClosureLit is only legal
+// as a `let`'s direct value — never a call argument, an if/while
+// condition, a binary operand, or any other position (sema's
+// resolveType's default *ast.ClosureLit case rejects it there with a
+// clear message; resolveLetExpr is the sole place that recognizes and
+// accepts one). This is what "no first-class function values beyond a
+// `let`, no higher-order functions yet" amounts to concretely — a
+// deliberate, documented step-5 scope cut (CLAUDE.md's "確定した設計判断"),
+// not an oversight; revisit once actually needed. A `let` binding a
+// ClosureLit may not carry its own type annotation either (the closure's
+// signature is always fully explicit already, so an annotation would be
+// redundant — and step 5 has no `fn(...) -> R` type-annotation grammar to
+// write one in even if it wanted to).
+type ClosureLit struct {
+	Params     []Param
+	ReturnType string
+	Body       *Block
+	Line       int
+
+	// filled in by sema:
+	ResolvedReturnType string
+	// ResolvedType is this closure's own function type, encoded as
+	// "fn(P1,P2,...)->R" (sema's makeFuncType/funcTypeParts) — purely an
+	// internal sema/codegen convention with no user-facing surface syntax
+	// in step 5 (see the type's doc comment above), used to type a `let`
+	// binding a closure and to validate/resolve calls through it.
+	ResolvedType string
 }
 
 // StringLit is a string literal.
@@ -252,6 +343,7 @@ func (*IfExpr) exprNode()       {}
 func (*WhileExpr) exprNode()    {}
 func (*BreakExpr) exprNode()    {}
 func (*ContinueExpr) exprNode() {}
+func (*ClosureLit) exprNode()   {}
 
 func (n *ConstDecl) Pos() int    { return n.Line }
 func (n *LetExpr) Pos() int      { return n.Line }
@@ -269,3 +361,4 @@ func (n *IfExpr) Pos() int       { return n.Line }
 func (n *WhileExpr) Pos() int    { return n.Line }
 func (n *BreakExpr) Pos() int    { return n.Line }
 func (n *ContinueExpr) Pos() int { return n.Line }
+func (n *ClosureLit) Pos() int   { return n.Line }

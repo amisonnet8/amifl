@@ -1,6 +1,9 @@
 package sema
 
-import "math"
+import (
+	"math"
+	"strings"
+)
 
 // typeAliases maps AmiFL's convenience scalar-type aliases to their
 // canonical name (amifl-spec.md section 2.1). Two type names denote the
@@ -43,6 +46,55 @@ func canonicalType(name string) (string, bool) {
 		return "", false
 	}
 	return name, true
+}
+
+// canonicalReturnType is canonicalType plus one extra case usable only in
+// a function's own return-type position (a top-level `fn`'s or a
+// ClosureLit's): amifl-spec.md section 8.3 explicitly writes "戻り値無しは
+// fn(T1, ...) -> Unit" — Unit as an explicit, user-writable return
+// annotation meaning "no value" — even though Unit is everywhere else
+// deliberately not a type a user can write (see unitType's doc comment;
+// it's still not accepted for a `let`/const annotation or a parameter
+// type, both of which go through plain canonicalType, unchanged).
+func canonicalReturnType(name string) (string, bool) {
+	if name == "Unit" {
+		return unitType, true
+	}
+	return canonicalType(name)
+}
+
+// makeFuncType/funcTypeParts/isFuncType encode a closure's signature as
+// "fn(P1,P2,...)->R" (Pi/R already-canonical scalar types) — a purely
+// internal sema/codegen convention, never surfaced in source syntax. Step
+// 5 gives AmiFL no `fn(...) -> R` type-annotation grammar at all (see
+// ast.ClosureLit's doc comment), so, unlike scalar type names, this
+// string is never parsed from user-written text — makeFuncType is the
+// only producer (always fed already-canonical pieces) and funcTypeParts
+// only ever decodes strings makeFuncType itself built, which is what
+// keeps the decoding trivial (Pi/R can never themselves contain "," ")"
+// or "->", since step 5's ClosureLit restricts them to plain scalars).
+func makeFuncType(params []string, ret string) string {
+	return "fn(" + strings.Join(params, ",") + ")->" + ret
+}
+
+func isFuncType(t string) bool {
+	return strings.HasPrefix(t, "fn(")
+}
+
+func funcTypeParts(t string) (params []string, ret string, ok bool) {
+	if !isFuncType(t) {
+		return nil, "", false
+	}
+	sep := strings.Index(t, ")->")
+	if sep < 0 {
+		return nil, "", false
+	}
+	paramsRaw := t[len("fn("):sep]
+	ret = t[sep+len(")->"):]
+	if paramsRaw != "" {
+		params = strings.Split(paramsRaw, ",")
+	}
+	return params, ret, true
 }
 
 func isIntType(name string) bool {

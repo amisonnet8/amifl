@@ -11,9 +11,10 @@ func mainFile(exprs ...ast.Expr) *ast.File {
 	return &ast.File{
 		Decls: []ast.TopLevelDecl{
 			&ast.FuncDecl{
-				Name:       "main",
-				ReturnType: "Int",
-				Body:       &ast.Block{Exprs: exprs},
+				Name:               "main",
+				ReturnType:         "Int",
+				ResolvedReturnType: "Int64",
+				Body:               &ast.Block{Exprs: exprs},
 			},
 		},
 	}
@@ -71,8 +72,8 @@ func TestGenerate_StringWithQuoteIsEscaped(t *testing.T) {
 
 func TestGenerate_LetEmitsVarAndSet(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", InternalName: "x", ResolvedType: "Int64", Value: &ast.IntLit{Value: 42}},
-		&ast.IdentExpr{Name: "x", InternalName: "x", ResolvedType: "Int64"},
+		&ast.LetExpr{Name: "x", Token: "%x", ResolvedType: "Int64", Value: &ast.IntLit{Value: 42}},
+		&ast.IdentExpr{Name: "x", Token: "%x", ResolvedType: "Int64"},
 	)
 	ir, err := Generate(f)
 	if err != nil {
@@ -91,9 +92,9 @@ func TestGenerate_LetEmitsVarAndSet(t *testing.T) {
 
 func TestGenerate_AssignEmitsSet(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", InternalName: "x", ResolvedType: "Int64", Value: &ast.IntLit{Value: 1}},
-		&ast.AssignExpr{Name: "x", InternalName: "x", Value: &ast.IntLit{Value: 2}},
-		&ast.IdentExpr{Name: "x", InternalName: "x", ResolvedType: "Int64"},
+		&ast.LetExpr{Name: "x", Token: "%x", ResolvedType: "Int64", Value: &ast.IntLit{Value: 1}},
+		&ast.AssignExpr{Name: "x", Token: "%x", Value: &ast.IntLit{Value: 2}},
+		&ast.IdentExpr{Name: "x", Token: "%x", ResolvedType: "Int64"},
 	)
 	ir, err := Generate(f)
 	if err != nil {
@@ -123,7 +124,7 @@ func TestGenerate_ConstIsInlinedNotDeclared(t *testing.T) {
 
 func TestGenerate_FloatLiteralAlwaysHasADecimalPoint(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", InternalName: "x", ResolvedType: "Float64", Value: &ast.FloatLit{Value: 5}},
+		&ast.LetExpr{Name: "x", Token: "%x", ResolvedType: "Float64", Value: &ast.FloatLit{Value: 5}},
 		&ast.IntLit{Value: 0},
 	)
 	ir, err := Generate(f)
@@ -137,7 +138,7 @@ func TestGenerate_FloatLiteralAlwaysHasADecimalPoint(t *testing.T) {
 
 func TestGenerate_BoolLiteral(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "ok", InternalName: "ok", ResolvedType: "Bool", Value: &ast.BoolLit{Value: true}},
+		&ast.LetExpr{Name: "ok", Token: "%ok", ResolvedType: "Bool", Value: &ast.BoolLit{Value: true}},
 		&ast.IntLit{Value: 0},
 	)
 	ir, err := Generate(f)
@@ -170,7 +171,7 @@ func TestGenerate_BinaryExprEmitsTempAndInstruction(t *testing.T) {
 
 func TestGenerate_StringPlusEmitsConcat(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "s", InternalName: "s", ResolvedType: "String", Value: &ast.BinaryExpr{
+		&ast.LetExpr{Name: "s", Token: "%s", ResolvedType: "String", Value: &ast.BinaryExpr{
 			Op: "+", Left: &ast.StringLit{Value: "a"}, Right: &ast.StringLit{Value: "b"}, ResolvedType: "String",
 		}},
 		&ast.IntLit{Value: 0},
@@ -230,8 +231,8 @@ func TestGenerate_DoubleUnaryMinusOfLiteralCollapses(t *testing.T) {
 
 func TestGenerate_UnaryMinusOfVariableEmitsSub(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", InternalName: "x", ResolvedType: "Int64", Value: &ast.IntLit{Value: 5}},
-		&ast.UnaryExpr{Op: "-", Operand: &ast.IdentExpr{Name: "x", InternalName: "x", ResolvedType: "Int64"}, ResolvedType: "Int64"},
+		&ast.LetExpr{Name: "x", Token: "%x", ResolvedType: "Int64", Value: &ast.IntLit{Value: 5}},
+		&ast.UnaryExpr{Op: "-", Operand: &ast.IdentExpr{Name: "x", Token: "%x", ResolvedType: "Int64"}, ResolvedType: "Int64"},
 	)
 	ir, err := Generate(f)
 	if err != nil {
@@ -433,16 +434,16 @@ func TestGenerate_ShadowingLetGetsDistinctInternalNames(t *testing.T) {
 	// sharing the same emitted Go name — even though real block shadowing
 	// makes that legal Go — broke amivm's unused-variable self-healing,
 	// which assumes one declaration per name per function. Every `let`
-	// must get its own InternalName, whether or not it shadows anything.
+	// must get its own Token, whether or not it shadows anything.
 	f := mainFile(
-		&ast.LetExpr{Name: "x", InternalName: "x_1", ResolvedType: "Int64", Value: &ast.IntLit{Value: 1}},
+		&ast.LetExpr{Name: "x", Token: "%x_1", ResolvedType: "Int64", Value: &ast.IntLit{Value: 1}},
 		&ast.IfExpr{
 			Cond: &ast.BoolLit{Value: true},
 			Then: &ast.Block{Exprs: []ast.Expr{
-				&ast.LetExpr{Name: "x", InternalName: "x_2", ResolvedType: "Int64", Value: &ast.IntLit{Value: 2}},
+				&ast.LetExpr{Name: "x", Token: "%x_2", ResolvedType: "Int64", Value: &ast.IntLit{Value: 2}},
 			}},
 		},
-		&ast.IdentExpr{Name: "x", InternalName: "x_1", ResolvedType: "Int64"},
+		&ast.IdentExpr{Name: "x", Token: "%x_1", ResolvedType: "Int64"},
 	)
 	ir, err := Generate(f)
 	if err != nil {
@@ -503,5 +504,164 @@ func TestGenerate_DiscardOfLiteralEmitsNothingExtra(t *testing.T) {
 	}
 	if irWith != irWithout {
 		t.Errorf("discarding a side-effect-free literal should generate no extra IR;\nwith:\n%s\nwithout:\n%s", irWith, irWithout)
+	}
+}
+
+func TestGenerate_TopLevelFuncWithParamsUsesDollarTokens(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:               "main",
+			ReturnType:         "Int",
+			ResolvedReturnType: "Int64",
+			Body:               &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		},
+		&ast.FuncDecl{
+			Name:               "add",
+			Params:             []ast.Param{{Name: "a", Type: "Int", ResolvedType: "Int64"}, {Name: "b", Type: "Int", ResolvedType: "Int64"}},
+			ReturnType:         "Int",
+			ResolvedReturnType: "Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.BinaryExpr{Op: "+", ResolvedType: "Int64",
+					Left:  &ast.IdentExpr{Name: "a", ResolvedType: "Int64", Token: "$1"},
+					Right: &ast.IdentExpr{Name: "b", ResolvedType: "Int64", Token: "$2"},
+				},
+			}},
+		},
+	}}
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"FUNC\t!add\t^int64\t^int64\t:\t^int64",
+		"ADD\t%amifl_tmp1\t$1\t$2",
+		"RET\t%amifl_tmp1",
+		"ENDFUNC",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+	// No VAR is ever declared for a parameter — $N is implicit via FUNC's
+	// own header, unlike a `let`.
+	if strings.Contains(ir, "VAR\t$1") || strings.Contains(ir, "VAR\t$2") {
+		t.Errorf("did not expect a VAR declaration for a parameter; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_CallToTopLevelFuncEmitsBangToken(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:               "main",
+			ReturnType:         "Int",
+			ResolvedReturnType: "Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.CallExpr{Callee: "helper", ResolvedType: "Int64"},
+			}},
+		},
+		&ast.FuncDecl{
+			Name:               "helper",
+			ReturnType:         "Int",
+			ResolvedReturnType: "Int64",
+			Body:               &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 7}}},
+		},
+	}}
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "CALL\t%amifl_tmp1\t:\t!helper\n") {
+		t.Errorf("expected a value-producing CALL to !helper; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_UnitReturningFuncHasNoResultTypeAndBareRet(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:               "main",
+			ReturnType:         "Int",
+			ResolvedReturnType: "Int64",
+			Body:               &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		},
+		&ast.FuncDecl{
+			Name:               "log",
+			Params:             []ast.Param{{Name: "msg", Type: "String", ResolvedType: "String"}},
+			ReturnType:         "Unit",
+			ResolvedReturnType: unitType,
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.IdentExpr{Name: "msg", ResolvedType: "String", Token: "$1"}}},
+			}},
+		},
+	}}
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "FUNC\t!log\t^string\t:\n") {
+		t.Errorf("expected a Unit-returning FUNC header with no result type; got:\n%s", ir)
+	}
+	if !strings.Contains(ir, "\tRET\n") {
+		t.Errorf("expected a bare RET for a Unit-returning function; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_ClosureLitEmitsFntypeVarClos(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "square", Token: "%square_1", Value: &ast.ClosureLit{
+			Params:             []ast.Param{{Name: "x", Type: "Int", ResolvedType: "Int64"}},
+			ReturnType:         "Int",
+			ResolvedReturnType: "Int64",
+			ResolvedType:       "fn(Int64)->Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.BinaryExpr{Op: "*", ResolvedType: "Int64",
+					Left:  &ast.IdentExpr{Name: "x", ResolvedType: "Int64", Token: "&1-1"},
+					Right: &ast.IdentExpr{Name: "x", ResolvedType: "Int64", Token: "&1-1"},
+				},
+			}},
+		}},
+		&ast.CallExpr{Callee: "square", CalleeToken: "%square_1", ResolvedType: "Int64", Args: []ast.Expr{&ast.IntLit{Value: 5}}},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"FNTYPE\t^AmiflFunc1\t^int64\t:\t^int64",
+		"VAR\t%square_1\t^AmiflFunc1",
+		"CLOS\t%square_1\t^int64\t:\t^int64",
+		"MUL\t%amifl_tmp1\t&1-1\t&1-1",
+		"RET\t%amifl_tmp1",
+		"ENDCLOS",
+		"CALL\t%amifl_tmp2\t:\t%square_1\t5",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_ClosureCapturesOuterLetTokenDirectly(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "base", Token: "%base_1", ResolvedType: "Int64", Value: &ast.IntLit{Value: 10}},
+		&ast.LetExpr{Name: "addBase", Token: "%addBase_2", Value: &ast.ClosureLit{
+			Params:             []ast.Param{{Name: "x", Type: "Int", ResolvedType: "Int64"}},
+			ReturnType:         "Int",
+			ResolvedReturnType: "Int64",
+			ResolvedType:       "fn(Int64)->Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.BinaryExpr{Op: "+", ResolvedType: "Int64",
+					Left:  &ast.IdentExpr{Name: "x", ResolvedType: "Int64", Token: "&1-1"},
+					Right: &ast.IdentExpr{Name: "base", ResolvedType: "Int64", Token: "%base_1"},
+				},
+			}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "ADD\t%amifl_tmp1\t&1-1\t%base_1") {
+		t.Errorf("expected the closure body to reference the captured outer %%base_1 token directly; got:\n%s", ir)
 	}
 }

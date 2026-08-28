@@ -123,9 +123,8 @@ func (p *parser) parseFuncDecl() (*ast.FuncDecl, error) {
 	if _, err := p.expect(lexer.LParen); err != nil {
 		return nil, err
 	}
-	// Step 1 only supports parameter-less functions (amifl-spec.md section
-	// 14's `fn main() -> Int { ... }` form); parameters land in step 5.
-	if _, err := p.expect(lexer.RParen); err != nil {
+	params, err := p.parseParamList()
+	if err != nil {
 		return nil, err
 	}
 	if _, err := p.expect(lexer.Arrow); err != nil {
@@ -139,7 +138,76 @@ func (p *parser) parseFuncDecl() (*ast.FuncDecl, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.FuncDecl{Name: nameTok.Value, ReturnType: retTok.Value, Body: body, Line: nameTok.Line}, nil
+	return &ast.FuncDecl{Name: nameTok.Value, Params: params, ReturnType: retTok.Value, Body: body, Line: nameTok.Line}, nil
+}
+
+// parseParamList parses a `fn`/closure-literal parameter list's contents
+// (everything between an already-consumed `(` and the terminating `)`,
+// which this also consumes): zero or more comma-separated `name: Type`
+// entries. Shared verbatim between parseFuncDecl and parseClosureLit —
+// amifl-spec.md section 8.1's grammar for the two is identical. Step 5
+// restricts Type to a plain scalar identifier (see ast.Param's doc
+// comment) — a `fn(...) -> R` type here (a function-valued parameter)
+// isn't supported yet, so this never recurses into fn-type parsing the
+// way a hypothetical parseType would.
+func (p *parser) parseParamList() ([]ast.Param, error) {
+	var params []ast.Param
+	if p.cur.Kind != lexer.RParen {
+		for {
+			nameTok, err := p.expect(lexer.Ident)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.Colon); err != nil {
+				return nil, err
+			}
+			typeTok, err := p.expect(lexer.Ident)
+			if err != nil {
+				return nil, err
+			}
+			params = append(params, ast.Param{Name: nameTok.Value, Type: typeTok.Value, Line: nameTok.Line})
+			if p.cur.Kind != lexer.Comma {
+				break
+			}
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RParen); err != nil {
+		return nil, err
+	}
+	return params, nil
+}
+
+// parseClosureLit parses `fn(params) -> R { body }` as an expression
+// (amifl-spec.md section 8.1) — reachable only from parsePrimaryExpr,
+// never from parseTopLevelDecl's statement-position `fn`, so there's no
+// ambiguity between the two despite sharing the KwFn keyword.
+func (p *parser) parseClosureLit() (ast.Expr, error) {
+	kwTok, err := p.expect(lexer.KwFn)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.LParen); err != nil {
+		return nil, err
+	}
+	params, err := p.parseParamList()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.Arrow); err != nil {
+		return nil, err
+	}
+	retTok, err := p.expect(lexer.Ident)
+	if err != nil {
+		return nil, err
+	}
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.ClosureLit{Params: params, ReturnType: retTok.Value, Body: body, Line: kwTok.Line}, nil
 }
 
 // parseConstDecl parses a `const name[: Type] = expr` declaration. The
@@ -414,6 +482,8 @@ func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
 			return nil, err
 		}
 		return &ast.ContinueExpr{Line: tok.Line}, nil
+	case lexer.KwFn:
+		return p.parseClosureLit()
 	default:
 		return nil, p.errorf("unexpected %s, expected an expression", p.cur.Kind)
 	}

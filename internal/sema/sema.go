@@ -6,17 +6,29 @@ import (
 	"github.com/amisonnet8/amifl/internal/ast"
 )
 
+// reservedMainName must match codegen's entryFunc constant — both are
+// deliberately independent copies of the same string, not a shared
+// symbol (ast is sema's and codegen's only shared vocabulary; see
+// CLAUDE.md's リポジトリ構成). A user-declared `fn`/`const` named this
+// would collide with the internal name codegen compiles the user's own
+// `fn main` under (CLAUDE.md's "確定した設計判断" for step 1's main/
+// amifl_main bridge) — Cascade's CLAUDE.md records the identical
+// reservation for its own `cascade_main`.
+const reservedMainName = "amifl_main"
+
 // Check performs semantic validation: scalar type checking, let/const
 // scope resolution (with const inlining), operators (step 3), if/elif/
-// else/while/switch and their lexical scoping (step 4), and the
+// else/while/switch and their lexical scoping (step 4), top-level `fn`
+// declarations (any number, any parameter list, callable in any order —
+// forward references and mutual/self recursion all just work, since every
+// signature is registered in one pass before any body is checked) and
+// local closures with their own `Func` type (step 5), and the
 // expression-oriented "every non-final expression in a block must be
 // Unit-typed" rule (amifl-spec.md principle 1). AmiFL's full type system
-// (structs, enums, collections, capability resolution, general function
-// calls, ...) grows across later steps — see CLAUDE.md's implementation
-// step plan. Only a single `fn main` is supported so far; declaring and
-// calling other functions arrives in step 5.
+// (structs, enums, collections, capability resolution, ...) grows across
+// later steps — see CLAUDE.md's implementation step plan.
 func Check(f *ast.File) error {
-	c := &checker{globals: map[string]*binding{}}
+	c := &checker{globals: map[string]*binding{}, funcs: map[string]funcSig{}}
 
 	var funcs []*ast.FuncDecl
 	for _, decl := range f.Decls {
@@ -32,22 +44,40 @@ func Check(f *ast.File) error {
 		}
 	}
 
-	// Consts are resolved (in file order, so a const may only reference
-	// an *earlier* const — CLAUDE.md's "確定した設計判断") in the loop
-	// above before any function is checked here, so every function sees
-	// every top-level const regardless of where in the file it sits.
-	main, err := findAndValidateMain(funcs)
-	if err != nil {
+	// Pass 1: register every function's signature (and validate its own
+	// parameter list) before checking any body, so a call can reference a
+	// function declared later in the file, or itself, or another function
+	// that in turn calls back into it.
+	for _, fn := range funcs {
+		if err := c.registerFuncSig(fn); err != nil {
+			return err
+		}
+	}
+
+	if _, err := findAndValidateMain(funcs); err != nil {
 		return err
 	}
-	return c.checkFunc(main)
+
+	// Pass 2: check every body, now that every signature (including a
+	// forward or mutually-recursive reference) is already known.
+	for _, fn := range funcs {
+		if err := c.checkFunc(fn); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
+// findAndValidateMain locates `fn main` among funcs (whose signatures
+// registerFuncSig must have already resolved) and enforces amifl-spec.md
+// section 14's entry-point shape: exactly one `fn main`, taking no
+// parameters (the `List[String] args` form is deferred to step 7, once
+// `List` exists) and returning `Int`.
 func findAndValidateMain(funcs []*ast.FuncDecl) (*ast.FuncDecl, error) {
 	var main *ast.FuncDecl
 	for _, fn := range funcs {
 		if fn.Name != "main" {
-			return nil, fmt.Errorf("line %d: step 2 only supports a single `fn main`; general function declarations arrive in step 5", fn.Line)
+			continue
 		}
 		if main != nil {
 			return nil, fmt.Errorf("line %d: duplicate `fn main` (first declared at line %d)", fn.Line, main.Line)
@@ -57,17 +87,19 @@ func findAndValidateMain(funcs []*ast.FuncDecl) (*ast.FuncDecl, error) {
 	if main == nil {
 		return nil, fmt.Errorf("missing entry point: no `fn main` declared (amifl-spec.md section 14)")
 	}
-	retType, ok := canonicalType(main.ReturnType)
-	if !ok {
-		return nil, fmt.Errorf("line %d: unknown type %q", main.Line, main.ReturnType)
+	if len(main.Params) != 0 {
+		return nil, fmt.Errorf("line %d: fn main must take no parameters in step 5 (List[String] args land in step 7)", main.Line)
 	}
-	if retType != "Int64" {
+	if main.ResolvedReturnType != "Int64" {
 		return nil, fmt.Errorf("line %d: fn main must return Int, got %s", main.Line, main.ReturnType)
 	}
 	return main, nil
 }
 
 func (c *checker) checkTopLevelConst(d *ast.ConstDecl) error {
+	if d.Name == reservedMainName {
+		return fmt.Errorf("line %d: %q is a reserved name (used internally to compile `fn main`)", d.Line, d.Name)
+	}
 	if _, exists := c.globals[d.Name]; exists {
 		return fmt.Errorf("line %d: %q is already declared", d.Line, d.Name)
 	}
@@ -81,13 +113,62 @@ func (c *checker) checkTopLevelConst(d *ast.ConstDecl) error {
 	return nil
 }
 
-func (c *checker) checkFunc(fn *ast.FuncDecl) error {
-	retType, ok := canonicalType(fn.ReturnType)
+// registerFuncSig resolves and records fn's signature (amifl-spec.md
+// section 8.7 forbids overloading, so one entry per name suffices) —
+// Check's pass 1, run for every top-level function before any body is
+// checked.
+func (c *checker) registerFuncSig(fn *ast.FuncDecl) error {
+	if fn.Name == reservedMainName {
+		return fmt.Errorf("line %d: %q is a reserved name (used internally to compile `fn main`)", fn.Line, fn.Name)
+	}
+	if _, exists := c.funcs[fn.Name]; exists {
+		return fmt.Errorf("line %d: duplicate function %q", fn.Line, fn.Name)
+	}
+	if _, exists := c.globals[fn.Name]; exists {
+		return fmt.Errorf("line %d: %q is already declared as a const", fn.Line, fn.Name)
+	}
+
+	seen := map[string]bool{}
+	var params []string
+	for i := range fn.Params {
+		p := &fn.Params[i]
+		if seen[p.Name] {
+			return fmt.Errorf("line %d: duplicate parameter %q", p.Line, p.Name)
+		}
+		seen[p.Name] = true
+		pt, ok := canonicalType(p.Type)
+		if !ok {
+			return fmt.Errorf("line %d: unknown type %q", p.Line, p.Type)
+		}
+		p.ResolvedType = pt
+		params = append(params, pt)
+	}
+
+	retType, ok := canonicalReturnType(fn.ReturnType)
 	if !ok {
 		return fmt.Errorf("line %d: unknown type %q", fn.Line, fn.ReturnType)
 	}
+	fn.ResolvedReturnType = retType
+	c.funcs[fn.Name] = funcSig{params: params, ret: retType}
+	return nil
+}
+
+// checkFunc type-checks fn's body against its already-registered
+// signature (registerFuncSig) — Check's pass 2. Parameters are declared
+// as non-reassignable bindings (binding.reassignable stays false; see its
+// doc comment) holding "$N" tokens, 1-indexed and unqualified by name
+// (amivm_spec.md section 3: "$Nの意味は「関数引数」...関数名による修飾は
+// 無い" — position alone identifies a FUNC's own parameter).
+func (c *checker) checkFunc(fn *ast.FuncDecl) error {
+	sig := c.funcs[fn.Name]
 	fc := newFuncChecker(c)
-	_, err := fc.checkBlock(fn.Body, retType)
+	for i, p := range fn.Params {
+		token := fmt.Sprintf("$%d", i+1)
+		if err := fc.declare(p.Name, &binding{typ: sig.params[i], token: token}); err != nil {
+			return fmt.Errorf("line %d: %s", p.Line, err)
+		}
+	}
+	_, err := fc.checkBlock(fn.Body, sig.ret)
 	return err
 }
 

@@ -43,15 +43,20 @@ func TestCheck_DuplicateMainIsAnError(t *testing.T) {
 	}
 }
 
-func TestCheck_NonMainTopLevelFuncIsAnError(t *testing.T) {
-	f := mainFile(&ast.IntLit{Value: 0})
+func TestCheck_MultipleTopLevelFuncsAreAllowed(t *testing.T) {
+	// Step 5 lifts the earlier "only fn main" restriction: any number of
+	// top-level functions may coexist, called from main by name.
+	f := mainFile(
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "helper"}},
+		&ast.IntLit{Value: 0},
+	)
 	f.Decls = append(f.Decls, &ast.FuncDecl{
 		Name:       "helper",
 		ReturnType: "Int",
 		Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 	})
-	if err := Check(f); err == nil {
-		t.Fatal("expected an error for a non-main top-level fn (step 2 limitation)")
+	if err := Check(f); err != nil {
+		t.Fatalf("unexpected error for multiple top-level funcs: %v", err)
 	}
 }
 
@@ -818,5 +823,297 @@ func TestCheck_LoopDepthRestoredAfterWhileExits(t *testing.T) {
 	)
 	if err := Check(f); err == nil {
 		t.Fatal("expected an error for break after the while it was inside of has ended")
+	}
+}
+
+func TestCheck_FuncWithParamsIsCallable(t *testing.T) {
+	f := mainFile(
+		&ast.CallExpr{Callee: "add", Args: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}}},
+	)
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name:       "add",
+		Params:     []ast.Param{{Name: "a", Type: "Int"}, {Name: "b", Type: "Int"}},
+		ReturnType: "Int",
+		Body: &ast.Block{Exprs: []ast.Expr{
+			&ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}},
+		}},
+	})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_CallWrongArgCountIsAnError(t *testing.T) {
+	f := mainFile(&ast.CallExpr{Callee: "add", Args: []ast.Expr{&ast.IntLit{Value: 1}}})
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name:       "add",
+		Params:     []ast.Param{{Name: "a", Type: "Int"}, {Name: "b", Type: "Int"}},
+		ReturnType: "Int",
+		Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+	})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for calling add with the wrong number of arguments")
+	}
+}
+
+func TestCheck_CallWrongArgTypeIsAnError(t *testing.T) {
+	f := mainFile(&ast.CallExpr{Callee: "add", Args: []ast.Expr{&ast.StringLit{Value: "x"}, &ast.IntLit{Value: 2}}})
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name:       "add",
+		Params:     []ast.Param{{Name: "a", Type: "Int"}, {Name: "b", Type: "Int"}},
+		ReturnType: "Int",
+		Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+	})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for calling add with a String where an Int is expected")
+	}
+}
+
+func TestCheck_DuplicateParamNameIsAnError(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name:       "bad",
+		Params:     []ast.Param{{Name: "a", Type: "Int"}, {Name: "a", Type: "Int"}},
+		ReturnType: "Int",
+		Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+	})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a duplicate parameter name")
+	}
+}
+
+func TestCheck_ParamIsNotReassignable(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name:       "bad",
+		Params:     []ast.Param{{Name: "a", Type: "Int"}},
+		ReturnType: "Int",
+		Body: &ast.Block{Exprs: []ast.Expr{
+			&ast.AssignExpr{Name: "a", Value: &ast.IntLit{Value: 5}},
+			&ast.IdentExpr{Name: "a"},
+		}},
+	})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for reassigning a function parameter")
+	}
+}
+
+func TestCheck_SelfRecursionIsValid(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name:       "loop",
+		Params:     []ast.Param{{Name: "n", Type: "Int"}},
+		ReturnType: "Int",
+		Body: &ast.Block{Exprs: []ast.Expr{
+			&ast.CallExpr{Callee: "loop", Args: []ast.Expr{&ast.IdentExpr{Name: "n"}}},
+		}},
+	})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ForwardReferenceAndMutualRecursionAreValid(t *testing.T) {
+	// `even` calls `odd`, declared *after* it in the file — and `odd`
+	// calls back into `even` — both must resolve regardless of order,
+	// since every signature is registered before any body is checked.
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls,
+		&ast.FuncDecl{
+			Name:       "even",
+			Params:     []ast.Param{{Name: "n", Type: "Int"}},
+			ReturnType: "Bool",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.CallExpr{Callee: "odd", Args: []ast.Expr{&ast.IdentExpr{Name: "n"}}},
+			}},
+		},
+		&ast.FuncDecl{
+			Name:       "odd",
+			Params:     []ast.Param{{Name: "n", Type: "Int"}},
+			ReturnType: "Bool",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.CallExpr{Callee: "even", Args: []ast.Expr{&ast.IdentExpr{Name: "n"}}},
+			}},
+		},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_DuplicateFuncNameIsAnError(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	dup := &ast.FuncDecl{Name: "helper", ReturnType: "Int", Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}}
+	f.Decls = append(f.Decls, dup, dup)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a duplicate function name")
+	}
+}
+
+func TestCheck_FuncNameCollidingWithConstIsAnError(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls,
+		&ast.ConstDecl{Name: "X", Value: &ast.IntLit{Value: 1}},
+		&ast.FuncDecl{Name: "X", ReturnType: "Int", Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a fn name colliding with a top-level const")
+	}
+}
+
+func TestCheck_ReservedMainNameIsAnError(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name: "amifl_main", ReturnType: "Int", Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+	})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for declaring a fn named the reserved amifl_main")
+	}
+}
+
+func TestCheck_MainWithParamsIsAnError(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:       "main",
+			Params:     []ast.Param{{Name: "x", Type: "Int"}},
+			ReturnType: "Int",
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		},
+	}}
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for fn main taking parameters in step 5")
+	}
+}
+
+func TestCheck_UnitReturnTypeIsValidOnlyForFunctions(t *testing.T) {
+	f := mainFile(&ast.CallExpr{Callee: "log", Args: []ast.Expr{&ast.StringLit{Value: "hi"}}}, &ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name:       "log",
+		Params:     []ast.Param{{Name: "msg", Type: "String"}},
+		ReturnType: "Unit",
+		Body:       &ast.Block{Exprs: []ast.Expr{printStr("logged")}},
+	})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_LetTypeAnnotationCannotBeUnit(t *testing.T) {
+	f := mainFile(&ast.LetExpr{Name: "x", Type: "Unit", Value: &ast.IntLit{Value: 0}}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a `let` annotated Unit (only a function's own return type may be Unit)")
+	}
+}
+
+func TestCheck_ClosureLitBoundToLetIsCallable(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "square", Value: &ast.ClosureLit{
+			Params:     []ast.Param{{Name: "x", Type: "Int"}},
+			ReturnType: "Int",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.BinaryExpr{Op: "*", Left: &ast.IdentExpr{Name: "x"}, Right: &ast.IdentExpr{Name: "x"}},
+			}},
+		}},
+		&ast.CallExpr{Callee: "square", Args: []ast.Expr{&ast.IntLit{Value: 5}}},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ClosureCapturesOuterLet(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "base", Type: "Int", Value: &ast.IntLit{Value: 10}},
+		&ast.LetExpr{Name: "addBase", Value: &ast.ClosureLit{
+			Params:     []ast.Param{{Name: "x", Type: "Int"}},
+			ReturnType: "Int",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "x"}, Right: &ast.IdentExpr{Name: "base"}},
+			}},
+		}},
+		&ast.CallExpr{Callee: "addBase", Args: []ast.Expr{&ast.IntLit{Value: 5}}},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ClosureLitWithTypeAnnotationIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "square", Type: "Int", Value: &ast.ClosureLit{
+			Params:     []ast.Param{{Name: "x", Type: "Int"}},
+			ReturnType: "Int",
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IdentExpr{Name: "x"}}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a closure-valued `let` carrying its own type annotation")
+	}
+}
+
+func TestCheck_ClosureLitAsCallArgumentIsAnError(t *testing.T) {
+	// Step 5 only supports a ClosureLit as a `let`'s direct value — not as
+	// a call argument (no higher-order functions yet).
+	f := mainFile(
+		&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.ClosureLit{
+			ReturnType: "Int",
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		}}},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a closure literal used as a call argument")
+	}
+}
+
+func TestCheck_CallingNonFunctionIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: "Int", Value: &ast.IntLit{Value: 1}},
+		&ast.CallExpr{Callee: "x", Args: nil},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for calling a non-function value")
+	}
+}
+
+func TestCheck_CallingUndefinedFunctionIsAnError(t *testing.T) {
+	f := mainFile(&ast.CallExpr{Callee: "nope", Args: nil})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for calling an undefined function")
+	}
+}
+
+func TestCheck_FuncValuesCannotBeCompared(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "a", Value: &ast.ClosureLit{
+			ReturnType: "Int",
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		}},
+		&ast.LetExpr{Name: "b", Value: &ast.ClosureLit{
+			ReturnType: "Int",
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		}},
+		&ast.BinaryExpr{Op: "==", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for comparing two function values with ==")
+	}
+}
+
+func TestCheck_LocalClosureShadowsSameNamedTopLevelFunc(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "helper", Value: &ast.ClosureLit{
+			ReturnType: "Int",
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 99}}},
+		}},
+		&ast.CallExpr{Callee: "helper", Args: nil},
+	)
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name:       "helper",
+		ReturnType: "String",
+		Body:       &ast.Block{Exprs: []ast.Expr{&ast.StringLit{Value: "top-level"}}},
+	})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
 	}
 }

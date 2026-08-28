@@ -532,3 +532,91 @@ func TestParse_IntLiteralIsNotFloat(t *testing.T) {
 		t.Fatalf("got %T, want *ast.IntLit", let.Value)
 	}
 }
+
+func TestParse_FuncDeclWithParams(t *testing.T) {
+	src := "fn add(a: Int, b: Int) -> Int {\n    a + b\n}\nfn main() -> Int {\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	var add *ast.FuncDecl
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name == "add" {
+			add = fn
+		}
+	}
+	if add == nil {
+		t.Fatal("fn add not found")
+	}
+	if len(add.Params) != 2 {
+		t.Fatalf("got %d params, want 2", len(add.Params))
+	}
+	if add.Params[0].Name != "a" || add.Params[0].Type != "Int" {
+		t.Errorf("param 0: got %+v", add.Params[0])
+	}
+	if add.Params[1].Name != "b" || add.Params[1].Type != "Int" {
+		t.Errorf("param 1: got %+v", add.Params[1])
+	}
+	if add.ReturnType != "Int" {
+		t.Errorf("got ReturnType %q, want Int", add.ReturnType)
+	}
+}
+
+func TestParse_FuncDeclWithNoParams(t *testing.T) {
+	f, err := Parse("fn main() -> Int {\n    0\n}\n")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	fn := parseFuncMain(t, f)
+	if len(fn.Params) != 0 {
+		t.Fatalf("got %d params, want 0", len(fn.Params))
+	}
+}
+
+func TestParse_CallWithArgs(t *testing.T) {
+	call := parseExprSrc(t, "add(1, 2)").(*ast.CallExpr)
+	if call.Callee != "add" || len(call.Args) != 2 {
+		t.Fatalf("got CallExpr{Callee: %q, len(Args): %d}", call.Callee, len(call.Args))
+	}
+}
+
+func TestParse_ClosureLitAsLetValue(t *testing.T) {
+	src := "fn main() -> Int {\n    let square = fn(x: Int) -> Int { x * x }\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	if let.Name != "square" {
+		t.Fatalf("got let name %q, want square", let.Name)
+	}
+	clos, ok := let.Value.(*ast.ClosureLit)
+	if !ok {
+		t.Fatalf("got %T, want *ast.ClosureLit", let.Value)
+	}
+	if len(clos.Params) != 1 || clos.Params[0].Name != "x" || clos.Params[0].Type != "Int" {
+		t.Fatalf("got params %+v", clos.Params)
+	}
+	if clos.ReturnType != "Int" {
+		t.Fatalf("got ReturnType %q, want Int", clos.ReturnType)
+	}
+	if len(clos.Body.Exprs) != 1 {
+		t.Fatalf("got %d body exprs, want 1", len(clos.Body.Exprs))
+	}
+}
+
+func TestParse_ClosureLitWithNoParamsAndUnitReturn(t *testing.T) {
+	src := "fn main() -> Int {\n    let noop = fn() -> Unit { print(\"hi\") }\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	clos := let.Value.(*ast.ClosureLit)
+	if len(clos.Params) != 0 {
+		t.Fatalf("got %d params, want 0", len(clos.Params))
+	}
+	if clos.ReturnType != "Unit" {
+		t.Fatalf("got ReturnType %q, want Unit", clos.ReturnType)
+	}
+}

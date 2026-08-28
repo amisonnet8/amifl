@@ -9,13 +9,25 @@ import (
 )
 
 // entryFunc is the AMIVM function name user code's `fn main` compiles to.
-// AmiFL's `main` returns Int (and, from step 5, takes List[String] args),
+// AmiFL's `main` returns Int (and, from step 7, takes List[String] args),
 // which is incompatible with Go's argument-less, return-less
 // `func main()` — so, following Seed/Cascade/Weave's precedent (CLAUDE.md
 // "過去に踏まれた地雷"), user code compiles under this internal name and
 // Generate emits a thin `!main` wrapper that calls it and passes the
-// result to os.Exit.
+// result to os.Exit. Must match sema's reservedMainName constant — see
+// its doc comment for why the two packages each keep their own copy
+// rather than sharing one.
 const entryFunc = "amifl_main"
+
+// unitType mirrors sema's unitType sentinel string exactly (ast is the
+// only vocabulary codegen and sema share — see CLAUDE.md's リポジトリ構成
+// — so this is a second, independent copy of the same convention, not an
+// import). Step 5 is the first time codegen itself needs to recognize
+// "Unit" as a value: a function/closure whose return type resolved to
+// Unit compiles to a Go function with zero result values (no `goTypeNames`
+// entry exists for it, nor should one — Unit has no runtime
+// representation at all, amifl-spec.md section 2.2).
+const unitType = "Unit"
 
 // goTypeNames maps AmiFL's canonical scalar type names (sema has already
 // resolved aliases like "Int" -> "Int64" by the time codegen sees them)
@@ -27,20 +39,41 @@ var goTypeNames = map[string]string{
 	"Bool": "bool", "String": "string",
 }
 
-// Generate lowers a sema-checked AmiFL file into AMIVM-IR text.
+// Generate lowers a sema-checked AmiFL file into AMIVM-IR text. Step 5
+// generalizes this from "compile the single `fn main`" to "compile every
+// top-level `fn`" — each becomes its own FUNC/ENDFUNC block (main's own
+// under its internal entryFunc name, same as before), in file order.
 func Generate(f *ast.File) (string, error) {
 	main := findMain(f)
 	if main == nil {
 		return "", fmt.Errorf("codegen: no fn main (sema should have rejected this)")
 	}
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "FUNC\t!%s\t:\t^int64\n", entryFunc)
-	g := &gen{b: &b}
-	if err := g.genBlock(main.Body.Exprs); err != nil {
-		return "", err
+	prog := &program{}
+	var funcsBuf strings.Builder
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		if err := genFuncDecl(prog, &funcsBuf, fn); err != nil {
+			return "", err
+		}
+		funcsBuf.WriteString("\n")
 	}
-	b.WriteString("ENDFUNC\n\n")
+
+	var b strings.Builder
+	// Any closure literal encountered while generating the functions above
+	// registered its shape's FNTYPE line into prog — emitted here, ahead
+	// of every FUNC block, matching every amivm FNTYPE/CLOS example seen
+	// (CLAUDE.md's AMIVM-IR reference); Go's own package-level
+	// declarations are order-independent, but nothing establishes amivm's
+	// own IR parsing is, so this plays it safe rather than relying on that.
+	if prog.typeHeader.Len() > 0 {
+		b.WriteString(prog.typeHeader.String())
+		b.WriteString("\n")
+	}
+	b.WriteString(funcsBuf.String())
 
 	// os.Exit takes Go's native (platform-width) int, not AmiFL's
 	// fixed-width Int64 — %code is cast down via the CALL-as-Go-type-
@@ -67,6 +100,52 @@ func findMain(f *ast.File) *ast.FuncDecl {
 	return nil
 }
 
+// genFuncDecl emits one top-level `fn` as `FUNC !name paramType1 ... :
+// [retType] ... ENDFUNC` into out, using name (fn.Name, or entryFunc for
+// the user's own `fn main` — see entryFunc's doc comment). A Unit-
+// returning function has no result type at all in its FUNC header (Go's
+// own "func f(...) { ... }" with no result list) and its body runs
+// entirely for effect (genStmtBlock, exactly like a while body) followed
+// by a bare RET (amifl-spec.md section 2.2, Unit has no runtime value to
+// return) — every other function keeps step 1's genBlock (tail expression
+// becomes RET's operand).
+func genFuncDecl(prog *program, out *strings.Builder, fn *ast.FuncDecl) error {
+	name := fn.Name
+	if name == "main" {
+		name = entryFunc
+	}
+
+	out.WriteString("FUNC\t!" + name)
+	for _, p := range fn.Params {
+		goType, ok := goTypeNames[p.ResolvedType]
+		if !ok {
+			return fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", p.ResolvedType)
+		}
+		out.WriteString("\t^" + goType)
+	}
+	out.WriteString("\t:")
+	if fn.ResolvedReturnType != unitType {
+		goType, ok := goTypeNames[fn.ResolvedReturnType]
+		if !ok {
+			return fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", fn.ResolvedReturnType)
+		}
+		out.WriteString("\t^" + goType)
+	}
+	out.WriteString("\n")
+
+	g := &gen{b: out, prog: prog}
+	if fn.ResolvedReturnType == unitType {
+		if err := g.genStmtBlock(fn.Body.Exprs); err != nil {
+			return err
+		}
+		out.WriteString("\tRET\n")
+	} else if err := g.genBlock(fn.Body.Exprs); err != nil {
+		return err
+	}
+	out.WriteString("ENDFUNC\n")
+	return nil
+}
+
 // gen holds the per-function codegen state. Step 4's if/while compile to
 // AMIVM's IF/LOOP, which are themselves genuinely nested Go blocks (not
 // goto-based), so there is still nothing to hoist VAR declarations past —
@@ -74,9 +153,20 @@ func findMain(f *ast.File) *ast.FuncDecl {
 // depth that is. Revisit this once an actually goto-producing construct
 // (switch's break-out-of-multiple-cases, for-in's continue) exists; see
 // CLAUDE.md's "過去に踏まれた地雷" #1.
+//
+// Step 5's CLOS is, like IF/LOOP, a genuinely nested Go block (a nested
+// Go func literal) — so a closure literal's body is generated by
+// recursing into the *same* gen (see genClosureLitInto in closure.go),
+// sharing tmpSeq (Go temp names climbing monotonically across an outer
+// function and any closures nested in it causes no collision — they're
+// simply different, non-overlapping numbers, and Go's own block scoping
+// keeps them in fully separate namespaces regardless) and prog (so every
+// closure's FNTYPE, at any nesting depth, lands in the same shared
+// top-level header — see Generate).
 type gen struct {
 	b      *strings.Builder
 	tmpSeq int
+	prog   *program
 }
 
 // newTemp mints a fresh internal variable name for a binary/unary
@@ -202,27 +292,117 @@ func (g *gen) genStmt(e ast.Expr) error {
 	}
 }
 
+// genCallStmt emits `callee(args...)` purely for effect, discarding any
+// result — a bare CALL with no result operand (Go's own "callee(args)"
+// used as a statement, discarding whatever it returns, is always legal
+// regardless of the callee's return type), so this same code path handles
+// a Unit-returning call (the only kind sema lets appear undiscarded in
+// statement position) and a discarded non-Unit one (reached via
+// DiscardExpr -> genStmt's recursion) identically — see calleeToken for
+// how print/closure-call/top-level-fn-call are told apart.
 func (g *gen) genCallStmt(c *ast.CallExpr) error {
-	if c.Callee != "print" {
-		return fmt.Errorf("codegen: unsupported call %q (sema should have rejected this)", c.Callee)
+	if c.Callee == "print" {
+		arg, err := g.genValue(c.Args[0])
+		if err != nil {
+			return err
+		}
+		g.writeCall("", "?fmt.Println", []string{arg})
+		return nil
 	}
-	arg, err := g.genValue(c.Args[0])
+	calleeToken, err := g.calleeToken(c)
 	if err != nil {
 		return err
 	}
-	// The operand is passed as CALL's own value argument, never
-	// concatenated into the format string — an operand containing a
-	// literal '%' would otherwise be misread as a format verb
-	// (CLAUDE.md's "過去に踏まれた地雷" #12).
-	fmt.Fprintf(g.b, "\tCALL\t:\t?fmt.Println\t%s\n", arg)
+	argVals, err := g.genArgValues(c.Args)
+	if err != nil {
+		return err
+	}
+	g.writeCall("", calleeToken, argVals)
 	return nil
 }
 
-// genLetStmt emits a `let`'s VAR/SET under its InternalName (sema's
-// freshInternalName), never its bare surface Name — see
-// ast.LetExpr.InternalName for why a shadowing `let` needs a distinct Go
-// name even though AmiFL itself lets it reuse the outer name.
+// genCallValue is genCallStmt's counterpart for a call used as a value
+// (its return type is non-Unit): declares a fresh temp of the call's
+// result type and receives the CALL's result into it.
+func (g *gen) genCallValue(c *ast.CallExpr) (string, error) {
+	calleeToken, err := g.calleeToken(c)
+	if err != nil {
+		return "", err
+	}
+	argVals, err := g.genArgValues(c.Args)
+	if err != nil {
+		return "", err
+	}
+	goType, ok := goTypeNames[c.ResolvedType]
+	if !ok {
+		return "", fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", c.ResolvedType)
+	}
+	tmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, goType)
+	g.writeCall("%"+tmp, calleeToken, argVals)
+	return "%" + tmp, nil
+}
+
+// calleeToken returns c's callname operand. sema's resolveCallExpr sets
+// CalleeToken only for a call through a closure-valued variable (its
+// binding's own token, whatever shape — "%f_3"/"$1"/"&1-1"); anything
+// else must be a top-level `fn` call by name, so codegen derives "!" +
+// name here directly, substituting the internal entry-point name for
+// "main" (ast.CallExpr.CalleeToken's doc comment explains why this
+// substitution lives here rather than in sema).
+func (g *gen) calleeToken(c *ast.CallExpr) (string, error) {
+	if c.CalleeToken != "" {
+		return c.CalleeToken, nil
+	}
+	name := c.Callee
+	if name == "main" {
+		name = entryFunc
+	}
+	return "!" + name, nil
+}
+
+func (g *gen) genArgValues(args []ast.Expr) ([]string, error) {
+	vals := make([]string, len(args))
+	for i, a := range args {
+		v, err := g.genValue(a)
+		if err != nil {
+			return nil, err
+		}
+		vals[i] = v
+	}
+	return vals, nil
+}
+
+// writeCall emits one CALL instruction. dest is the result operand
+// ("%tmp") or "" to discard the result entirely (amivm_spec.md section
+// 4.13: "multi1が無い場合はcallname(value1, value2 ...)").
+func (g *gen) writeCall(dest, calleeToken string, args []string) {
+	g.b.WriteString("\tCALL\t")
+	if dest != "" {
+		g.b.WriteString(dest)
+		g.b.WriteString("\t")
+	}
+	g.b.WriteString(":\t")
+	g.b.WriteString(calleeToken)
+	for _, a := range args {
+		g.b.WriteString("\t")
+		g.b.WriteString(a)
+	}
+	g.b.WriteString("\n")
+}
+
+// genLetStmt emits a `let`'s VAR/SET under its Token (sema's
+// freshInternalName, prefixed with "%"), never its bare surface Name —
+// see ast.LetExpr.Token for why a shadowing `let` needs a distinct Go
+// name even though AmiFL itself lets it reuse the outer name. A closure-
+// literal value is handled entirely separately (genClosureLitInto,
+// closure.go): CLOS emits directly into a pre-declared target rather than
+// producing a value genValue can hand back and SET afterward the way
+// every other expression kind does.
 func (g *gen) genLetStmt(v *ast.LetExpr) error {
+	if clos, ok := v.Value.(*ast.ClosureLit); ok {
+		return g.genClosureLitInto(v.Token, clos)
+	}
 	goType, ok := goTypeNames[v.ResolvedType]
 	if !ok {
 		return fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", v.ResolvedType)
@@ -231,8 +411,8 @@ func (g *gen) genLetStmt(v *ast.LetExpr) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", v.InternalName, goType)
-	fmt.Fprintf(g.b, "\tSET\t%%%s\t%s\n", v.InternalName, val)
+	fmt.Fprintf(g.b, "\tVAR\t%s\t^%s\n", v.Token, goType)
+	fmt.Fprintf(g.b, "\tSET\t%s\t%s\n", v.Token, val)
 	return nil
 }
 
@@ -241,7 +421,7 @@ func (g *gen) genAssignStmt(v *ast.AssignExpr) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(g.b, "\tSET\t%%%s\t%s\n", v.InternalName, val)
+	fmt.Fprintf(g.b, "\tSET\t%s\t%s\n", v.Token, val)
 	return nil
 }
 
@@ -379,13 +559,15 @@ func (g *gen) genValue(e ast.Expr) (string, error) {
 		if v.ConstValue != nil {
 			return g.genValue(v.ConstValue)
 		}
-		return "%" + v.InternalName, nil
+		return v.Token, nil
 	case *ast.BinaryExpr:
 		return g.genBinaryValue(v)
 	case *ast.UnaryExpr:
 		return g.genUnaryValue(v)
 	case *ast.IfExpr:
 		return g.genIfValue(v)
+	case *ast.CallExpr:
+		return g.genCallValue(v)
 	default:
 		return "", fmt.Errorf("codegen: %T is not a value expression (sema should have rejected this)", e)
 	}
