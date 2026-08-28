@@ -186,31 +186,56 @@ Seed/Cascadeが通っていない領域、あるいはAmiFL固有の設計判断
 
 `amifl-spec.md` 16.1節が正。要約すると、`cmd/amifl/`（CLIエントリポイント）・`internal/{lexer,parser,ast,modloader,sema,codegen}/`（レイヤー分割。`ast`が唯一の共有語彙、`parser`は`lexer`+`ast`に依存、`sema`と`codegen`はどちらも`ast`にのみ依存し互いには依存しない——Seed以来一貫している設計）・`amiflrt/`（独自ランタイム、`go:embed`配布）・`examples/`（実装した構文ごとにサンプルを追加）・`tour/`（言語入門、実装が進んでから着手）という構成。
 
-## 実装ステップ計画（初版・調整前提）
+## 実装ステップ計画（15ステップ）
 
-Cascade（15ステップ）に近い規模感で見積もる。AmiFLはCascadeに無かった要素（パイプ演算子・`switch`パターンマッチの拡張・`capability`多相・`enum`・`extern`Go資産バインド）を持つため、各機能単位の縦切りで進める。**この計画は初版であり、実装しながら調整してよい**（Weaveが前半・後半で計画を都度見直したのと同じ運用）。各ステップは「機能単位の縦切り＋都度amivm→go build→実行で実地検証」（Seed §6.1以来の最重要教訓）を徹底すること。
+Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かった要素（パイプ演算子・`switch`パターンマッチの拡張・`capability`多相・`enum`・`extern`Go資産バインド）を持つため、各機能単位の縦切りで進める。**この計画は調整前提であり、実装しながら見直してよい**（Weaveが前半・後半で計画を都度見直したのと同じ運用）。各ステップは「機能単位の縦切り＋都度amivm→go build→実行で実地検証」（Seed §6.1以来の最重要教訓）を徹底すること。
 
 | # | ステップ | 主な内容 | 実証する命令（想定） | 解決する設計課題（上記番号） |
 |---|---|---|---|---|
-| 1 | ブートストラップ | lexer/parser/ast/codegen最小構成。`fn main() -> Int { print("Hello, AmiFL!") 0 }`をamivm→go build→実行まで通す | `FUNC` `RET` `ENDFUNC` `CALL` | `main`のブリッジ方針確定 |
-| 2 | スカラー型・`let`/`const`・式指向の基本 | `Int`系/`UInt`系/`Float`系/`Bool`/`String`、`let`（トップレベル禁止）・`const`（インライン展開）、ブロック値・`Unit`強制の検査 | `VAR` `SET` | — |
+| 1 ✅ | ブートストラップ | lexer/parser/ast/codegen最小構成。`fn main() -> Int { print("Hello, AmiFL!") 0 }`をamivm→go build→実行まで通す | `FUNC` `RET` `ENDFUNC` `CALL` | `main`のブリッジ方式確定（下記「確定した設計判断」参照） |
+| 2 | スカラー型・`let`/`const`・式指向の基礎 | `Int`系/`UInt`系/`Float`系/`Bool`/`String`、`let`（トップレベル禁止）・`const`（インライン展開）、ブロック値・`Unit`強制の検査 | `VAR` `SET` | — |
 | 3 | 演算子 | 算術・比較・論理・ビット・シフト・`Concatenable`の`+`、優先順位表の実地検証 | `ADD` `SUB` `MUL` `DIV` `MOD` `BAND` `BOR` `BXOR` `BCLEAR` `BNOT` `SHL` `SHR` `AND` `OR` `NOT` `EQ` `NEQ` `LT` `LTE` `GT` `GTE` `CONCAT` | — |
-| 4 | 制御構文（式指向） | `if`/`elif`/`else`、`switch`（`Bool`式のみ、`is Type`/`in [...]`/enumは後続ステップ）、`while`、`for`（`Unit`版のみ、`yield`は後続） | `IF` `ELIF` `ELSE` `ENDIF` `LOOP` `BREAK` `CONTINUE` `ENDLOOP` | — |
-| 5 | 関数・クロージャ | トップレベル`fn`（自己再帰可）、ローカルクロージャー（`let f = fn(...) {...}`、多引数・カリー化なし）、`Func`型 | `FNTYPE` `CLOS` `ENDCLOS` | — |
-| 6 | `Tuple2〜8`・`struct` | タプルリテラル・`.0`等の糖衣、`struct`定義・フィールドアクセス | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` | 設計課題3 |
-| 7 | `Array[T;N]`・`List[T]` | 固定長配列（多次元糖衣を含む）、可変長リスト、`x[i]`/`x[i]=v`/`x[a:b]`糖衣 | `SLTYPE` `SLMAKE` `SLICE` `ASET` `AGET` | 設計課題2 |
-| 8 | `enum`・`switch`拡張 | バリアント定義・値生成・`switch`での判定/フィールド取り出し、バリアント網羅性検査 | （設計課題4の結論による） | 設計課題4 |
+| 4 | 制御構文（式指向） | `if`/`elif`/`else`、`while`、`for`（`Unit`版のみ）。`switch`は`Bool`式のみ（`is Type`/`in [...]`/enumは後続） | `IF` `ELIF` `ELSE` `ENDIF` `LOOP` `BREAK` `CONTINUE` `ENDLOOP` | — |
+| 5 | 関数・クロージャ | トップレベル`fn`（自己再帰可）、ローカルクロージャー（多引数直接・カリー化なし）、`Func`型 | `FNTYPE` `CLOS` `ENDCLOS` | — |
+| 6 | `Tuple2〜8`・`struct` | タプルリテラル・`.0`等の糖衣、`struct`定義・フィールドアクセス | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` | 設計課題3（Tuple表現） |
+| 7 | `Array[T;N]`・`List[T]` | 固定長配列（多次元糖衣込み）、可変長リスト、`x[i]`/`x[i]=v`/`x[a:b]`糖衣 | `SLTYPE` `SLMAKE` `SLICE` `ASET` `AGET` | 設計課題2（Array表現） |
+| 8 | `enum`・`switch`拡張 | バリアント定義・値生成、`switch`での判定/フィールド取り出し、バリアント網羅性検査 | （設計課題4の結論による） | **設計課題4（先例無し・最大の山場の1つ）** |
 | 9 | パイプ演算子`|>` | `_`プレースホルダー、`for...yield`糖衣、`|>`の優先順位（最低） | （新規命令無し。糖衣構文） | 設計課題7 |
-| 10 | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5・6 |
-| 11 | 組み込み関数（データ操作・数値・型変換） | 13.2〜13.7節一式。`capability`多相の実装方式を確定させる | （`amiflrt`+ネイティブ命令の混在） | 設計課題6 |
-| 12 | `?`演算子・エラー処理 | `Tuple2[T, Error]`規約、後置`?`のsema展開 | （新規命令無し。`STTYPE`+`IF`+`RET`の組み合わせ） | — |
-| 13 | ファイルI/O・`Stream[T]` | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣 | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` | — |
-| 14 | 並列処理 | `spawn`/`send`/`recv`/`parallel`、`Chan[T]`本体 | `SPAWN` `SEL` `CASESEND` `CASERECV` `DEFAULT` `ENDSEL` `DEFER` | — |
-| 15 | `extern`機構 | Go資産バインド（15.1〜15.4節）、`Any`型境界の実装方式確定 | `ASSERT`（要否は設計課題1による） | 設計課題1 |
-| 16 | モジュール | `import`/エイリアス/可視性/循環禁止（12節） | — | — |
-| 17 | パイプラインDX機能・CLI・配布 | `tap`/`peek`、ステージ番号付き型エラー表示、CLI（16.2節）、`amiflrt`の`go:embed`配布、CI | — | 設計課題8 |
+| 10 | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5 |
+| 11 | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開 | （`amiflrt`+ネイティブ命令の混在） | **設計課題6（capability多相の実装方式）** |
+| 12 | ファイルI/O・`Stream[T]`・並列処理 | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣、`spawn`/`send`/`recv`/`parallel` | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` `SPAWN` `SEL` `CASESEND` `CASERECV` `DEFAULT` `ENDSEL` `DEFER` | — |
+| 13 | `extern`機構 | Go資産バインド（15.1〜15.4節）、`Any`型境界の実装方式確定 | `ASSERT`（要否は設計課題1による） | **設計課題1（先例無し・最大の山場の1つ）** |
+| 14 | モジュール | `import`/エイリアス/可視性/循環禁止（12節） | — | — |
+| 15 | パイプラインDX機能・CLI・配布 | `tap`/`peek`、ステージ番号付き型エラー表示、CLI（16.2節）実装、`amiflrt`の`go:embed`配布、CI | — | 設計課題8 |
 
-特にステップ8（`enum`）・ステップ9（パイプ演算子の糖衣設計）・ステップ11（`capability`多相の実装方式）・ステップ15（`extern`の`Any`境界）は先行実装に直接の前例が無い、または前提が異なるため、「ロジック上正しそうに見える」だけで次のステップへ進まないこと。
+**統合の理由**（当初18項目からの調整）:
+- Step12（ファイルI/O + 並列処理を統合）：`Stream[T]`は仕様上「`Chan[T]`+goroutineの糖衣」と明記されており（2.2節）、ファイルI/Oの`lines()`が`Stream[String]`を返す以上、並列処理の基盤（`Chan[T]`本体）を先に固めないとファイルI/O単体でも検証できないため
+- Step11（組み込み関数 + `?`演算子/エラー処理を統合）：`open`/`parse`等の組み込み関数はほぼ全て`Tuple2[T, Error]`を返す設計（13.3/13.9/13.10節）のため、エラー処理規約を組み込み関数と同時に固める方が実地検証しやすい
+
+Step 8（`enum`）・Step 11（`capability`多相）・Step 13（`extern`の`Any`境界）は先行実装（Seed/Cascade/Weave）に直接の前例が無い、または前提が異なる領域のため、「ロジック上正しそうに見える」だけで次のステップへ進まないこと。
+
+## 確定した設計判断
+
+実装を進める中で確定した設計判断をここに記録する（Seed/Cascade/Weaveの同名節と同じ運用）。
+
+### `main`のブリッジ方式（Step 1で確定）
+
+AmiFLの`fn main() -> Int { ... }`をamivmの`!main`へ直接対応させることはできない（Goの`func main()`は引数無し・戻り値無しを要求するため）。**Seed（`!seed_main`）・Cascade（`!cascade_main`）・Weave（`!weave_main`）と全く同じ解決策を採る**：ユーザーの`main`は内部名`amifl_main`（`internal/codegen/codegen.go`の`entryFunc`定数）としてコンパイルし、実際の`!main`は`amifl_main`を呼んで戻り値を`os.Exit()`に渡す薄いラッパーとして生成する。
+
+**実地検証で発見したバグ**: `os.Exit`はGoの**プラットフォーム依存の`int`**を要求するが、AmiFLの`Int`（`Int64`のエイリアス）は`^int64`という固定幅型にマッピングしている。`%code`（戻り値を受ける変数）を素朴に`^int64`のまま`os.Exit`へ渡すと、`go/types`が`cannot use ... (variable of type int64) as int value`で拒否する——IRの構文としては正しく見えるのに`go build`で初めて発覚するという、Seed/Cascade/Weaveのnotesが繰り返し警告している「実地検証必須」パターンそのものだった。対策は`CALL`のキャスト機能（`CALL %exitCode : ?int %code`）を1回挟むこと（CLAUDE.md「過去に踏まれた地雷」#5参照）。将来AmiFLの`Int`をGoの他の型（例えば将来的な多倍長対応等）に変更する場合、この境界の変換ロジックだけを直せばよい。
+
+### 式の区切り：ブロック内は改行が意味を持つ（Step 1で確定）
+
+`amifl-spec.md`は「プログラムは式の並びのみ」（原則1・5節）と規定するが、複数の式をどう区切るかは明記していなかった。**Weaveと同じ方式を採用する**：`internal/lexer`が改行を独立した`Newline`トークンとして生成し、`internal/parser`がブロック（`{ ... }`）内でこれを式の区切りとして消費する（ブロック外では単に読み飛ばす）。セミコロンによる区切りやGo風のASI（自動セミコロン挿入）は導入しない——AmiFLのブロックは「1行1式」がほぼ全てのユースケースになる見込みで、ASIの複雑さを持ち込む理由が薄いため。この方式は`amifl-spec.md`に明文化されていない設計判断のため、将来「1行に複数式を`;`区切りで書きたい」等の要求が出た場合は仕様側から確定させること。
+
+### `print`は現時点で`String`引数限定（Step 1の一時的な簡略化）
+
+`amifl-spec.md` 13.1節は`print`のシグネチャを`(v: Any) -> Unit`と書いているが、2.2節は「`Any`（型不明）は`extern`経由のみ登場する」と規定しており、両者は文字通りには矛盾する。実装を検討した結果、これは**2種類の異なる「Any」を同じ表記で書いてしまっている仕様の表現上の曖昧さ**と判断した：
+
+- 2.2節の`Any`：`extern`境界で実行時まで具体型が確定しない、真に動的な型
+- 13.1/13.2節の`print`/`format`/`typeName`/`isError`等が使う`Any`：静的には各呼び出し箇所で具体型が確定している「無制約な多相引数」——`len`等のcapability多相（2.3節）が閉じた型集合に限定されるのに対し、`print`は文字通りどんな具体型でも受け付ける全称的な多相という違いはあるが、いずれにせよ**コンパイル時に呼び出し箇所ごとの具体型へモノモーフィックに解決される**という点はcapabilityと同じ設計思想の延長にある。Goの`fmt.Println(args ...any)`が任意の具体型を暗黙にboxingしてくれるため、AmiFL自身が動的型表現（reflect等）を持つ必要は無い見込み
+
+この整理はStep 11（capability多相の実装方式確定）で本格的に確定させる。**Step 1時点では`print`を`String`引数限定でハードコード実装している**（`internal/sema/sema.go`・`internal/codegen/codegen.go`とも`print`専用の分岐で、一般的な組み込み関数解決の仕組みはまだ無い）。Step 11で一般化する際にこの制限を外すこと。
 
 ## 開発の進め方
 

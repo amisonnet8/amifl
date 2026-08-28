@@ -1,4 +1,4 @@
-fn main(args: List[String]) -> Int {
+fn main() -> Int {
     print("Hello, AmiFL!")
     0
 }
