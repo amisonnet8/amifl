@@ -76,6 +76,8 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 		return fc.resolveSliceExpr(v)
 	case *ast.ForExpr:
 		return fc.resolveForExpr(v)
+	case *ast.SwitchExpr:
+		return fc.resolveSwitchExpr(v, expected)
 	case *ast.ClosureLit:
 		// A ClosureLit only ever reaches resolveType from somewhere other
 		// than resolveLetExpr's own dedicated check (which intercepts it
@@ -383,6 +385,15 @@ func (fc *funcChecker) resolveBinaryExpr(v *ast.BinaryExpr, expected string) (st
 		// admit them in the first place).
 		if isFuncType(leftTyp) {
 			return "", fmt.Errorf("line %d: operator %s is not defined for function values", v.Line, v.Op)
+		}
+		// amifl-spec.md section 2.2: "バリアント判定・フィールド取り出しは
+		// switchのパターンマッチでのみ行う" — an enum value's only sanctioned
+		// interaction is switch, so unlike Tuple/struct (whose == step 6
+		// deliberately allows, since Go's native comparison already does the
+		// right thing for them) this is excluded explicitly, mirroring the
+		// Func exclusion right above.
+		if fc.isEnumType(leftTyp) {
+			return "", fmt.Errorf("line %d: operator %s is not defined for enum values (use switch to inspect one)", v.Line, v.Op)
 		}
 		v.ResolvedType = leftTyp
 		return "Bool", nil
@@ -834,15 +845,30 @@ func (fc *funcChecker) resolveStructLit(v *ast.StructLit) (string, error) {
 }
 
 // resolveFieldExpr type-checks postfix `target.field` (amifl-spec.md
-// section 3.2) — tuple index sugar when Target's type is a Tuple, ordinary
-// struct field access when it's a struct. Either way it computes and
-// stores AmivmField, the exact string codegen writes after FGET's `>`
-// prefix (ast.FieldExpr's doc comment) — a synthesized "F0"/"F1"/... for a
-// tuple index (Go struct fields can't be named with a bare digit) or Field
+// section 3.2/2.2) — tuple index sugar when Target's type is a Tuple,
+// ordinary struct field access when it's a struct, or (step 8) enum
+// variant construction when Target is a bare identifier naming a declared
+// enum type (checked *first*, before Target is ever resolved as a value —
+// an enum type name was never a valid variable reference to begin with, so
+// there's nothing lost by not trying checkExpr(Target) in that case, and
+// trying it first would just fail with a confusing "undefined name"
+// instead of resolving correctly). Every other case computes and stores
+// AmivmField, the exact string codegen writes after FGET's `>` prefix
+// (ast.FieldExpr's doc comment) — a synthesized "F0"/"F1"/... for a tuple
+// index (Go struct fields can't be named with a bare digit) or Field
 // verbatim for a struct, since codegen has no vocabulary of its own to
 // tell a Tuple's encoded ResolvedType apart from a struct's (see
 // makeTupleType's doc comment on why that stays sema-internal).
 func (fc *funcChecker) resolveFieldExpr(v *ast.FieldExpr) (string, error) {
+	if ident, ok := v.Target.(*ast.IdentExpr); ok {
+		if info, isEnum := fc.enums[ident.Name]; isEnum {
+			return fc.resolveEnumVariantConstruction(v, ident.Name, info)
+		}
+	}
+	if v.Args != nil {
+		return "", fmt.Errorf("line %d: '.'-call syntax (`X.Y(...)`) is only valid for enum variant construction (`EnumType.Variant(...)`)", v.Line)
+	}
+
 	targetTyp, err := fc.checkExpr(v.Target, "")
 	if err != nil {
 		return "", err
@@ -867,6 +893,185 @@ func (fc *funcChecker) resolveFieldExpr(v *ast.FieldExpr) (string, error) {
 		return fieldTyp, nil
 	}
 	return "", fmt.Errorf("line %d: type %s has no fields to access with '.'", v.Line, targetTyp)
+}
+
+// resolveEnumVariantConstruction type-checks `EnumType.Variant` (v.Args ==
+// nil) or `EnumType.Variant(field: v, ...)` (v.Args != nil) — amifl-spec.md
+// section 2.2's "値生成は型名.バリアント名(...)というリテラルではない通常の
+// 式". Every one of the variant's declared fields must be given exactly
+// once, by name (v.Args uses the identical named-field convention
+// resolveStructLit already enforces for struct literals) — a zero-field
+// variant naturally satisfies this with v.Args empty (nil or a
+// zero-length slice both compare equal-length to a zero-field variant's
+// own Fields, so no separate "bare variant" code path is needed here).
+func (fc *funcChecker) resolveEnumVariantConstruction(v *ast.FieldExpr, enumName string, info *enumInfo) (string, error) {
+	vi, ok := info.variantIndex(v.Field)
+	if !ok {
+		return "", fmt.Errorf("line %d: enum %s has no variant %q", v.Line, enumName, v.Field)
+	}
+	variant := info.Variants[vi]
+	if len(v.Args) != len(variant.Fields) {
+		return "", fmt.Errorf("line %d: %s.%s expects %d field value(s), got %d", v.Line, enumName, v.Field, len(variant.Fields), len(v.Args))
+	}
+	seen := map[string]bool{}
+	for i := range v.Args {
+		a := &v.Args[i]
+		if seen[a.Name] {
+			return "", fmt.Errorf("line %d: duplicate field %q in %s.%s construction", a.Line, a.Name, enumName, v.Field)
+		}
+		seen[a.Name] = true
+		fieldTyp, ok := variant.fieldType(a.Name)
+		if !ok {
+			return "", fmt.Errorf("line %d: variant %s.%s has no field %q", a.Line, enumName, v.Field, a.Name)
+		}
+		if _, err := fc.checkExpr(a.Value, fieldTyp); err != nil {
+			return "", err
+		}
+	}
+	if len(seen) != len(variant.Fields) {
+		var missing []string
+		for _, fld := range variant.Fields {
+			if !seen[fld.Name] {
+				missing = append(missing, fld.Name)
+			}
+		}
+		return "", fmt.Errorf("line %d: %s.%s construction is missing field(s): %s", v.Line, enumName, v.Field, strings.Join(missing, ", "))
+	}
+	v.IsEnumVariant = true
+	v.VariantIndex = vi
+	v.ResolvedType = enumName
+	return enumName, nil
+}
+
+// resolveSwitchExpr type-checks step 8's subject-carrying `switch`
+// (amifl-spec.md section 10) — see ast.SwitchExpr's doc comment for the
+// step-8 scope cut (Subject must be a static enum type; `is`/`in` aren't
+// supported here). Each case's variant/binding names are validated and
+// its field bindings declared in the case's own child scope before its
+// body is checked; every case body (plus Default, if present) is then
+// resolved to one common type via the same order-independent
+// "anchor on the first non-literal branch" trick resolveBranches uses for
+// if/elif/else (step 4) and resolveListElemTypes uses for list elements
+// (step 7) — a case whose body is a bare literal must still adapt to
+// whatever concrete type a sibling case settles on, regardless of case
+// order.
+func (fc *funcChecker) resolveSwitchExpr(v *ast.SwitchExpr, expected string) (string, error) {
+	subjectTyp, err := fc.checkExpr(v.Subject, "")
+	if err != nil {
+		return "", err
+	}
+	info, ok := fc.enums[subjectTyp]
+	if !ok {
+		return "", fmt.Errorf("line %d: switch with a subject requires an enum type, got %s (amifl-spec.md section 10's `is Type`/`in [...]` case forms aren't supported yet)", v.Subject.Pos(), subjectTyp)
+	}
+	v.EnumName = subjectTyp
+
+	seen := map[string]int{} // variant name -> index into v.Cases
+	for ci := range v.Cases {
+		c := &v.Cases[ci]
+		if c.EnumName != subjectTyp {
+			return "", fmt.Errorf("line %d: case names enum %s, but this switch's subject is %s", c.Line, c.EnumName, subjectTyp)
+		}
+		vi, ok := info.variantIndex(c.Variant)
+		if !ok {
+			return "", fmt.Errorf("line %d: enum %s has no variant %q", c.Line, subjectTyp, c.Variant)
+		}
+		if prevCi, dup := seen[c.Variant]; dup {
+			return "", fmt.Errorf("line %d: duplicate case for %s.%s (already handled at line %d)", c.Line, subjectTyp, c.Variant, v.Cases[prevCi].Line)
+		}
+		seen[c.Variant] = ci
+		c.VariantIndex = vi
+
+		variant := info.Variants[vi]
+		if len(c.Bindings) != len(variant.Fields) {
+			return "", fmt.Errorf("line %d: case %s.%s expects %d binding(s), got %d", c.Line, subjectTyp, c.Variant, len(variant.Fields), len(c.Bindings))
+		}
+		c.BindingTypes = make([]string, len(c.Bindings))
+		for bi, bname := range c.Bindings {
+			fld := variant.Fields[bi]
+			if bname != fld.Name {
+				return "", fmt.Errorf("line %d: binding %q in case %s.%s must be named %q (its declared field name, in order; bind a different local name inside the case body with `let` if you want one)", c.Line, bname, subjectTyp, c.Variant, fld.Name)
+			}
+			c.BindingTypes[bi] = fld.Typ
+		}
+	}
+
+	exhaustive := len(seen) == len(info.Variants)
+	if v.Default == nil && !exhaustive {
+		var missing []string
+		for _, variant := range info.Variants {
+			if _, ok := seen[variant.Name]; !ok {
+				missing = append(missing, variant.Name)
+			}
+		}
+		return "", fmt.Errorf("line %d: switch over %s is not exhaustive and has no default (missing: %s)", v.Line, subjectTyp, strings.Join(missing, ", "))
+	}
+
+	// Resolve every case body (plus Default, if present) to one common
+	// type, treating Default as one more branch appended after every case
+	// for the purposes of anchor selection and the final check loop —
+	// exactly resolveBranches' "anchor on the first non-literal branch"
+	// trick (step 4), generalized here to N cases plus an optional
+	// default, so a switch's overall type doesn't depend on case order or
+	// on whether the concrete type happens to come from a case or from
+	// default.
+	checkCase := func(c *ast.SwitchCase, want string) (string, error) {
+		fc.pushScope()
+		defer fc.popScope()
+		c.BindingTokens = make([]string, len(c.Bindings))
+		for bi, bname := range c.Bindings {
+			token := "%" + fc.freshInternalName(bname)
+			if err := fc.declare(bname, &binding{typ: c.BindingTypes[bi], token: token}); err != nil {
+				return "", fmt.Errorf("line %d: %s", c.Line, err)
+			}
+			c.BindingTokens[bi] = token
+		}
+		return fc.checkBlock(c.Body, want)
+	}
+	checkDefault := func(want string) (string, error) {
+		fc.pushScope()
+		defer fc.popScope()
+		return fc.checkBlock(v.Default, want)
+	}
+	branchCount := len(v.Cases)
+	if v.Default != nil {
+		branchCount++
+	}
+	blockAt := func(i int) *ast.Block {
+		if i < len(v.Cases) {
+			return v.Cases[i].Body
+		}
+		return v.Default
+	}
+	checkAt := func(i int, want string) (string, error) {
+		if i < len(v.Cases) {
+			return checkCase(&v.Cases[i], want)
+		}
+		return checkDefault(want)
+	}
+
+	anchor := 0
+	for i := 0; i < branchCount; i++ {
+		if !blockEndsInAdaptableLiteral(blockAt(i)) {
+			anchor = i
+			break
+		}
+	}
+	target, err := checkAt(anchor, expected)
+	if err != nil {
+		return "", err
+	}
+	for i := 0; i < branchCount; i++ {
+		if i == anchor {
+			continue
+		}
+		if _, err := checkAt(i, target); err != nil {
+			return "", err
+		}
+	}
+
+	v.ResolvedType = target
+	return target, nil
 }
 
 // resolveListLit type-checks `[v1, v2, ...]` (amifl-spec.md sections

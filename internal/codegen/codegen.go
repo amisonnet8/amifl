@@ -50,11 +50,14 @@ func Generate(f *ast.File) (string, error) {
 	}
 
 	prog := &program{}
-	// User `struct` declarations are emitted first, ahead of every
-	// function body — see genStructDecl's doc comment.
+	// User `struct`/`enum` declarations are emitted first, ahead of every
+	// function body — see genStructDecl's/genEnumDecl's doc comments.
 	for _, decl := range f.Decls {
-		if st, ok := decl.(*ast.StructDecl); ok {
-			genStructDecl(prog, st)
+		switch d := decl.(type) {
+		case *ast.StructDecl:
+			genStructDecl(prog, d)
+		case *ast.EnumDecl:
+			genEnumDecl(prog, d)
 		}
 	}
 
@@ -277,6 +280,8 @@ func (g *gen) genStmt(e ast.Expr) error {
 		return g.genForStmt(v)
 	case *ast.IndexAssignExpr:
 		return g.genIndexAssignStmt(v)
+	case *ast.SwitchExpr:
+		return g.genSwitchStmt(v)
 	case *ast.BreakExpr:
 		g.b.WriteString("\tBREAK\n")
 		return nil
@@ -586,6 +591,8 @@ func (g *gen) genValue(e ast.Expr) (string, error) {
 		return g.genIndexValue(v)
 	case *ast.SliceExpr:
 		return g.genSliceValue(v)
+	case *ast.SwitchExpr:
+		return g.genSwitchValue(v)
 	default:
 		return "", fmt.Errorf("codegen: %T is not a value expression (sema should have rejected this)", e)
 	}

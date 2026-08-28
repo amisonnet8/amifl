@@ -1747,3 +1747,245 @@ func TestCheck_NestedListLitTypeInference(t *testing.T) {
 		t.Fatalf("got ResolvedType %q, want List(List(Int64))", outer.ResolvedType)
 	}
 }
+
+// statusEnumDecl builds `enum Status { Ok  Retry(delay: Int)
+// Failed(reason: String) }` — step 8's test fixture, mirroring
+// pointStructDecl's role for struct tests.
+func statusEnumDecl() *ast.EnumDecl {
+	return &ast.EnumDecl{
+		Name: "Status",
+		Variants: []ast.EnumVariant{
+			{Name: "Ok"},
+			{Name: "Retry", Fields: []ast.Param{{Name: "delay", Type: nt("Int")}}},
+			{Name: "Failed", Fields: []ast.Param{{Name: "reason", Type: nt("String")}}},
+		},
+	}
+}
+
+// statusVariant builds `Status.<variant>(args...)` (nil args for a
+// zero-field variant reference with no parens at all).
+func statusVariant(variant string, args ...ast.StructLitField) *ast.FieldExpr {
+	return &ast.FieldExpr{Target: &ast.IdentExpr{Name: "Status"}, Field: variant, Args: args}
+}
+
+func statusCase(variant string, bindings []string, body ast.Expr) ast.SwitchCase {
+	return ast.SwitchCase{EnumName: "Status", Variant: variant, Bindings: bindings, Body: &ast.Block{Exprs: []ast.Expr{body}}}
+}
+
+func TestCheck_EnumVariantZeroFieldConstructionIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: statusVariant("Ok")},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_EnumVariantConstructionWithFieldsIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: statusVariant("Retry", ast.StructLitField{Name: "delay", Value: &ast.IntLit{Value: 5}})},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_EnumVariantConstructionMissingFieldIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: statusVariant("Retry")},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a variant construction missing a required field")
+	}
+}
+
+func TestCheck_EnumVariantConstructionUnknownVariantIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: statusVariant("Bogus")},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for an unknown enum variant")
+	}
+}
+
+func TestCheck_EnumVariantConstructionWrongFieldTypeIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: statusVariant("Retry", ast.StructLitField{Name: "delay", Value: &ast.StringLit{Value: "nope"}})},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a field value of the wrong type")
+	}
+}
+
+func TestCheck_EnumVariantConstructionUnknownFieldIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: statusVariant("Retry", ast.StructLitField{Name: "bogus", Value: &ast.IntLit{Value: 5}})},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a field name the variant doesn't declare")
+	}
+}
+
+func TestCheck_EnumEqualityIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "a", Value: statusVariant("Ok")},
+		&ast.LetExpr{Name: "b", Value: statusVariant("Ok")},
+		&ast.DiscardExpr{Value: &ast.BinaryExpr{Op: "==", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error comparing two enum values with ==")
+	}
+}
+
+func TestCheck_EnumStructNameCollisionIsAnError(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, statusEnumDecl(), &ast.StructDecl{Name: "Status"})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for an enum and a struct sharing one name")
+	}
+}
+
+func TestCheck_SwitchExhaustiveWithoutDefaultIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: statusVariant("Ok")},
+		&ast.LetExpr{Name: "n", Value: &ast.SwitchExpr{
+			Subject: &ast.IdentExpr{Name: "s"},
+			Cases: []ast.SwitchCase{
+				statusCase("Ok", nil, &ast.IntLit{Value: 1}),
+				statusCase("Retry", []string{"delay"}, &ast.IdentExpr{Name: "delay"}),
+				statusCase("Failed", []string{"reason"}, &ast.IntLit{Value: 2}),
+			},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_SwitchNonExhaustiveWithoutDefaultIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: statusVariant("Ok")},
+		&ast.LetExpr{Name: "n", Value: &ast.SwitchExpr{
+			Subject: &ast.IdentExpr{Name: "s"},
+			Cases: []ast.SwitchCase{
+				statusCase("Ok", nil, &ast.IntLit{Value: 1}),
+			},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a non-exhaustive switch with no default")
+	}
+}
+
+func TestCheck_SwitchWithDefaultIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: statusVariant("Ok")},
+		&ast.LetExpr{Name: "n", Value: &ast.SwitchExpr{
+			Subject: &ast.IdentExpr{Name: "s"},
+			Cases: []ast.SwitchCase{
+				statusCase("Retry", []string{"delay"}, &ast.IdentExpr{Name: "delay"}),
+			},
+			Default: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_SwitchBindingNameMustMatchFieldNameIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: statusVariant("Retry", ast.StructLitField{Name: "delay", Value: &ast.IntLit{Value: 5}})},
+		&ast.LetExpr{Name: "n", Value: &ast.SwitchExpr{
+			Subject: &ast.IdentExpr{Name: "s"},
+			Cases: []ast.SwitchCase{
+				// "d" doesn't match the variant's declared field name "delay".
+				statusCase("Retry", []string{"d"}, &ast.IdentExpr{Name: "d"}),
+			},
+			Default: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a binding name that doesn't match its field's declared name")
+	}
+}
+
+func TestCheck_SwitchDuplicateCaseIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: statusVariant("Ok")},
+		&ast.LetExpr{Name: "n", Value: &ast.SwitchExpr{
+			Subject: &ast.IdentExpr{Name: "s"},
+			Cases: []ast.SwitchCase{
+				statusCase("Ok", nil, &ast.IntLit{Value: 1}),
+				statusCase("Ok", nil, &ast.IntLit{Value: 2}),
+			},
+			Default: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a duplicate case matching the same variant twice")
+	}
+}
+
+func TestCheck_SwitchSubjectMustBeEnumIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "n", Type: nt("Int"), Value: &ast.IntLit{Value: 1}},
+		&ast.DiscardExpr{Value: &ast.SwitchExpr{
+			Subject: &ast.IdentExpr{Name: "n"},
+			Cases: []ast.SwitchCase{
+				statusCase("Ok", nil, &ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "x"}}}),
+			},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a switch subject that isn't an enum type")
+	}
+}
+
+func TestCheck_SwitchBindingScopedToCaseBody(t *testing.T) {
+	// `delay` bound inside the Retry case must not be visible after the
+	// switch expression ends.
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: statusVariant("Retry", ast.StructLitField{Name: "delay", Value: &ast.IntLit{Value: 5}})},
+		&ast.DiscardExpr{Value: &ast.SwitchExpr{
+			Subject: &ast.IdentExpr{Name: "s"},
+			Cases: []ast.SwitchCase{
+				statusCase("Ok", nil, &ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "x"}}}),
+				statusCase("Retry", []string{"delay"}, &ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "y"}}}),
+				statusCase("Failed", []string{"reason"}, &ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "z"}}}),
+			},
+		}},
+		&ast.DiscardExpr{Value: &ast.IdentExpr{Name: "delay"}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error referencing a case binding outside its own case body")
+	}
+}

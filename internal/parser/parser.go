@@ -105,9 +105,68 @@ func (p *parser) parseTopLevelDecl() (ast.TopLevelDecl, error) {
 		return p.parseConstDecl()
 	case lexer.KwStruct:
 		return p.parseStructDecl()
+	case lexer.KwEnum:
+		return p.parseEnumDecl()
 	default:
-		return nil, p.errorf("expected 'fn', 'const', or 'struct' at top level, got %s", p.cur.Kind)
+		return nil, p.errorf("expected 'fn', 'const', 'struct', or 'enum' at top level, got %s", p.cur.Kind)
 	}
+}
+
+// parseEnumDecl parses `enum Name { Variant1 [(field1: Type1, ...)] ... }`
+// (amifl-spec.md section 2.2) — step 8. Variants are newline-separated
+// (never comma-separated), one per line, mirroring parseStructDecl's field
+// layout and the spec's own formatting. Each variant reuses
+// parseParamList for its optional field list — identical grammar to a
+// `fn`'s or a struct's own field list (`name: Type` pairs).
+func (p *parser) parseEnumDecl() (*ast.EnumDecl, error) {
+	kwTok, err := p.expect(lexer.KwEnum)
+	if err != nil {
+		return nil, err
+	}
+	nameTok, err := p.expect(lexer.Ident)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.LBrace); err != nil {
+		return nil, err
+	}
+	if err := p.skipNewlines(); err != nil {
+		return nil, err
+	}
+	var variants []ast.EnumVariant
+	for p.cur.Kind != lexer.RBrace {
+		variantTok, err := p.expect(lexer.Ident)
+		if err != nil {
+			return nil, err
+		}
+		var fields []ast.Param
+		if p.cur.Kind == lexer.LParen {
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			fields, err = p.parseParamList()
+			if err != nil {
+				return nil, err
+			}
+		}
+		variants = append(variants, ast.EnumVariant{Name: variantTok.Value, Fields: fields, Line: variantTok.Line})
+		if p.cur.Kind == lexer.RBrace {
+			break
+		}
+		if p.cur.Kind != lexer.Newline {
+			return nil, p.errorf("expected newline after enum variant, got %s", p.cur.Kind)
+		}
+		if err := p.skipNewlines(); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RBrace); err != nil {
+		return nil, err
+	}
+	if len(variants) == 0 {
+		return nil, fmt.Errorf("line %d: enum %q must declare at least one variant", kwTok.Line, nameTok.Value)
+	}
+	return &ast.EnumDecl{Name: nameTok.Value, Variants: variants, Line: kwTok.Line}, nil
 }
 
 // parseStructDecl parses `struct Name { field1: Type1, field2: Type2, ... }`
@@ -589,7 +648,14 @@ func (p *parser) parsePostfixExpr() (ast.Expr, error) {
 			if err := p.advance(); err != nil {
 				return nil, err
 			}
-			expr = &ast.FieldExpr{Target: expr, Field: field, Line: dotLine}
+			var args []ast.StructLitField
+			if p.cur.Kind == lexer.LParen {
+				args, err = p.parseEnumVariantArgs()
+				if err != nil {
+					return nil, err
+				}
+			}
+			expr = &ast.FieldExpr{Target: expr, Field: field, Args: args, Line: dotLine}
 		case lexer.LBracket:
 			expr, err = p.parseIndexOrSlice(expr)
 			if err != nil {
@@ -599,6 +665,50 @@ func (p *parser) parsePostfixExpr() (ast.Expr, error) {
 			return expr, nil
 		}
 	}
+}
+
+// parseEnumVariantArgs parses `(field1: v1, field2: v2, ...)` right after a
+// postfix `.Variant` (amifl-spec.md section 2.2, "Status.Retry(delay: 5)")
+// — the same named-field convention parseStructLit uses, reusing
+// ast.StructLitField for each entry. Always returns a non-nil slice (empty
+// for `()`), which is what tells FieldExpr.Args apart from a plain
+// `.field` access with no trailing call at all (nil) — see FieldExpr's doc
+// comment.
+func (p *parser) parseEnumVariantArgs() ([]ast.StructLitField, error) {
+	if _, err := p.expect(lexer.LParen); err != nil {
+		return nil, err
+	}
+	saved := p.noCompositeLit
+	p.noCompositeLit = false
+	defer func() { p.noCompositeLit = saved }()
+
+	args := []ast.StructLitField{}
+	if p.cur.Kind != lexer.RParen {
+		for {
+			fieldNameTok, err := p.expect(lexer.Ident)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.Colon); err != nil {
+				return nil, err
+			}
+			val, err := p.parseOrExpr()
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, ast.StructLitField{Name: fieldNameTok.Value, Value: val, Line: fieldNameTok.Line})
+			if p.cur.Kind != lexer.Comma {
+				break
+			}
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RParen); err != nil {
+		return nil, err
+	}
+	return args, nil
 }
 
 // parseIndexOrSlice parses `[...]` following an already-parsed target
@@ -885,20 +995,36 @@ type switchCase struct {
 	line int
 }
 
-// parseSwitchExpr parses AmiFL's step-4 subset of `switch` (amifl-spec.md
-// section 10): no subject, no `is Type`/`in [...]`/enum patterns — every
-// case is a plain Bool expression, evaluated in order. This is exactly an
-// if/elif/else chain with different keywords (principle 3: "1つの仕組みで
-// 足りるものを2つ用意しない"), so it desugars straight into an *ast.IfExpr
-// here rather than getting its own AST node or any sema/codegen support of
-// its own. A real subject-carrying SwitchExpr node — needed once `is
-// Type`/enum patterns arrive — is deliberately not designed yet (CLAUDE.md
-// development rule: don't build for a future step's requirements before
-// they're concretely known).
+// parseSwitchExpr parses `switch` (amifl-spec.md section 10): either the
+// step-4 subject-less form (every case a plain Bool expression — an elif
+// chain with different keywords, principle 3: "1つの仕組みで足りるものを2つ
+// 用意しない", desugared straight into an *ast.IfExpr with no AST node or
+// sema/codegen support of its own) when `{` comes right after `switch`, or
+// (step 8) the subject-carrying enum-pattern form otherwise — a real
+// *ast.SwitchExpr, needed now that enum values (and their variant
+// patterns) exist to match against. Telling the two apart needs only one
+// token of lookahead (is `{` next, or a subject expression's own first
+// token) — the subject-less form has never allowed anything between
+// `switch` and `{`, so this is unambiguous.
 func (p *parser) parseSwitchExpr() (ast.Expr, error) {
-	if _, err := p.expect(lexer.KwSwitch); err != nil {
+	kwTok, err := p.expect(lexer.KwSwitch)
+	if err != nil {
 		return nil, err
 	}
+	if p.cur.Kind == lexer.LBrace {
+		return p.parseBoolSwitchExpr(kwTok)
+	}
+	subject, err := p.parseHeaderExpr()
+	if err != nil {
+		return nil, err
+	}
+	return p.parseEnumSwitchExpr(kwTok, subject)
+}
+
+// parseBoolSwitchExpr parses the step-4 subject-less `switch` form — see
+// parseSwitchExpr's doc comment. kwTok is the already-consumed `switch`
+// keyword token.
+func (p *parser) parseBoolSwitchExpr(kwTok lexer.Token) (ast.Expr, error) {
 	if _, err := p.expect(lexer.LBrace); err != nil {
 		return nil, err
 	}
@@ -989,6 +1115,135 @@ func (p *parser) parseSwitchExpr() (ast.Expr, error) {
 		elseBody = result
 	}
 	return result, nil
+}
+
+// parseEnumSwitchExpr parses step 8's subject-carrying `switch` form's body
+// (amifl-spec.md section 10): `{` case+ [default] `}`, where every case
+// pattern is `EnumType.Variant[(binding, ...)]` (parseSwitchCasePattern) —
+// `is Type`/`in [...]` aren't recognized here (out of step 8's scope, see
+// ast.SwitchExpr's doc comment). Unlike parseBoolSwitchExpr, this produces
+// a real *ast.SwitchExpr rather than desugaring, since sema needs Subject
+// and each case's own field bindings to type-check against.
+func (p *parser) parseEnumSwitchExpr(kwTok lexer.Token, subject ast.Expr) (ast.Expr, error) {
+	if _, err := p.expect(lexer.LBrace); err != nil {
+		return nil, err
+	}
+	if err := p.skipNewlines(); err != nil {
+		return nil, err
+	}
+
+	var cases []ast.SwitchCase
+	var defaultBlock *ast.Block
+	for p.cur.Kind != lexer.RBrace {
+		switch p.cur.Kind {
+		case lexer.KwCase:
+			caseTok := p.cur
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			enumName, variant, bindings, err := p.parseSwitchCasePattern()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.Colon); err != nil {
+				return nil, err
+			}
+			body, err := p.parseOrExpr()
+			if err != nil {
+				return nil, err
+			}
+			cases = append(cases, ast.SwitchCase{
+				EnumName: enumName,
+				Variant:  variant,
+				Bindings: bindings,
+				Body:     &ast.Block{Exprs: []ast.Expr{body}},
+				Line:     caseTok.Line,
+			})
+		case lexer.KwDefault:
+			if defaultBlock != nil {
+				return nil, p.errorf("duplicate 'default' in switch")
+			}
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.Colon); err != nil {
+				return nil, err
+			}
+			body, err := p.parseOrExpr()
+			if err != nil {
+				return nil, err
+			}
+			defaultBlock = &ast.Block{Exprs: []ast.Expr{body}}
+		case lexer.EOF:
+			return nil, p.errorf("unexpected end of file, expected '}'")
+		default:
+			return nil, p.errorf("expected 'case' or 'default' in switch, got %s", p.cur.Kind)
+		}
+		if p.cur.Kind == lexer.RBrace {
+			break
+		}
+		if p.cur.Kind != lexer.Newline {
+			return nil, p.errorf("expected newline after switch case, got %s", p.cur.Kind)
+		}
+		if err := p.skipNewlines(); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RBrace); err != nil {
+		return nil, err
+	}
+	if len(cases) == 0 {
+		return nil, p.errorf("switch must have at least one 'case'")
+	}
+	return &ast.SwitchExpr{Subject: subject, Cases: cases, Default: defaultBlock, Line: kwTok.Line}, nil
+}
+
+// parseSwitchCasePattern parses `EnumType.Variant` or
+// `EnumType.Variant(binding1, binding2, ...)` (amifl-spec.md section 10) —
+// a case pattern's own dedicated grammar, distinct from the general
+// expression grammar's enum-variant *construction* syntax
+// (parseEnumVariantArgs): a pattern's bindings are bare identifiers (not
+// `name: value` pairs), positionally naming which local each field binds
+// to — sema requires each one to equal the corresponding field's own
+// declared name (ast.SwitchCase's doc comment).
+func (p *parser) parseSwitchCasePattern() (enumName, variant string, bindings []string, err error) {
+	enumTok, err := p.expect(lexer.Ident)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if _, err := p.expect(lexer.Dot); err != nil {
+		return "", "", nil, err
+	}
+	variantTok, err := p.expect(lexer.Ident)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if p.cur.Kind != lexer.LParen {
+		return enumTok.Value, variantTok.Value, nil, nil
+	}
+	if err := p.advance(); err != nil { // consume '('
+		return "", "", nil, err
+	}
+	var bindingList []string
+	if p.cur.Kind != lexer.RParen {
+		for {
+			bindTok, err := p.expect(lexer.Ident)
+			if err != nil {
+				return "", "", nil, err
+			}
+			bindingList = append(bindingList, bindTok.Value)
+			if p.cur.Kind != lexer.Comma {
+				break
+			}
+			if err := p.advance(); err != nil {
+				return "", "", nil, err
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RParen); err != nil {
+		return "", "", nil, err
+	}
+	return enumTok.Value, variantTok.Value, bindingList, nil
 }
 
 func (p *parser) parseLetExpr() (ast.Expr, error) {

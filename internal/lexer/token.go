@@ -25,6 +25,7 @@ const (
 	KwCase
 	KwDefault
 	KwStruct
+	KwEnum
 	KwFor
 	KwIn
 	LParen
@@ -108,6 +109,8 @@ func (k Kind) String() string {
 		return "'default'"
 	case KwStruct:
 		return "'struct'"
+	case KwEnum:
+		return "'enum'"
 	case KwFor:
 		return "'for'"
 	case KwIn:

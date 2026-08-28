@@ -126,6 +126,30 @@ type StructDecl struct {
 	Line   int
 }
 
+// EnumDecl is a top-level `enum Name { Variant1 [(field1: Type1, ...)] ...
+// }` declaration (amifl-spec.md section 2.2) — step 8. Each variant is
+// listed on its own line (mirroring StructDecl's field layout, and the
+// spec's own formatting of the construct), never comma-separated. See
+// CLAUDE.md's "確定した設計判断" for step 8's chosen runtime
+// representation (a single STTYPE per enum, holding a `Tag` plus every
+// variant's fields unioned together, each qualified `Variant_field` to
+// avoid same-named fields across variants colliding as Go struct fields).
+type EnumDecl struct {
+	Name     string
+	Variants []EnumVariant
+	Line     int
+}
+
+// EnumVariant is one variant in an EnumDecl: a name and zero or more named
+// fields (amifl-spec.md section 2.2, "各バリアントは0個以上の名前付き
+// フィールドを持てる") — `Ok` (Fields empty) or `Retry(delay: Int)`.
+// Reuses Param{Name,Type,Line,ResolvedType} exactly like StructDecl.Fields.
+type EnumVariant struct {
+	Name   string
+	Fields []Param
+	Line   int
+}
+
 // ConstDecl is a `const` declaration (amifl-spec.md section 4): a
 // compile-time-only binding that is inlined at every reference site
 // rather than compiled to a runtime variable. It doubles as both a
@@ -336,26 +360,54 @@ type StructLitField struct {
 }
 
 // FieldExpr is postfix `target.field` (amifl-spec.md section 3.2): tuple
-// index sugar (`t.0`, `t.1`, ...) when Target's type is a Tuple, or
-// ordinary struct field access when it's a struct — the same syntax and
-// the same AST node either way, since both ultimately compile to one
-// AMIVM instruction (FGET). Field is exactly the text the user wrote ("0",
-// "1", ... or a struct field name); AmivmField is what codegen actually
-// emits after FGET's `>` prefix — sema computes it once (a synthesized
-// "F0"/"F1"/... for a tuple index, since Go struct fields can't be named
-// with a bare digit, or Field verbatim for a struct) so codegen never has
-// to re-derive tuple-vs-struct from ResolvedType (whose two encodings
-// codegen has no vocabulary to tell apart — see types.go's doc comment on
-// why that encoding is sema-internal). This mirrors LetExpr.Token/
-// CallExpr.CalleeToken: sema resolves the AMIVM-facing detail once, onto
-// the node, and codegen just reads it.
+// index sugar (`t.0`, `t.1`, ...) when Target's type is a Tuple, ordinary
+// struct field access when it's a struct, or (step 8) enum variant
+// construction (`型名.バリアント名(...)`, section 2.2) when Target is a bare
+// identifier naming a declared enum type — three different meanings
+// sharing the same postfix-dot syntax, told apart by sema (resolveFieldExpr)
+// rather than the parser, exactly the way tuple-vs-struct access already
+// were before step 8. The enum case is a genuine third thing (Target names
+// a *type*, not a value — nothing to FGET at all), reusing this node
+// anyway because amifl-spec.md itself writes it with the identical
+// `X.Y(...)` shape, structs have no methods (principle 4) to make
+// `value.field(...)` ambiguous with, and CallExpr's own grammar never
+// calls an arbitrary expression (only a bare name) — so a trailing `(...)`
+// right after a `.field` could never mean anything else.
+//
+// Field is exactly the text the user wrote ("0", "1", ... a struct field
+// name, or a variant name). AmivmField is what codegen emits after FGET's
+// `>` prefix for the tuple/struct cases only — sema computes it once (a
+// synthesized "F0"/"F1"/... for a tuple index, since Go struct fields
+// can't be named with a bare digit, or Field verbatim for a struct) so
+// codegen never has to re-derive tuple-vs-struct from ResolvedType (whose
+// two encodings codegen has no vocabulary to tell apart — see types.go's
+// doc comment on why that encoding is sema-internal). This mirrors
+// LetExpr.Token/CallExpr.CalleeToken: sema resolves the AMIVM-facing
+// detail once, onto the node, and codegen just reads it.
 type FieldExpr struct {
 	Target Expr
 	Field  string
-	Line   int
+	// Args is non-nil (a zero-length slice counts) exactly when the parser
+	// saw a trailing `(...)` after Field — reuses StructLitField{Name,
+	// Value,Line} for each `field: value` entry, the same named-field
+	// convention amifl-spec.md's struct literals already use (section 8.4)
+	// and enum variant construction deliberately mirrors (section 2.2's
+	// own example, "Status.Retry(delay: 5)"). nil for a plain `.field`/`.N`
+	// access with no trailing call at all.
+	Args []StructLitField
+	Line int
 
 	ResolvedType string // filled by sema
-	AmivmField   string // filled by sema
+	AmivmField   string // filled by sema; meaningful only when IsEnumVariant is false
+
+	// IsEnumVariant and VariantIndex are filled by sema exactly when this
+	// FieldExpr resolves to enum variant construction — either
+	// `EnumType.Variant` (Args == nil, a zero-field variant) or
+	// `EnumType.Variant(field: v, ...)` (Args != nil). VariantIndex is the
+	// variant's position in its enum's declared variant list, i.e. the
+	// `Tag` value codegen writes (see EnumDecl's doc comment).
+	IsEnumVariant bool
+	VariantIndex  int
 }
 
 // ListLit is `[v1, v2, ...]` (amifl-spec.md sections 2.2/3.1) — the one
@@ -445,6 +497,50 @@ type ForExpr struct {
 	// same silence about parameters was resolved the same conservative
 	// way, for the same "明示性 > 簡潔さ" reasoning).
 	VarToken string
+}
+
+// SwitchExpr is `switch subject { case Type.Variant(binding, ...): body ...
+// [default: body] }` (amifl-spec.md section 10) — step 8. This node exists
+// only for the subject-carrying form; the subject-less, Bool-only case
+// list (step 4's scope, still fully supported) keeps desugaring straight
+// into IfExpr at parse time instead (parser's parseBoolSwitchExpr), since
+// that form is exactly an elif chain with no bindings and no reason to
+// gain one now — see IfExpr's doc comment. Step 8's scope further
+// restricts Subject to a static enum type: `is Type`/`in [...]` (spec's
+// other two case-pattern forms) need Any/collection-capability machinery
+// that doesn't exist until later steps (extern's Any boundary is step 13;
+// capability-dispatched Containable is step 11) — attempting either here
+// is a plain parse error (parseSwitchCasePattern only ever recognizes
+// `EnumType.Variant[...]`).
+type SwitchExpr struct {
+	Subject Expr
+	Cases   []SwitchCase
+	Default *Block // nil unless written; only legal to omit once Cases exhaustively covers every one of Subject's enum's variants exactly once (amifl-spec.md section 10, "全バリアントを1回ずつ網羅していればdefault省略可")
+	Line    int
+
+	ResolvedType string // filled by sema
+	EnumName     string // filled by sema: Subject's resolved enum type name
+}
+
+// SwitchCase is one `case EnumType.Variant[(binding1, binding2, ...)]:
+// body` clause of a SwitchExpr. Bindings are bare identifiers, positionally
+// matching the variant's own declared field list — amifl-spec.md section
+// 10's own example ("Status.Retry(delay)と書くとフィールドdelayが...束縛
+// される") requires each one to literally equal its corresponding field's
+// declared name (sema's resolveSwitchExpr enforces this; want a different
+// local name instead, `let` it inside Body). nil for a variant with no
+// declared fields.
+type SwitchCase struct {
+	EnumName string // the enum type name written in the pattern (e.g. "Status" in "Status.Retry(delay)") — sema checks this matches the SwitchExpr's own Subject enum, catching a copy-pasted or mistyped enum name with a clear error instead of an opaque "no such variant"
+	Variant  string
+	Bindings []string
+	Body     *Block
+	Line     int
+
+	// filled by sema:
+	VariantIndex  int      // this variant's position in the enum's declared variant list — codegen's Tag value
+	BindingTokens []string // AMIVM value tokens minted for each binding, parallel to Bindings
+	BindingTypes  []string // each binding's own canonical field type, parallel to Bindings
 }
 
 // StringLit is a string literal.
@@ -554,6 +650,7 @@ type ContinueExpr struct{ Line int }
 func (*FuncDecl) topLevelDeclNode()   {}
 func (*ConstDecl) topLevelDeclNode()  {}
 func (*StructDecl) topLevelDeclNode() {}
+func (*EnumDecl) topLevelDeclNode()   {}
 
 func (*ConstDecl) exprNode()       {}
 func (*LetExpr) exprNode()         {}
@@ -580,6 +677,7 @@ func (*IndexExpr) exprNode()       {}
 func (*IndexAssignExpr) exprNode() {}
 func (*SliceExpr) exprNode()       {}
 func (*ForExpr) exprNode()         {}
+func (*SwitchExpr) exprNode()      {}
 
 func (n *ConstDecl) Pos() int       { return n.Line }
 func (n *LetExpr) Pos() int         { return n.Line }
@@ -606,3 +704,4 @@ func (n *IndexExpr) Pos() int       { return n.Line }
 func (n *IndexAssignExpr) Pos() int { return n.Line }
 func (n *SliceExpr) Pos() int       { return n.Line }
 func (n *ForExpr) Pos() int         { return n.Line }
+func (n *SwitchExpr) Pos() int      { return n.Line }

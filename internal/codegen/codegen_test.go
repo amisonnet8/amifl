@@ -1053,3 +1053,147 @@ func TestGenerate_ForStmtEmitsIncrementFirstLoop(t *testing.T) {
 		t.Errorf("expected LOOP, then increment, then bounds check, in that order; got:\n%s", ir)
 	}
 }
+
+// statusEnumDecl builds `enum Status { Ok  Retry(delay: Int) }` — the
+// step 8 test fixture, mirroring the struct tests' pointStructDecl (an
+// ast.EnumDecl already carries every field's ResolvedType, exactly like
+// ast.StructDecl.Fields does, since codegen tests operate on
+// already-sema-resolved AST throughout this file).
+func statusEnumDecl() *ast.EnumDecl {
+	return &ast.EnumDecl{
+		Name: "Status",
+		Variants: []ast.EnumVariant{
+			{Name: "Ok"},
+			{Name: "Retry", Fields: []ast.Param{{Name: "delay", Type: nt("Int"), ResolvedType: "Int64"}}},
+		},
+	}
+}
+
+func TestGenerate_EnumDeclEmitsSttypeWithTagAndQualifiedFields(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, statusEnumDecl())
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"STTYPE\t^Status",
+		"FIELD\t>Tag\t^int",
+		"FIELD\t>Retry_delay\t^int64",
+		"ENDSTTYPE",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_EnumVariantConstructionEmitsFsetTagAndFields(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Token: "%s_1", ResolvedType: "Status", Value: &ast.FieldExpr{
+			Target: &ast.IdentExpr{Name: "Status"}, Field: "Retry",
+			Args:          []ast.StructLitField{{Name: "delay", Value: &ast.IntLit{Value: 5}}},
+			ResolvedType:  "Status",
+			IsEnumVariant: true,
+			VariantIndex:  1,
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"VAR\t%amifl_tmp1\t^Status",
+		"FSET\t%amifl_tmp1\t>Tag\t1",
+		"FSET\t%amifl_tmp1\t>Retry_delay\t5",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_SwitchValueEmitsIfElseChainTestingTag(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "n", Token: "%n_1", ResolvedType: "Int64", Value: &ast.SwitchExpr{
+			Subject:      &ast.IdentExpr{Name: "s", ResolvedType: "Status", Token: "%s_1"},
+			ResolvedType: "Int64",
+			EnumName:     "Status",
+			Cases: []ast.SwitchCase{
+				{Variant: "Ok", VariantIndex: 0, Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}}},
+				{
+					Variant: "Retry", VariantIndex: 1,
+					Bindings: []string{"delay"}, BindingTokens: []string{"%delay_2"}, BindingTypes: []string{"Int64"},
+					Body: &ast.Block{Exprs: []ast.Expr{&ast.IdentExpr{Name: "delay", ResolvedType: "Int64", Token: "%delay_2"}}},
+				},
+			},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"FGET\t%amifl_tmp2\t%s_1\t>Tag",
+		"EQ\t%amifl_tmp3\t%amifl_tmp2\t0",
+		"IF\t%amifl_tmp3",
+		"SET\t%amifl_tmp1\t1",
+		"ELSE",
+		"EQ\t%amifl_tmp5\t%amifl_tmp4\t1",
+		"FGET\t%delay_2\t%s_1\t>Retry_delay",
+		"SET\t%amifl_tmp1\t%delay_2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+	// Exhaustive (no Default), 2 cases: the first case's IF gets an ELSE
+	// leading into the second case's IF, but the second (last) case's IF
+	// must NOT get a trailing ELSE — sema guarantees its Tag always
+	// matches once the first case's didn't, mirroring an if-expression
+	// with no else. So exactly one fewer ELSE than IF.
+	ifCount := strings.Count(ir, "IF\t")
+	elseCount := strings.Count(ir, "ELSE\n")
+	if ifCount-elseCount != 1 {
+		t.Errorf("expected exactly one fewer ELSE than IF (no dangling final ELSE), got %d IF and %d ELSE in:\n%s", ifCount, elseCount, ir)
+	}
+}
+
+func TestGenerate_SwitchStmtWithDefaultEmitsFinalElse(t *testing.T) {
+	f := mainFile(
+		&ast.SwitchExpr{
+			Subject:  &ast.IdentExpr{Name: "s", ResolvedType: "Status", Token: "%s_1"},
+			EnumName: "Status",
+			Cases: []ast.SwitchCase{
+				{
+					Variant: "Retry", VariantIndex: 1,
+					Bindings: []string{"delay"}, BindingTokens: []string{"%delay_2"}, BindingTypes: []string{"Int64"},
+					Body: &ast.Block{Exprs: []ast.Expr{&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "retry"}}}}},
+				},
+			},
+			Default: &ast.Block{Exprs: []ast.Expr{&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "other"}}}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, statusEnumDecl())
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"EQ\t%amifl_tmp2\t%amifl_tmp1\t1",
+		"IF\t%amifl_tmp2",
+		"FGET\t%delay_2\t%s_1\t>Retry_delay",
+		"CALL\t:\t?fmt.Println\t\"retry\"",
+		"ELSE",
+		"CALL\t:\t?fmt.Println\t\"other\"",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}

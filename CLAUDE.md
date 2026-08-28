@@ -159,7 +159,7 @@ Seed/Cascadeが通っていない領域、あるいはAmiFL固有の設計判断
 1. **`Any`型・`extern`境界の値表現**：AmiFLの変数は全て静的型（`Any`は`extern`経由のみ登場）だが、`extern`で束縛したGo関数の引数・戻り値に`Any`が現れる場合、その実行時表現をどうするか。Weaveの結論（`gotype`/`gofunc`/`gomethod`は最終的に`reflect`経由の`CallGoFuncList`/`CallGoMethodList`へ一本化——「型ヒントを書けばネイティブ」という中間案は複雑さに見合わず削除された）をAmiFLにそのまま採用してよいか、あるいはAmiFLの`extern bind`宣言（15.1節）が常に具体的なAmiFL型シグネチャを要求する（Weaveの`gofunc`と違い、宣言時点で引数・戻り値型が全て確定している）という違いを活かし、**Seed/Cascade同様にネイティブな`CALL ?pkg.Func`を直接生成できる可能性がある**——`Any`が絡まないbindは静的に型付けされたネイティブ呼び出しにできるはずで、`Any`を含む場合のみreflect相当（`ASSERT`+`amiflrt`ヘルパー）に倒す、というハイブリッド設計を検討する
 2. ✅ **`Array[T;N]`の実行時表現**：Step 7で確定。下記「確定した設計判断」参照（Goのネイティブ固定長配列型、AMIVM本体へ`ARTYPE`命令を新規要求）
 3. ✅ **`Tuple2〜8`の実行時表現**：Step 6で確定。下記「確定した設計判断」参照（型ごとに発行する名前付き`STTYPE`、フィールド名`F0`〜、等値比較は許可）
-4. **`enum`（タグ付きバリアント）の実行時表現**：`switch`でのバリアント判定・フィールド取り出し専用（2.2節）、値生成は`型名.バリアント名(...)`という通常の式。Goには直接対応するネイティブ機構が無く、タグ（int）+バリアントごとに異なるフィールド集合、という表現が必要——Cascadeの`error`型実装（コンパイラが自動登録する`STTYPE`）や、複数バリアントを1つの`STTYPE`に全フィールドを`Union`的に持たせる案（Goの構造体は値型なので単純にフィールドを足せる）、複数の`STTYPE`+タグによる判別のどちらが良いか検討する。`switch`のバリアント網羅性検査（コンパイル時にバリアント集合が閉じている）はsemaが担う
+4. ✅ **`enum`（タグ付きバリアント）の実行時表現**：`switch`でのバリアント判定・フィールド取り出し専用（2.2節）、値生成は`型名.バリアント名(...)`という通常の式。Goには直接対応するネイティブ機構が無く、タグ（int）+バリアントごとに異なるフィールド集合、という表現が必要——Cascadeの`error`型実装（コンパイラが自動登録する`STTYPE`）や、複数バリアントを1つの`STTYPE`に全フィールドを`Union`的に持たせる案（Goの構造体は値型なので単純にフィールドを足せる）、複数の`STTYPE`+タグによる判別のどちらが良いか検討する。`switch`のバリアント網羅性検査（コンパイル時にバリアント集合が閉じている）はsemaが担う
 5. **`Set[T]`の実行時表現**：Cascadeの実績（`MPTYPE ^T ^bool`または`^struct{}`相当）をそのまま踏襲できる見込み。要素順序は不定と明記済み（16.2節で解決済みの検討事項）なので、Goのmapイテレーション順序をそのまま使ってよい（Weaveのようにソートで決定的にする必要はない——`toList(_) |> sort`という運用に統一する方針が既に確定している）
 6. **`capability`（組み込み多相）の実装方式**：ユーザーには一切公開されない、コンパイラ内部限定の多相。各呼び出し箇所で引数の静的型からどの実装（`len`ならString/List/Array/Map/Set/Bytes/Chanのどれか）を使うか**コンパイル時に一意に確定**させ、その型専用のコード（ネイティブ命令 or `amiflrt`関数）を直接生成する——ジェネリクスも動的ディスパッチも不要な、最も単純な「多相」（各呼び出しが実質的にモノモーフィックにコンパイルされる）という理解でよいか、実装時に確認する
 7. **パイプ演算子`|>`のコード生成**：糖衣構文（9節）であり新しいAMIVM命令は不要——`a |> f`は単なる`f(a)`、`a |> f(_, b)`は`f(a, b)`への変換で完結する見込み。`for x in items yield expr`が`items |> map(x => expr)`の糖衣という規定（7節）が指す「`x => expr`」の構文自体が仕様の他箇所に明記が無い点は要確認（無名関数`fn(x) -> R {...}`と同じものと推測されるが、仕様側の確認が先）
@@ -200,7 +200,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 5 ✅ | 関数・クロージャ | トップレベル`fn`（自己再帰可）、ローカルクロージャー（多引数直接・カリー化なし）、`Func`型 | `FNTYPE` `CLOS` `ENDCLOS` | — |
 | 6 ✅ | `Tuple2〜8`・`struct` | タプルリテラル・`.0`等の糖衣、`struct`定義・フィールドアクセス | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` | 設計課題3（Tuple表現、下記「確定した設計判断」参照） |
 | 7 ✅ | `Array[T;N]`・`List[T]`・`for` | 固定長配列（多次元糖衣込み）、可変長リスト、`x[i]`/`x[i]=v`/`x[a:b]`糖衣。**Step 4から延期した`for x in items { ... }`（`Unit`版のみ、`yield`はStep 9）もここで実装**——`items`に相当する型がこの時点で初めて存在するため | `SLTYPE` `SLMAKE` `SLICE` `ASET` `AGET` `ARTYPE`（AmiFLの機能要求によりamivm本体へ新規追加） | 設計課題2（Array表現、下記「確定した設計判断」参照） |
-| 8 | `enum`・`switch`拡張 | バリアント定義・値生成、`switch`での判定/フィールド取り出し、バリアント網羅性検査 | （設計課題4の結論による） | **設計課題4（先例無し・最大の山場の1つ）** |
+| 8 ✅ | `enum`・`switch`拡張 | バリアント定義・値生成、`switch`での判定/フィールド取り出し、バリアント網羅性検査 | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` `IF` `ELSE` `ENDIF` `EQ`（新規命令ゼロ、Step 6/4の既存命令のみで実現） | 設計課題4（enum表現、下記「確定した設計判断」参照） |
 | 9 | パイプ演算子`|>` | `_`プレースホルダー、`for...yield`糖衣、`|>`の優先順位（最低） | （新規命令無し。糖衣構文） | 設計課題7 |
 | 10 | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5 |
 | 11 | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開 | （`amiflrt`+ネイティブ命令の混在） | **設計課題6（capability多相の実装方式）** |
@@ -448,6 +448,30 @@ AMIVMには`for`相当のネイティブ命令が無いため、`while`（Step 4
 ### 実地検証（`amivm`→`go build`→実行）で確認した項目（Step 7）
 
 `examples/lists_arrays.aml`で以下を確認済み：`List[Int]`/`Array[Int;5]`型注釈付きの`let`と関数引数、`for x in xs { total = total + x }`によるList・Arrayそれぞれの合計、2次元固定長配列`Array[Array[Int;3];3]`のリテラル構築とネストした`ARTYPE`宣言、`grid[1][1] = 99`という多段インデックス代入（`emitIndexAssign`の再帰的書き戻しが正しく元のArrayへ反映されることを終了コードで確認）、単純添字読み出し`xs[0]`/`xs[4]`、両端・片端・両端省略のスライス`xs[1:3]`/`xs[3:]`/`xs[:2]`/`xs[:]`（`_`プレースホルダーの生成を含む）、ネストした`for`（Arrayの各行に対してさらに`for`で列を走査）。実行結果は終了コード171（POSIXの256モジュロ込みで手計算した427と一致）を確認——手計算を最初1回間違えた（`grid[1][1]`が変更するのは2番目の行の中央要素であって3番目の行ではない、という単純な勘違い）が、生成されたコードそのものは正しく、この検算の失敗自体もまさに「実地検証で初めて確認できる」ことの実例になった。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。
+
+### `enum`は「`Tag`+全バリアントのフィールドを1つに統合した`STTYPE`」として表現する——複数`STTYPE`+インターフェースは不採用（Step 8で確定・設計課題4の解決）
+
+`enum`の実行時表現として検討した2案のうち、**1つの`STTYPE`が`Tag`（int、バリアントの宣言順位置）と全バリアントの全フィールドを併せ持つ**方式を採用した。もう一方の案（バリアントごとに別々の`STTYPE`を発行し、`INTYPE`/`ASSERT`ベースの動的ディスパッチでくるむ）を採らなかった理由は、`amifl-spec.md` 2.2節が「バリアント判定・フィールド取り出しは`switch`のパターンマッチでのみ行う」と明記しており、`enum`値への操作が構文的に`switch`だけに閉じている——ユーザーコードが「今どのバリアントか分からないまま何かする」という動的ディスパッチを要求する場面がそもそも存在しないため。CLAUDE.md「AMIVM-IRの書き方」が以前から「`INTYPE`はAmiFLでは出番が無い見込み」と申し送っていた予想がそのまま的中した形で、`STTYPE`/`FIELD`/`FSET`/`FGET`という既存命令（Step 6でTuple/structのために導入済み）だけで完結した——**Step 8は新規AMIVM命令を1つも必要としなかった**。
+
+**フィールド名の衝突回避**：異なるバリアントが同じフィールド名を持ちうる（例：仮に`Retry(delay: Int)`と`Failed(delay: Int)`が両方あった場合）ため、Goの構造体へ統合する際は`<バリアント名>_<フィールド名>`という合成名（`internal/codegen/enum.go`の`genEnumDecl`/`genEnumVariantValue`/`genSwitchChain`が同じ規約を独立に持つ）で修飾する——enum内でバリアント名は一意（sema側で重複チェック済み）なので、この合成名は構造的に衝突しない。Step 6のタプルが`.0`/`.1`という裸の数字をGo識別子にできず`F0`/`F1`という合成名を発行した判断の直接の延長。
+
+**未使用バリアントのフィールドはGoのゼロ値のまま放置してよい**：Goの構造体は値型で、全フィールドが1つの型に同居する。ある`Status`値が`Retry`として構築されれば`Retry_delay`だけがFSETされ、`Failed_reason`はGoのゼロ値（空文字列）のまま——これは無害である。`switch`のcase本体は必ず対応する`Tag`が一致した分岐の中でしか自分のバリアントのフィールドをFGETしないため（sema側で保証：`resolveSwitchExpr`がバインディングをそのcaseの子スコープにしか宣言しない）、他バリアントの「ゴミ」が読まれることは構造上あり得ない。メモリ効率はバリアント数・フィールドサイズの総和に比例して悪化するトレードオフがあるが、Step 8では実装の単純さを優先した——将来的にバリアント数が非常に多くなる用途が出た場合は再検討する。
+
+### `switch`は「サブジェクト無し・Bool専用」（Step 4）と「サブジェクトあり・enum専用」（Step 8）の2つの構文形をパーサーの1トークン先読みで判定し、後者だけ本物の`ast.SwitchExpr`ノードを新設した（Step 8で確定）
+
+Step 4の時点で「サブジェクト無しのBool専用switchは`IfExpr`への構文糖衣のままで良いが、`is Type`/enum パターンが入る段階で初めて本物の`SwitchExpr`ノードを新設する」と申し送っていたとおり、Step 8でこれを実行した。`switch`キーワードの直後が`{`かどうかだけで両形式を判定できる——サブジェクトあり形は必ず`switch`と`{`の間にサブジェクト式を挟むため、後読みは1トークンで十分（`parser.parseSwitchExpr`が`p.cur.Kind == LBrace`かどうかで`parseBoolSwitchExpr`/`parseEnumSwitchExpr`に分岐する）。
+
+**Step 8のスコープは意図的に「サブジェクトはenum型のみ」に絞った**——`amifl-spec.md` 10節が触れる`is Type`（`Any`型限定、`extern`境界が無いと出番が無い）・`in [...]`（`Containable`capability、Step 11の多相解決機構が無いと実装できない）は先送りし、`case EnumType.Variant[(binding, ...)]`という1形式だけをサポートする。パーサーは`is`/`in`を一切認識しない専用の`parseSwitchCasePattern`（`Ident '.' Ident` + 省略可能な括弧内の裸識別子リスト）を持ち、他のパターン形式を書くと素直な構文エラーになる。
+
+**バリアントのフィールド束縛は「パターン中の識別子がフィールドの宣言名と一致することを要求する」設計にした**——`amifl-spec.md`の例（`Status.Retry(delay)と書くとフィールドdelayが...束縛される`）の文言から、パターン中の識別子は任意の別名ではなく、常にフィールドそのものの名前でなければならないと解釈した（`internal/sema/expr.go`の`resolveSwitchExpr`が位置ごとに`bname != fld.Name`を検査してエラーにする）。別名が欲しい場合はcase本体側で`let`し直す、という仕様の指示どおりの設計。値生成側の`EnumType.Variant(field: value, ...)`（`internal/ast.FieldExpr.Args`、struct literalと全く同じ`name: value`の名前付きフィールド規約）とパターン側の`EnumType.Variant(field)`（裸の識別子、`internal/parser`の`parseSwitchCasePattern`専用の別文法）は、見た目が似ていても構文的には全くの別物であることに注意——値生成は通常の式の一部（`ast.FieldExpr`を再利用）、パターンはswitch case位置でしか出現しない専用文法。
+
+**exhaustiveness（`default`省略可）の判定はサブジェクトのenum型が持つ全バリアント数とcase数の一致だけで行う**——`amifl-spec.md`「全バリアントを1回ずつ網羅していれば`default`省略可」を文字通り実装：`resolveSwitchExpr`が各caseのバリアント名を`seen map[string]int`へ記録しつつ重複を検出し、最終的に`len(seen) == len(info.Variants)`なら`default`無しでも合法とする。この判定が成立した時点で「実行時に必ずどれかのcaseが一致する」ことがコンパイル時に保証されるため、codegen側（`genSwitchChain`）は最後のcaseに`ELSE`を一切出力しない——`IfExpr`の「`else`無しなら`Unit`型限定」ルールとは異なり、`switch`は`exhaustive`なら値を返す用途でも`default`無しで良い、という非対称な扱いになる（`IfExpr`は条件が"閉じている"ことをコンパイル時に証明する手段が無いのに対し、`enum`のバリアント集合はコンパイル時に閉じているため）。
+
+**enum値への`==`/`!=`比較は明示的に禁止した**——設計課題4は当初「仕様側の確認が必要」としていたが、`amifl-spec.md` 2.2節の「バリアント判定・フィールド取り出しは`switch`のパターンマッチでのみ行う」という文言を「enumへの唯一の正当なアクセス手段は`switch`」と解釈し、直接比較は禁止する側に倒した（`internal/sema/expr.go`の`resolveBinaryExpr`equalityOps分岐に`Func`型の除外と並んで`isEnumType`の除外を追加）。Tuple/struct（Step 6で`==`を明示的に許可）との対比が非対称に見えるが、Tuple/structの`==`はGoのネイティブ構造体比較がそのまま正しい意味論になる（フィールドの値がすべて比較可能）のに対し、enumは「タグが一致すれば意味のある比較になるが、タグが違う場合に無関係なゴミフィールドまで比較してしまう」という実装詳細が漏れ出る危険がある——Step 8時点の「1つの`STTYPE`へ統合する」という表現方式を選んだことの直接の帰結として、比較を許可しない方が安全側に倒せると判断した。
+
+### 実地検証（`amivm`→`go build`→実行）で確認した項目（Step 8）
+
+`examples/enums.aml`で以下を確認済み：3バリアント（`Ok`・`Retry(delay: Int)`・`Failed(reason: String)`）の`enum Status`宣言、`Status.Ok`（括弧無し・ゼロフィールド構築）と`Status.Retry(delay: 5)`（名前付きフィールド構築）、値を返す`switch`（exhaustive・`default`省略、`describe`/`code`関数）、`default`ありの`switch`（`delayOrZero`関数）、Unit型（文位置）の`switch`とその中での`print`呼び出し、フィールド束縛（`case Status.Retry(delay): delay`）が正しくバリアントのフィールドを読み出すこと。生成されたIRを目視確認し、`Status`が`Tag`(int)・`Retry_delay`(int64)・`Failed_reason`(string)の3フィールドを持つ単一の`STTYPE`へコンパイルされ、`switch`が`FGET`+`EQ`+ネストした`IF`/`ELSE`チェーンへ展開されていること、exhaustiveな`switch`の最後のcaseに`ELSE`が出力されていないことを確認。実行結果は終了コード22（`c1+c2+c3+r1+r2+sideEffect+eq1+eq2+eq3 = (1+5+3)+(0+5)+5+(1+1+1) = 22`という手計算と一致）を確認。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。
 
 ## 開発の進め方
 

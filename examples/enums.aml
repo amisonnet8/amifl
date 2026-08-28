@@ -1,0 +1,63 @@
+enum Status {
+    Ok
+    Retry(delay: Int)
+    Failed(reason: String)
+}
+
+fn describe(s: Status) -> String {
+    switch s {
+        case Status.Ok: "ok"
+        case Status.Retry(delay): "retry"
+        case Status.Failed(reason): "failed"
+    }
+}
+
+fn code(s: Status) -> Int {
+    switch s {
+        case Status.Ok: 1
+        case Status.Retry(delay): delay
+        case Status.Failed(reason): 3
+    }
+}
+
+fn delayOrZero(s: Status) -> Int {
+    switch s {
+        case Status.Retry(delay): delay
+        default: 0
+    }
+}
+
+fn main() -> Int {
+    let ok = Status.Ok
+    let retry = Status.Retry(delay: 5)
+    let failed = Status.Failed(reason: "boom")
+
+    switch retry {
+        case Status.Ok: print("was ok")
+        case Status.Retry(delay): print("was retry")
+        case Status.Failed(reason): print("was failed")
+    }
+
+    let d1 = describe(ok)
+    let d2 = describe(retry)
+    let d3 = describe(failed)
+
+    let c1 = code(ok)
+    let c2 = code(retry)
+    let c3 = code(failed)
+
+    let r1 = delayOrZero(ok)
+    let r2 = delayOrZero(retry)
+
+    let sideEffect = switch retry {
+        case Status.Ok: 1
+        case Status.Retry(delay): delay
+        case Status.Failed(reason): 2
+    }
+
+    let eq1 = if d1 == "ok" { 1 } else { 0 }
+    let eq2 = if d2 == "retry" { 1 } else { 0 }
+    let eq3 = if d3 == "failed" { 1 } else { 0 }
+
+    c1 + c2 + c3 + r1 + r2 + sideEffect + eq1 + eq2 + eq3
+}

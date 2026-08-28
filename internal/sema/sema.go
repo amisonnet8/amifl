@@ -28,11 +28,12 @@ const reservedMainName = "amifl_main"
 // (structs, enums, collections, capability resolution, ...) grows across
 // later steps — see CLAUDE.md's implementation step plan.
 func Check(f *ast.File) error {
-	c := &checker{globals: map[string]*binding{}, funcs: map[string]funcSig{}, structs: map[string]*structInfo{}}
+	c := &checker{globals: map[string]*binding{}, funcs: map[string]funcSig{}, structs: map[string]*structInfo{}, enums: map[string]*enumInfo{}}
 
 	var consts []*ast.ConstDecl
 	var funcs []*ast.FuncDecl
 	var structs []*ast.StructDecl
+	var enums []*ast.EnumDecl
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *ast.ConstDecl:
@@ -41,22 +42,40 @@ func Check(f *ast.File) error {
 			funcs = append(funcs, d)
 		case *ast.StructDecl:
 			structs = append(structs, d)
+		case *ast.EnumDecl:
+			enums = append(enums, d)
 		default:
 			return fmt.Errorf("sema: unknown top-level declaration %T", decl)
 		}
 	}
 
-	// Pass 0: register every struct's name (0a) and then its fields (0b),
-	// before anything else — a `fn`'s param/return type, a `const`'s
-	// annotation/initializer, and another struct's own field can all name
-	// a struct type regardless of where in the file it's declared.
+	// Pass 0: register every struct's and enum's name (0a) and then their
+	// fields/variants (0b), before anything else — a `fn`'s param/return
+	// type, a `const`'s annotation/initializer, a struct field, or an enum
+	// variant's own field can all name a struct or enum type regardless of
+	// where in the file (or even which of the two declaration kinds) it's
+	// declared. registerStructName/registerEnumName each check *both*
+	// c.structs and c.enums for a name collision, so running structs before
+	// enums here still catches a struct/enum sharing one name regardless of
+	// which of the two comes first in the file (whichever is registered
+	// second finds the first already present).
 	for _, st := range structs {
 		if err := c.registerStructName(st); err != nil {
 			return err
 		}
 	}
+	for _, en := range enums {
+		if err := c.registerEnumName(en); err != nil {
+			return err
+		}
+	}
 	for _, st := range structs {
 		if err := c.registerStructFields(st); err != nil {
+			return err
+		}
+	}
+	for _, en := range enums {
+		if err := c.registerEnumVariants(en); err != nil {
 			return err
 		}
 	}
@@ -152,7 +171,66 @@ func (c *checker) registerStructName(d *ast.StructDecl) error {
 	if _, exists := c.structs[d.Name]; exists {
 		return fmt.Errorf("line %d: duplicate struct %q", d.Line, d.Name)
 	}
+	if _, exists := c.enums[d.Name]; exists {
+		return fmt.Errorf("line %d: %q is already declared as an enum", d.Line, d.Name)
+	}
 	c.structs[d.Name] = &structInfo{Name: d.Name}
+	return nil
+}
+
+// registerEnumName reserves d's name (Check's pass 0a) — mirrors
+// registerStructName exactly (see its own doc comment on the two-pass
+// split and the cross-check with c.structs).
+func (c *checker) registerEnumName(d *ast.EnumDecl) error {
+	if d.Name == reservedMainName {
+		return fmt.Errorf("line %d: %q is a reserved name (used internally to compile `fn main`)", d.Line, d.Name)
+	}
+	if _, exists := c.enums[d.Name]; exists {
+		return fmt.Errorf("line %d: duplicate enum %q", d.Line, d.Name)
+	}
+	if _, exists := c.structs[d.Name]; exists {
+		return fmt.Errorf("line %d: %q is already declared as a struct", d.Line, d.Name)
+	}
+	c.enums[d.Name] = &enumInfo{Name: d.Name}
+	return nil
+}
+
+// registerEnumVariants resolves d's variants and their field types (Check's
+// pass 0b) — mirrors registerStructFields, plus its own two duplicate
+// checks amifl-spec.md section 2.2 requires that structs don't (a struct
+// has no variants to be distinct from each other): variant names must be
+// unique within the enum, and field names unique within each variant
+// (structs already had that latter check; here it's per-variant instead
+// of per-declaration).
+func (c *checker) registerEnumVariants(d *ast.EnumDecl) error {
+	fc := newFuncChecker(c)
+	seenVariant := map[string]bool{}
+	var variants []variantInfo
+	for vi := range d.Variants {
+		v := &d.Variants[vi]
+		if seenVariant[v.Name] {
+			return fmt.Errorf("line %d: duplicate variant %q in enum %q", v.Line, v.Name, d.Name)
+		}
+		seenVariant[v.Name] = true
+
+		seenField := map[string]bool{}
+		var fields []fieldInfo
+		for fi := range v.Fields {
+			f := &v.Fields[fi]
+			if seenField[f.Name] {
+				return fmt.Errorf("line %d: duplicate field %q in variant %s.%s", f.Line, f.Name, d.Name, v.Name)
+			}
+			seenField[f.Name] = true
+			ft, err := fc.resolveTypeExpr(f.Type)
+			if err != nil {
+				return err
+			}
+			f.ResolvedType = ft
+			fields = append(fields, fieldInfo{Name: f.Name, Typ: ft})
+		}
+		variants = append(variants, variantInfo{Name: v.Name, Fields: fields})
+	}
+	c.enums[d.Name].Variants = variants
 	return nil
 }
 

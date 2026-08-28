@@ -139,14 +139,21 @@ func (g *gen) genStructLitValue(v *ast.StructLit) (string, error) {
 	return "%" + tmp, nil
 }
 
-// genFieldValue emits `target.field` (a tuple index or a struct field,
-// amifl-spec.md section 3.2) as FGET into a fresh temp of the field's own
-// type. v.Target is generated through the normal genValue path, which
-// always reduces a compound sub-expression to a single flat variable/temp
-// token first — exactly the "bare identifier, no multi-level path" shape
-// FGET's `variable` operand requires (CLAUDE.md's "過去に踏まれた地雷" #8),
-// satisfied here automatically with no special-casing needed.
+// genFieldValue emits `target.field` (a tuple index, a struct field, or —
+// step 8 — enum variant construction, amifl-spec.md sections 3.2/2.2) as
+// FGET into a fresh temp of the field's own type. Enum construction is
+// dispatched separately (genEnumVariantValue, enum.go) since it doesn't
+// read v.Target at all (Target names a *type* there, not a value — see
+// ast.FieldExpr's doc comment). Every other case generates v.Target
+// through the normal genValue path, which always reduces a compound
+// sub-expression to a single flat variable/temp token first — exactly the
+// "bare identifier, no multi-level path" shape FGET's `variable` operand
+// requires (CLAUDE.md's "過去に踏まれた地雷" #8), satisfied here
+// automatically with no special-casing needed.
 func (g *gen) genFieldValue(v *ast.FieldExpr) (string, error) {
+	if v.IsEnumVariant {
+		return g.genEnumVariantValue(v)
+	}
 	targetVal, err := g.genValue(v.Target)
 	if err != nil {
 		return "", err

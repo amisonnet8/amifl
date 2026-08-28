@@ -22,6 +22,7 @@ var keywords = map[string]Kind{
 	"case":     KwCase,
 	"default":  KwDefault,
 	"struct":   KwStruct,
+	"enum":     KwEnum,
 	"for":      KwFor,
 	"in":       KwIn,
 }

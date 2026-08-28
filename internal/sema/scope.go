@@ -73,13 +73,52 @@ func (s *structInfo) fieldType(name string) (string, bool) {
 	return "", false
 }
 
+// enumInfo is a top-level `enum`'s resolved shape (amifl-spec.md section
+// 2.2) — step 8, registered the same forward-reference-friendly two-pass
+// way structInfo is (registerEnumName records the name alone;
+// registerEnumVariants fills Variants once every struct/enum name in the
+// file is known, so a variant field may reference a struct or enum
+// declared anywhere in the file).
+type enumInfo struct {
+	Name     string
+	Variants []variantInfo
+}
+
+// variantIndex looks up a variant's position in Variants by name — this
+// position is also its Tag value (codegen's genEnumDecl/genEnumVariantValue).
+func (e *enumInfo) variantIndex(name string) (int, bool) {
+	for i, v := range e.Variants {
+		if v.Name == name {
+			return i, true
+		}
+	}
+	return -1, false
+}
+
+// variantInfo is one enum variant's resolved shape: a name and its own
+// field list (possibly empty).
+type variantInfo struct {
+	Name   string
+	Fields []fieldInfo
+}
+
+func (v *variantInfo) fieldType(name string) (string, bool) {
+	for _, f := range v.Fields {
+		if f.Name == name {
+			return f.Typ, true
+		}
+	}
+	return "", false
+}
+
 // checker holds state shared across an entire file: the global
 // (top-level) const bindings, the top-level `fn` signature table, and the
-// top-level `struct` shape table, all visible to every function.
+// top-level `struct`/`enum` shape tables, all visible to every function.
 type checker struct {
 	globals map[string]*binding
 	funcs   map[string]funcSig
 	structs map[string]*structInfo
+	enums   map[string]*enumInfo
 }
 
 // scope is one lexical block's bindings, chained to its enclosing scope

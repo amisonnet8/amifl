@@ -951,3 +951,148 @@ func TestParse_ForItemsBareIdentNotSwallowedAsStructLit(t *testing.T) {
 		t.Fatalf("got Items %#v, want IdentExpr{Name: \"items\"}", forExpr.Items)
 	}
 }
+
+func findEnumDecl(t *testing.T, f *ast.File, name string) *ast.EnumDecl {
+	t.Helper()
+	for _, decl := range f.Decls {
+		if en, ok := decl.(*ast.EnumDecl); ok && en.Name == name {
+			return en
+		}
+	}
+	t.Fatalf("no enum %q found", name)
+	return nil
+}
+
+func TestParse_EnumDecl(t *testing.T) {
+	src := "enum Status {\n" +
+		"    Ok\n" +
+		"    Retry(delay: Int)\n" +
+		"    Failed(reason: String)\n" +
+		"}\n" +
+		"fn main() -> Int {\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	en := findEnumDecl(t, f, "Status")
+	if len(en.Variants) != 3 {
+		t.Fatalf("got %d variants, want 3", len(en.Variants))
+	}
+	if en.Variants[0].Name != "Ok" || len(en.Variants[0].Fields) != 0 {
+		t.Fatalf("got variant[0] %#v, want Ok with no fields", en.Variants[0])
+	}
+	if en.Variants[1].Name != "Retry" || len(en.Variants[1].Fields) != 1 ||
+		en.Variants[1].Fields[0].Name != "delay" || namedTypeName(en.Variants[1].Fields[0].Type) != "Int" {
+		t.Fatalf("got variant[1] %#v, want Retry(delay: Int)", en.Variants[1])
+	}
+	if en.Variants[2].Name != "Failed" || len(en.Variants[2].Fields) != 1 ||
+		en.Variants[2].Fields[0].Name != "reason" || namedTypeName(en.Variants[2].Fields[0].Type) != "String" {
+		t.Fatalf("got variant[2] %#v, want Failed(reason: String)", en.Variants[2])
+	}
+}
+
+func TestParse_EnumDeclWithNoVariantsIsAnError(t *testing.T) {
+	src := "enum Empty {\n}\nfn main() -> Int {\n    0\n}\n"
+	if _, err := Parse(src); err == nil {
+		t.Fatal("expected an error for an enum with no variants")
+	}
+}
+
+func TestParse_EnumVariantZeroFieldConstructionHasNilArgs(t *testing.T) {
+	src := "fn main() -> Int {\n    let s = Status.Ok\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	fe, ok := let.Value.(*ast.FieldExpr)
+	if !ok || fe.Field != "Ok" {
+		t.Fatalf("got %#v, want FieldExpr{Field: \"Ok\"}", let.Value)
+	}
+	if fe.Args != nil {
+		t.Fatalf("got Args %#v, want nil (no parens written)", fe.Args)
+	}
+}
+
+func TestParse_EnumVariantEmptyParensConstructionHasNonNilArgs(t *testing.T) {
+	src := "fn main() -> Int {\n    let s = Status.Ok()\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	fe := let.Value.(*ast.FieldExpr)
+	if fe.Args == nil || len(fe.Args) != 0 {
+		t.Fatalf("got Args %#v, want a non-nil, zero-length slice", fe.Args)
+	}
+}
+
+func TestParse_EnumVariantConstructionWithNamedFields(t *testing.T) {
+	src := "fn main() -> Int {\n    let s = Status.Retry(delay: 5)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	fe := let.Value.(*ast.FieldExpr)
+	if fe.Field != "Retry" || len(fe.Args) != 1 || fe.Args[0].Name != "delay" {
+		t.Fatalf("got %#v, want FieldExpr{Field: \"Retry\", Args: [delay: ...]}", fe)
+	}
+	lit, ok := fe.Args[0].Value.(*ast.IntLit)
+	if !ok || lit.Value != 5 {
+		t.Fatalf("got arg value %#v, want IntLit{Value: 5}", fe.Args[0].Value)
+	}
+}
+
+func TestParse_SwitchWithSubjectParsesSwitchExpr(t *testing.T) {
+	src := "fn main() -> Int {\n" +
+		"    switch s {\n" +
+		"        case Status.Ok: 1\n" +
+		"        case Status.Retry(delay): delay\n" +
+		"        default: 0\n" +
+		"    }\n" +
+		"}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	sw, ok := parseFuncMain(t, f).Body.Exprs[0].(*ast.SwitchExpr)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.SwitchExpr", parseFuncMain(t, f).Body.Exprs[0])
+	}
+	subj, ok := sw.Subject.(*ast.IdentExpr)
+	if !ok || subj.Name != "s" {
+		t.Fatalf("got Subject %#v, want IdentExpr{Name: \"s\"}", sw.Subject)
+	}
+	if len(sw.Cases) != 2 {
+		t.Fatalf("got %d cases, want 2", len(sw.Cases))
+	}
+	if sw.Cases[0].EnumName != "Status" || sw.Cases[0].Variant != "Ok" || sw.Cases[0].Bindings != nil {
+		t.Fatalf("got case[0] %#v, want Status.Ok with no bindings", sw.Cases[0])
+	}
+	if sw.Cases[1].EnumName != "Status" || sw.Cases[1].Variant != "Retry" ||
+		len(sw.Cases[1].Bindings) != 1 || sw.Cases[1].Bindings[0] != "delay" {
+		t.Fatalf("got case[1] %#v, want Status.Retry(delay)", sw.Cases[1])
+	}
+	if sw.Default == nil || len(sw.Default.Exprs) != 1 {
+		t.Fatalf("got Default %#v, want a one-expression block", sw.Default)
+	}
+}
+
+func TestParse_SwitchWithoutSubjectStillDesugarsToIfExpr(t *testing.T) {
+	// The subject-less Bool-only form (step 4) must keep desugaring into
+	// an IfExpr, unaffected by step 8's new subject-carrying form.
+	src := "fn main() -> Int {\n" +
+		"    switch {\n" +
+		"        case true: 1\n" +
+		"        default: 0\n" +
+		"    }\n" +
+		"}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if _, ok := parseFuncMain(t, f).Body.Exprs[0].(*ast.IfExpr); !ok {
+		t.Fatalf("got %#v, want *ast.IfExpr", parseFuncMain(t, f).Body.Exprs[0])
+	}
+}

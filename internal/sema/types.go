@@ -54,7 +54,19 @@ func (c *checker) canonicalType(name string) (string, bool) {
 	if _, ok := c.structs[name]; ok {
 		return name, true
 	}
+	if _, ok := c.enums[name]; ok {
+		return name, true
+	}
 	return "", false
+}
+
+// isEnumType reports whether t is a declared `enum` type's own name — an
+// enum's canonical form is always just its own name verbatim, exactly
+// like a struct's (canonicalType never aliases either), so a plain map
+// lookup suffices.
+func (c *checker) isEnumType(t string) bool {
+	_, ok := c.enums[t]
+	return ok
 }
 
 // canonicalReturnType is canonicalType plus one extra case usable only in
