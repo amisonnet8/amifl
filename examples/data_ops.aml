@@ -1,0 +1,93 @@
+fn boolToInt(b: Bool) -> Int {
+    if b { 1 } else { 0 }
+}
+
+fn main() -> Int {
+    let double = fn(x: Int) -> Int { x * 2 }
+    let isEven = fn(x: Int) -> Bool { x % 2 == 0 }
+    let addAcc = fn(acc: Int, x: Int) -> Int { acc + x }
+    let negate = fn(x: Int) -> Int { 0 - x }
+
+    let xs: List[Int] = [3, 1, 4, 1, 5, 9, 2, 6]
+    let arr: Array[Int; 4] = [10, 20, 30, 40]
+
+    let lenXs = len(xs)
+    let lenArr = len(arr)
+    let lenStr = len("hello")
+
+    let slicedList = slice(xs, 1, 4)
+    let slicedArr = slice(arr, 1, 3)
+    let slicedStr = slice("hello world", 0, 5)
+    let sliceLenSum = len(slicedList) + len(slicedArr) + len(slicedStr)
+
+    let a0 = at(xs, 0)
+    setAt(xs, 0, 99)
+    let a0after = at(xs, 0)
+
+    let containsList = contains(xs, 4)
+    let containsStr = contains("hello world", "wor")
+
+    let idxRes = index(xs, 5)
+    let idxFound = idxRes.1
+    let idxPos = idxRes.0
+
+    let parts = split("a,b,c", ",")
+    let joined = join(parts, "-")
+    let replaced = replace("hello", "l", "L")
+    let trimmed = trim("  hi  ")
+    let uppered = upper("hi")
+    let lowered = lower("HI")
+    let sw = startsWith("hello", "he")
+    let ew = endsWith("hello", "lo")
+
+    let doubled = map(xs, double)
+    let evens = filter(xs, isEven)
+    let reduceTotal = reduce(xs, 0, addAcc)
+
+    let sortSrc: List[Int] = [5, 3, 4, 1, 2]
+    let sorted = sort(sortSrc)
+    let sortedByNeg = sortBy(sortSrc, negate)
+
+    let reversedList = reverse(xs)
+    let reversedArr = reverse(arr)
+    let reversedStr = reverse("hello")
+
+    let dupes: List[Int] = [1, 1, 2, 2, 3]
+    let uniqued = unique(dupes)
+
+    let nested: List[List[Int]] = [[1, 2], [3, 4]]
+    let flat = flatten(nested)
+
+    let zipped = zip([1, 2, 3], [10, 20, 30])
+    let firstPair = zipped[0]
+    let zipSum = firstPair.0 + firstPair.1
+
+    let pushed = push([1, 2], 3)
+    let popRes = pop([1, 2, 3])
+    let popped = popRes.1
+
+    let inserted = insert([1, 2, 4], 2, 3)
+    let removed = removeAt([1, 2, 3, 4], 1)
+
+    let concatList = concat([1, 2], [3, 4])
+    let concatStr = concat("foo", "bar")
+
+    print("data ops ok")
+    print(joined)
+    print(replaced)
+    print(trimmed)
+    print(uppered)
+    print(lowered)
+    print(reversedStr)
+    print(concatStr)
+
+    let boolSum = boolToInt(containsList) + boolToInt(containsStr) + boolToInt(idxFound) + boolToInt(sw) + boolToInt(ew)
+
+    let part1 = lenXs + lenArr + lenStr + sliceLenSum + a0 + a0after + idxPos
+    let part2 = doubled[0] + len(evens) + reduceTotal + sorted[0] + sortedByNeg[0]
+    let part3 = reversedList[0] + reversedArr[0] + len(uniqued) + len(flat) + zipSum
+    let part4 = len(pushed) + popped + inserted[2] + len(removed) + len(concatList) + len(concatStr)
+    let total = part1 + part2 + part3 + part4 + boolSum
+
+    total
+}

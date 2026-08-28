@@ -2449,3 +2449,178 @@ func TestCheck_TryOperatorOnNonTuple2NonErrorIsAnError(t *testing.T) {
 		t.Fatal("expected an error: `?` on a plain Int isn't Tuple2[_,Error] or Error")
 	}
 }
+
+// Phase 11b (amifl-spec.md section 13.4) — capability dispatch tests.
+
+func TestCheck_LenAcceptsEveryLenableType(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		let  *ast.LetExpr
+	}{
+		{"String", &ast.LetExpr{Name: "s", Value: &ast.StringLit{Value: "hi"}}},
+		{"List", &ast.LetExpr{Name: "s", Value: intListLit(1, 2)}},
+		{"Set", &ast.LetExpr{Name: "s", Value: intSetLit(1, 2)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			call := &ast.CallExpr{Callee: "len", Args: []ast.Expr{&ast.IdentExpr{Name: "s"}}}
+			f := mainFile(tc.let, &ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+			if err := Check(f); err != nil {
+				t.Fatalf("Check() error: %v", err)
+			}
+			if call.ResolvedType != "Int64" {
+				t.Fatalf("got ResolvedType %q, want Int64", call.ResolvedType)
+			}
+			if call.Builtin != "len" {
+				t.Fatalf("got Builtin %q, want \"len\"", call.Builtin)
+			}
+		})
+	}
+}
+
+func TestCheck_LenRejectsUnsupportedType(t *testing.T) {
+	call := &ast.CallExpr{Callee: "len", Args: []ast.Expr{&ast.IntLit{Value: 1}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for len(Int) — Int isn't Lenable")
+	}
+}
+
+func TestCheck_ContainsDispatchesPerCapability(t *testing.T) {
+	m := &ast.SetOrMapLit{Entries: []ast.MapLitEntry{{Key: &ast.StringLit{Value: "a"}, Value: &ast.IntLit{Value: 1}}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Value: m},
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "contains", Args: []ast.Expr{&ast.IdentExpr{Name: "m"}, &ast.StringLit{Value: "a"}}}},
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "contains", Args: []ast.Expr{&ast.StringLit{Value: "hello"}, &ast.StringLit{Value: "ell"}}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ContainsOnMapRequiresKeyTypeMatch(t *testing.T) {
+	m := &ast.SetOrMapLit{Entries: []ast.MapLitEntry{{Key: &ast.StringLit{Value: "a"}, Value: &ast.IntLit{Value: 1}}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Value: m},
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "contains", Args: []ast.Expr{&ast.IdentExpr{Name: "m"}, &ast.IntLit{Value: 1}}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: Map[String,Int]'s key is String, not Int")
+	}
+}
+
+func TestCheck_MapBuiltinRequiresClosureMatchingElemType(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.LetExpr{Name: "f", Value: &ast.ClosureLit{
+			Params:     []ast.Param{{Name: "x", Type: nt("String")}},
+			ReturnType: nt("Int"),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		}},
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "map", Args: []ast.Expr{&ast.IdentExpr{Name: "xs"}, &ast.IdentExpr{Name: "f"}}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: f takes String but xs's elements are Int")
+	}
+}
+
+func TestCheck_MapBuiltinResolvesToListOfClosureReturnType(t *testing.T) {
+	call := &ast.CallExpr{Callee: "map", Args: []ast.Expr{&ast.IdentExpr{Name: "xs"}, &ast.IdentExpr{Name: "f"}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.LetExpr{Name: "f", Value: &ast.ClosureLit{
+			Params:     []ast.Param{{Name: "x", Type: nt("Int")}},
+			ReturnType: nt("Bool"),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.BoolLit{Value: true}}},
+		}},
+		&ast.LetExpr{Name: "r", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "List(Bool)" {
+		t.Fatalf("got ResolvedType %q, want List(Bool)", call.ResolvedType)
+	}
+}
+
+func TestCheck_SetAtRejectsArray(t *testing.T) {
+	call := &ast.CallExpr{Callee: "setAt", Args: []ast.Expr{&ast.IdentExpr{Name: "arr"}, &ast.IntLit{Value: 0}, &ast.IntLit{Value: 1}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "arr", Type: at(nt("Int"), 3), Value: &ast.ListLit{Elems: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}, &ast.IntLit{Value: 3}}}},
+		call,
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: setAt is List-only, Array must use x[i]=v instead (amifl-spec.md section 13.4)")
+	}
+}
+
+func TestCheck_PushIsNonDestructiveReturningListType(t *testing.T) {
+	call := &ast.CallExpr{Callee: "push", Args: []ast.Expr{&ast.IdentExpr{Name: "xs"}, &ast.IntLit{Value: 4}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.LetExpr{Name: "ys", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "List(Int64)" {
+		t.Fatalf("got ResolvedType %q, want List(Int64)", call.ResolvedType)
+	}
+}
+
+func TestCheck_PopReturnsTuple2OfListAndElem(t *testing.T) {
+	call := &ast.CallExpr{Callee: "pop", Args: []ast.Expr{&ast.IdentExpr{Name: "xs"}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.LetExpr{Name: "r", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Tuple(List(Int64),Int64)" {
+		t.Fatalf("got ResolvedType %q, want Tuple(List(Int64),Int64)", call.ResolvedType)
+	}
+}
+
+func TestCheck_ZipRequiresBothArgsToBeList(t *testing.T) {
+	call := &ast.CallExpr{Callee: "zip", Args: []ast.Expr{&ast.IdentExpr{Name: "xs"}, &ast.IdentExpr{Name: "arr"}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.LetExpr{Name: "arr", Type: at(nt("Int"), 3), Value: &ast.ListLit{Elems: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}, &ast.IntLit{Value: 3}}}},
+		&ast.DiscardExpr{Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: zip's second argument is an Array, not a List (13.4's table restricts zip to List)")
+	}
+}
+
+func TestCheck_ReverseOnArrayPreservesArrayType(t *testing.T) {
+	call := &ast.CallExpr{Callee: "reverse", Args: []ast.Expr{&ast.IdentExpr{Name: "arr"}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "arr", Type: at(nt("Int"), 3), Value: &ast.ListLit{Elems: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}, &ast.IntLit{Value: 3}}}},
+		&ast.LetExpr{Name: "r", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Array(Int64;3)" {
+		t.Fatalf("got ResolvedType %q, want Array(Int64;3) — reverse must preserve an Array's fixed size", call.ResolvedType)
+	}
+}
+
+func TestCheck_ContainsRejectsNonComparableElement(t *testing.T) {
+	nested := &ast.LetExpr{Name: "xss", Value: &ast.ListLit{Elems: []ast.Expr{intListLit(1, 2)}}}
+	call := &ast.CallExpr{Callee: "contains", Args: []ast.Expr{&ast.IdentExpr{Name: "xss"}, intListLit(1, 2)}}
+	f := mainFile(nested, &ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: List[List[Int]]'s element type (List[Int]) isn't comparable")
+	}
+}

@@ -44,6 +44,21 @@ func arrayParts(t string) (elem, size string) {
 	return inner[:sep], inner[sep+1:]
 }
 
+// elementType returns t's element type when t is a List or an Array,
+// mirroring sema's identical combinator (types.go) — step 11's
+// builtins_data.go dispatch needs this same "does this hold a T, and what
+// T" question codegen-side too.
+func elementType(t string) (string, bool) {
+	if isListType(t) {
+		return listElemType(t), true
+	}
+	if isArrayType(t) {
+		e, _ := arrayParts(t)
+		return e, true
+	}
+	return "", false
+}
+
 // listGoTypeName mints (or reuses) the synthesized Go/AMIVM slice type for
 // one List[T] shape, keyed by its full canonical string.
 func (p *program) listGoTypeName(canonical string) string {

@@ -6,10 +6,51 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/amisonnet8/amifl/amiflrt"
 	"github.com/amisonnet8/amifl/internal/codegen"
 	"github.com/amisonnet8/amifl/internal/parser"
 	"github.com/amisonnet8/amifl/internal/sema"
 )
+
+// scratchModule is the module name compileToGo's scratch Go module (its
+// go.mod, below) is declared under. amiflrtImportPath is the resulting
+// import path generated code uses for amiflrt (a subdirectory of that same
+// module — Go resolves it automatically from the directory layout alone,
+// no `require` needed), and amiflrtImportMapping is the amivm `-i`/
+// `--import` flag value that tells amivm to emit that import whenever
+// generated code references `?amiflrt.Xxx` (CLAUDE.md's "独自のGoランタイム
+// を呼ぶ").
+const scratchModule = "amiflbuild"
+
+var amiflrtImportPath = scratchModule + "/amiflrt"
+var amiflrtImportMapping = "amiflrt=" + amiflrtImportPath
+
+// copyAmiflrt writes amiflrt's embedded source (amiflrt.Files) into
+// dir/amiflrt, so the scratch Go module compileToGo builds in can resolve
+// `import "amiflbuild/amiflrt"` locally — no network access, no dependency
+// on this machine's GOPATH/module cache (CLAUDE.md's established amiflrt
+// distribution plan, mirroring Seed/Cascade/Weave's seedrt/cascadert/
+// weavert).
+func copyAmiflrt(dir string) error {
+	dstDir := filepath.Join(dir, "amiflrt")
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+	entries, err := amiflrt.Files.ReadDir(".")
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		data, err := amiflrt.Files.ReadFile(e.Name())
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dstDir, e.Name()), data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // compileToIR reads and compiles srcPath down to AMIVM-IR text. Step 1
 // only accepts a single .aml file — package directories and .amlz
@@ -60,14 +101,18 @@ func compileToGo(srcPath string, verbose bool) (goSrc string, workDir string, er
 		cleanup()
 		return "", "", err
 	}
-	modContent := "module amiflbuild\n\ngo 1.26.5\n"
+	modContent := "module " + scratchModule + "\n\ngo 1.26.5\n"
 	if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte(modContent), 0o644); err != nil {
+		cleanup()
+		return "", "", err
+	}
+	if err := copyAmiflrt(workDir); err != nil {
 		cleanup()
 		return "", "", err
 	}
 
 	goPath := filepath.Join(workDir, "main.go")
-	args := []string{irPath, "-o", goPath}
+	args := []string{irPath, "-o", goPath, "-i", amiflrtImportMapping}
 	if verbose {
 		args = append(args, "-v")
 	}

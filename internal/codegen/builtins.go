@@ -23,20 +23,76 @@ func (g *gen) genBuiltinValue(c *ast.CallExpr) (string, error) {
 		return g.genCastValue(c)
 	case "parse":
 		return g.genParseValue(c)
+	case "len":
+		return g.genLenValue(c)
+	case "slice":
+		return g.genSliceBuiltinValue(c)
+	case "at":
+		return g.genAtValue(c)
+	case "contains":
+		return g.genContainsValue(c)
+	case "index":
+		return g.genIndexBuiltinValue(c)
+	case "split":
+		return g.genSplitValue(c)
+	case "join":
+		return g.genJoinValue(c)
+	case "replace":
+		return g.genReplaceValue(c)
+	case "trim":
+		return g.genStringUnaryValue(c, "?strings.TrimSpace")
+	case "upper":
+		return g.genStringUnaryValue(c, "?strings.ToUpper")
+	case "lower":
+		return g.genStringUnaryValue(c, "?strings.ToLower")
+	case "startsWith":
+		return g.genStringPredicateValue(c, "?strings.HasPrefix")
+	case "endsWith":
+		return g.genStringPredicateValue(c, "?strings.HasSuffix")
+	case "map":
+		return g.genMapValue(c)
+	case "filter":
+		return g.genFilterValue(c)
+	case "reduce":
+		return g.genReduceValue(c)
+	case "sort":
+		return g.genSortValue(c)
+	case "sortBy":
+		return g.genSortByValue(c)
+	case "reverse":
+		return g.genReverseValue(c)
+	case "unique":
+		return g.genUniqueValue(c)
+	case "flatten":
+		return g.genFlattenValue(c)
+	case "zip":
+		return g.genZipValue(c)
+	case "push":
+		return g.genPushValue(c)
+	case "pop":
+		return g.genPopValue(c)
+	case "insert":
+		return g.genInsertValue(c)
+	case "removeAt":
+		return g.genRemoveAtValue(c)
+	case "concat":
+		return g.genConcatValue(c)
 	default:
 		return "", fmt.Errorf("codegen: built-in %q has no value-position codegen yet", c.Builtin)
 	}
 }
 
-// genBuiltinStmt dispatches a built-in call used purely for effect (a
-// Unit-returning built-in, or a non-Unit one reached through a discard) —
-// step 11's phase 11a has no Unit-returning built-in yet (isError/cast/
-// parse are all values), so this always falls through to genBuiltinValue
-// and discards the token, mirroring genStmt's own established "generate as
-// a value, discard the result" pattern for every other non-Unit kind that
-// can appear discarded (codegen.go's genStmt, the TupleLit/StructLit/...
-// bucket).
+// genBuiltinStmt dispatches a built-in call used purely for effect — a
+// Unit-returning built-in (setAt is the only one so far — 13.5/13.6's Set/
+// Map mutators join it in phase 11c), or a non-Unit one reached through a
+// discard, which falls through to genBuiltinValue and discards the token
+// (mirroring genStmt's own established "generate as a value, discard the
+// result" pattern for every other non-Unit kind that can appear discarded
+// — codegen.go's genStmt, the TupleLit/StructLit/... bucket).
 func (g *gen) genBuiltinStmt(c *ast.CallExpr) error {
+	if c.Builtin == "setAt" {
+		return g.genSetAtStmt(c)
+	}
 	_, err := g.genBuiltinValue(c)
 	return err
 }

@@ -429,6 +429,33 @@ func (g *gen) writeCall(dest, calleeToken string, args []string) {
 	g.b.WriteString("\n")
 }
 
+// writeGenericCall is writeCall's counterpart for a callee taking explicit
+// type arguments (amivm_spec.md section 4.13's `CALL multi1 : callname
+// <<type1 type2 ... :>> value1 ...` — the extra `:` only appears when
+// typeArgs is non-empty) — step 11's amiflrt generic helpers (Go generics
+// used purely as an *implementation* detail, never exposed as AmiFL
+// surface syntax — principle 4) are called this way so codegen never has
+// to duplicate their logic per concrete type.
+func (g *gen) writeGenericCall(dests []string, calleeToken string, typeArgs []string, args []string) {
+	g.b.WriteString("\tCALL\t")
+	if len(dests) > 0 {
+		g.b.WriteString(strings.Join(dests, "\t"))
+		g.b.WriteString("\t")
+	}
+	g.b.WriteString(":\t")
+	g.b.WriteString(calleeToken)
+	for _, t := range typeArgs {
+		g.b.WriteString("\t^")
+		g.b.WriteString(t)
+	}
+	g.b.WriteString("\t:")
+	for _, a := range args {
+		g.b.WriteString("\t")
+		g.b.WriteString(a)
+	}
+	g.b.WriteString("\n")
+}
+
 // writeCallMulti is writeCall's counterpart for a callee returning more
 // than one Go value (amivm_spec.md section 4.13's "multi1, multi2 ...")
 // — step 11's built-ins that call a Go stdlib function returning a

@@ -1564,3 +1564,127 @@ func TestGenerate_TryOperatorOnBareErrorEmitsEarlyReturnOfErrorItself(t *testing
 		t.Errorf("bare-Error `?` shouldn't FGET anything (no Tuple2 payload to extract); got:\n%s", ir)
 	}
 }
+
+// Phase 11b (amifl-spec.md section 13.4) codegen tests.
+
+func TestGenerate_ContainsOnMapUsesMgetOkForm(t *testing.T) {
+	mapType := "Map(String,Int64)"
+	call := &ast.CallExpr{
+		Callee: "contains", Builtin: "contains", ResolvedType: "Bool",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "m", ResolvedType: mapType, Token: "%m_1"}, &ast.StringLit{Value: "a"}},
+		ArgTypes: []string{mapType, "String"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "ok", Token: "%ok_1", ResolvedType: "Bool", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"VAR\t%amifl_tmp1\t^int64",
+		"VAR\t%amifl_tmp2\t^bool",
+		"MGET\t%amifl_tmp1\t%amifl_tmp2\t%m_1\t\"a\"",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+	if strings.Contains(ir, "amiflrt") {
+		t.Errorf("contains() on Map/Set shouldn't need amiflrt (MGET's ok-form is native); got:\n%s", ir)
+	}
+}
+
+func TestGenerate_ContainsOnSetUsesMgetOkFormWithBoolValueType(t *testing.T) {
+	setType := "Set(Int64)"
+	call := &ast.CallExpr{
+		Callee: "contains", Builtin: "contains", ResolvedType: "Bool",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "s", ResolvedType: setType, Token: "%s_1"}, &ast.IntLit{Value: 1}},
+		ArgTypes: []string{setType, "Int64"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "ok", Token: "%ok_1", ResolvedType: "Bool", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"VAR\t%amifl_tmp1\t^bool",
+		"MGET\t%amifl_tmp1\t%amifl_tmp2\t%s_1\t1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_FlattenPassesTwoTypeArguments(t *testing.T) {
+	innerType := "List(Int64)"
+	outerType := "List(" + innerType + ")"
+	call := &ast.CallExpr{
+		Callee: "flatten", Builtin: "flatten", ResolvedType: innerType,
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "xss", ResolvedType: outerType, Token: "%xss_1"}},
+		ArgTypes: []string{outerType},
+	}
+	f := mainFile(&ast.LetExpr{Name: "flat", Token: "%flat_1", ResolvedType: innerType, Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	// Flatten[S,E] needs S (the outer list's own named Go type, "AmiflList2"
+	// here — AmiflList1 is the inner List(Int64)) *and* E (int64) as
+	// explicit type arguments — a single type parameter isn't enough
+	// (amiflrt/collections.go's Flatten doc comment).
+	if !strings.Contains(ir, "CALL\t%amifl_tmp1\t:\t?amiflrt.Flatten\t^AmiflList1\t^int64\t:\t%xss_1") {
+		t.Errorf("generated IR missing the two-type-argument Flatten call; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_ReverseOnArrayEmitsIndexLoopNotAmiflrt(t *testing.T) {
+	arrType := "Array(Int64;3)"
+	call := &ast.CallExpr{
+		Callee: "reverse", Builtin: "reverse", ResolvedType: arrType,
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "arr", ResolvedType: arrType, Token: "%arr_1"}},
+		ArgTypes: []string{arrType},
+	}
+	f := mainFile(&ast.LetExpr{Name: "r", Token: "%r_1", ResolvedType: arrType, Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{"LOOP", "AGET", "ASET", "ENDLOOP"} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+	if strings.Contains(ir, "amiflrt") {
+		t.Errorf("reverse() on Array should use a fixed-size index loop, not amiflrt.ReverseSlice; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_ZipBuildsTuple2ViaFsetNotAmiflrt(t *testing.T) {
+	listType := "List(Int64)"
+	pairType := "Tuple(Int64,Int64)"
+	call := &ast.CallExpr{
+		Callee: "zip", Builtin: "zip", ResolvedType: "List(" + pairType + ")",
+		Args: []ast.Expr{
+			&ast.IdentExpr{Name: "xs", ResolvedType: listType, Token: "%xs_1"},
+			&ast.IdentExpr{Name: "ys", ResolvedType: listType, Token: "%ys_2"},
+		},
+		ArgTypes: []string{listType, listType},
+	}
+	f := mainFile(&ast.LetExpr{Name: "zipped", Token: "%zipped_1", ResolvedType: "List(" + pairType + ")", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"CALL\t%amifl_tmp1\t:\t?len\t%xs_1",
+		"CALL\t%amifl_tmp2\t:\t?len\t%ys_2",
+		"LT\t%amifl_tmp4",
+		"SLMAKE",
+		"FSET\t%amifl_tmp10\t>F0",
+		"FSET\t%amifl_tmp10\t>F1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}

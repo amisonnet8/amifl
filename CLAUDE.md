@@ -203,7 +203,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 8 ✅ | `enum`・`switch`拡張 | バリアント定義・値生成、`switch`での判定/フィールド取り出し、バリアント網羅性検査 | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` `IF` `ELSE` `ENDIF` `EQ`（新規命令ゼロ、Step 6/4の既存命令のみで実現） | 設計課題4（enum表現、下記「確定した設計判断」参照） |
 | 9 ✅ | パイプ演算子`|>` | `_`プレースホルダー、`for...yield`糖衣、`|>`の優先順位（最低） | （新規命令無し。糖衣構文） | 設計課題7（下記「確定した設計判断」参照） |
 | 10 ✅ | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5（下記「確定した設計判断」参照） |
-| 11 🚧 | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開。フェーズ分割で進行中：11a✅（`Error`型・`?`演算子・`cast[T]`/`parse[T]`ブラケット構文・`isError`・組み込み関数dispatch基盤）→11b（13.4節データ操作）→11c（13.5/13.6節Set/Map専用）→11d（13.7節数値・`unwrap`/`okOr`） | （`amiflrt`+ネイティブ命令の混在） | **設計課題6（capability多相の実装方式）** |
+| 11 🚧 | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開。フェーズ分割で進行中：11a✅（`Error`型・`?`演算子・`cast[T]`/`parse[T]`ブラケット構文・`isError`・組み込み関数dispatch基盤）→11b✅（13.4節データ操作28関数）→11c（13.5/13.6節Set/Map専用）→11d（13.7節数値・`unwrap`/`okOr`） | （`amiflrt`+ネイティブ命令の混在） | **設計課題6（capability多相の実装方式）** |
 | 12 | ファイルI/O・`Stream[T]`・並列処理 | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣、`spawn`/`send`/`recv`/`parallel` | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` `SPAWN` `SEL` `CASESEND` `CASERECV` `DEFAULT` `ENDSEL` `DEFER` | — |
 | 13 | `extern`機構 | Go資産バインド（15.1〜15.4節）、`Any`型境界の実装方式確定 | `ASSERT`（要否は設計課題1による） | **設計課題1（先例無し・最大の山場の1つ）** |
 | 14 | モジュール | `import`/エイリアス/可視性/循環禁止（12節） | — | — |
@@ -552,6 +552,33 @@ Step 11着手時にユーザーと合意した設計方針（capability多相は
 **`?`演算子（postfix、`ast.TryExpr`）**：AmiFLには元々`return`文が無い（式指向、末尾の式が暗黙の戻り値）ため、`?`はAmiFL史上初めて「関数の途中から早期return する」構文になった。実装は次の3段階：(1) `v.Value`を評価し、Tuple2[U,Error]なら`FGET`で`F0`（payload）と`F1`（error）を、bare Errorならそのまま値自体をerrorとして扱う、(2) `NEQ`+`IF`でerrorが非nilかを判定し、真ならその場で早期`RET`する、(3) 分岐を抜けたら（＝errorがnilだったら）payloadを式全体の値として返す。早期returnの値は**自分を囲む関数/クロージャーの宣言済み戻り値型**（`v.Value`自身の型ではない）に依存するため、sema側に`funcChecker.retType`（`checkFunc`で設定、クロージャー境界では`resolveClosureLit`が保存/復元——ループ深度と同じ扱い）、codegen側に`gen.retType`（`genFuncDecl`で設定、`genClosureLitInto`が保存/復元）という、既存の`loopDepth`/`closureDepth`と同型の「現在のコンテキストを表す状態」を新設した。早期return値の構築は、**`VAR`宣言だけで対象の型のGoゼロ値が得られる**という既存の規律（Step 2以来）を利用し、Tuple2[U,Error]なら`VAR`で丸ごとゼロ初期化してから`F1`（error）だけ`FSET`する（`F0`のpayloadはゼロ値のまま——ペイロードの中身はエラー時に意味を持たないため問題ない）、bare Errorなら値そのものを直接`RET`するだけで済む——ゼロ値を明示的に構築するコードが一切不要という、既存の設計判断の再利用がそのまま効いた例。
 
 **実地検証（`amivm`→`go build`→実行）で確認した項目**：`examples/errors.aml`——`?`で最初の`parse[Int]`の失敗を早期returnする関数（`parseSumTry`）、その関数を成功ケース（`"10"`,`"20"`）・失敗ケース（`"not a number"`,`"5"`）の両方で呼び出し`isError`で判定、`cast[Float64]`→`cast[Int64]`の往復キャスト。生成されたIRを目視確認し、`?`が`FGET`×2→`NEQ`→`IF`→`FSET`+`RET`→`ENDIF`という想定どおりの列に展開されていること、`parse`が`strconv.ParseInt`の2値CALLとTuple2の`FSET`組み立てへ正しく下がっていることを確認。実行結果は終了コード142（`r1.0(30) + bonus(100, ok2=true) + roundTrip(12) = 142`という手計算と一致）を確認。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。
+
+### Step 11フェーズ11b：13.4節（データ操作、`len`〜`concat`の28関数）
+
+**capability多相の実装方式が実地に確定した（設計課題6の解決）**：各関数のsemaリゾルバーが第1引数（一部は複数引数）の解決済み型を見て、その場でどのcapabilityグループ（2.3節）に属するかを一意に判定し、`v.ArgTypes`（各引数の解決済み型、`Args`と並行配列）に記録する。codegenはこの`ArgTypes`を読むだけで、同じ判定ロジック（`isListType`/`isArrayType`/`isMapType`/`isSetType`等の型分類関数、sema/codegen双方に独立コピーが存在する既存パターン）を使って対応するコード生成へ振り分ける——実行時ディスパッチは一切無く、呼び出し箇所ごとに完全にモノモーフィックへ解決される、CLAUDE.mdが事前に立てていた仮説（「各呼び出しが実質的にモノモーフィックにコンパイルされる」）どおりの実装になった。
+
+**`amiflrt`にGoジェネリクスを初めて実戦投入した**：AmiFL言語自体はジェネリクス無し（原則4）だが、`amiflrt`は普通のGoコードなのでGoジェネリクスを内部実装に使ってよいという設計方針（Step 11着手時にユーザーと合意）を実際に使い、`Contains[T comparable]`・`MapSlice[T,U]`・`FilterSlice[T]`・`Reduce[T,U]`・`SortSlice[T cmp.Ordered]`・`SortBySlice[T,K]`・`ReverseSlice[T]`・`Unique[T comparable]`・`Push`・`Pop`・`Insert`・`RemoveAt`・`ConcatSlice`・`IndexOf`・`Flatten`の14個のジェネリック関数を実装した。codegen側は`CALL result : ?amiflrt.Fn<<^T,^U>> args...`という明示的型引数付き呼び出し（`ignored/amivm/amivm_spec.md` 4.13節で確認済みの構文、`CALL`/`DEFER`/`SPAWN`共通のジェネリクス拡張）で呼び出す——新しい`gen.writeGenericCall`/`writeGenericCallMulti`ヘルパーを追加した（既存の`writeCall`/`writeCallMulti`とは異なり、callnameと値引数の間に型引数の区画が追加で入る）。
+
+**多くの関数はamiflrtすら不要で、Goの標準ライブラリ・既存AMIVM命令へ直接落ちた**：
+- `len`：Goの組み込み`len`がLenableな型（String/List/Array/Map/Set）すべてに既にネイティブ対応しているため、`?len`+`int64`キャスト（Step1の`main`ブリッジと同じパターン）だけで済んだ。
+- `slice`：既存の`SLICE`命令はGoの`x[a:b]`構文をそのまま生成するため、StringにもList/Arrayにも無変更で使える。ただしビルトイン関数形の`slice(x,from,to)`は常に3引数必須（`_`によるbound省略は`x[a:]`構文糖衣専用のパーサートークンであり、ユーザーが値として書けるAmiFLの式ではないため——原則7「可変長引数無し・名前付き引数無し」）。
+- `at`/`setAt`：既存の`x[i]`/`x[i]=v`糖衣と全く同じ`AGET`/`ASET`。`setAt`は`x[i]=v`と違い引数がどんな式でもよい（`genValue`で一度評価してから得たトークンへ直接`ASET`するだけで、Listがスライス＝参照型であるため元の変数への書き込みとして伝播する——過去に踏まれた地雷#7の直接の帰結）。
+- `contains`/Map・Set：Goの標準ライブラリ`strings.Contains`（String）と、**`MGET`の`ok`受け取り形**（`multi1 <<multi2>> single1 value1`）を再利用（Map・Set両方——SetもStep10確定の`map[T]bool`表現なのでMGETがそのまま使える）。amiflrtは不要だった。
+- `split`/`join`/`replace`/`trim`/`upper`/`lower`/`startsWith`/`endsWith`：すべて`strings`パッケージへの直接`CALL`。`SLTYPE`が`type X []T`という**エイリアスではない定義型**であることを利用し（Step10確定済み）、Goの代入可能性規則（片方が無名型なら同一underlying typeどうしは変換不要で代入可）によって`strings.Split`の戻り値`[]string`がそのまま`List[String]`型の変数へ代入でき、`strings.Join`へも`List[String]`をそのまま渡せる——変換コードが一切不要。
+
+**`zip`はamiflrtを使わず、直接IR生成にした**：`amiflrt`がGoの名前付き構造体を返すと、AmiFLが独自に発行するTuple2の`STTYPE`とは別の型になり代入不可能になる（Step 6以来確立した「amiflrtはネイティブ複数戻り値のみ返し、Tuple2の組み立てはcodegenが`FSET`で行う」という規約——`parse[T]`・`index`・`pop`と同じパターン）ため、zipは`min(len(xs),len(ys))`を計算する`LT`/`IF`/`ELSE`と、`SLMAKE`＋インクリメント優先ループ（Step7で確立、`emitIndexLoopHeader`再利用）＋ループ内で`FSET`によるTuple2構築、という完全に手書きのIR生成にした。
+
+**`reverse`のArray分岐も同じ理由で手書きループにした**：`amiflrt.ReverseSlice[T]`はGoのスライスを返すため、固定長Arrayには使えない（Goの配列は値型で、サイズが異なれば別の型になる）。添字`i`から`N-1-i`への読み替えだけの単純なループ（`emitIndexLoopHeader`＋`AGET`/`ASET`）で、Arrayの固定長という性質を保ったまま反転できた——List/Stringはそれぞれ`amiflrt.ReverseSlice[T]`/`amiflrt.ReverseString`（後者はruneベースでUTF-8を破壊しない）を使う3方向分岐。
+
+**`flatten`だけ型引数が2つ必要という、他のamiflrtジェネリクスに無い罠を踏んだ**：`Flatten[T any](xss [][]T) []T`という素朴な1型引数のシグネチャで実装したところ、`List[List[Int]]`の実際のGo表現（`AmiflList3 = []AmiflList1`、`AmiflList1`自体が**名前付き型**）を渡すと`go build`が型エラーで拒否した——Goの代入可能性規則は「片方が無名型」という条件を**1階層分**しか見てくれず、`[]AmiflList1`と`[][]int64`は（`AmiflList1`のunderlying typeが`[]int64`であっても）別の型として扱われる。対策は`Flatten[S ~[]E, E any](xss []S) []E`と2つの型パラメータに分け、`S`（内側Listの名前付きGo型そのもの、`~[]E`制約で「underlying typeが`[]E`であるどんな型」を許容）と`E`（さらに内側の要素型）を別々に渡すこと——`~`制約（Go 1.18以降のtype set記法）を使って初めて解決できた、他のamiflrtジェネリクス（`MapSlice`等、常に1階層のスライスしか扱わないため無縁だった）には無い固有の罠。
+
+**`push`/`pop`/`insert`/`removeAt`は非破壊（新しい`List`を返す）**：ユーザーとの事前合意どおりに実装。`amiflrt.Push`は`slices.Clone`してから`append`する——素朴な`append(xs,v)`は空き容量があれば元のバッキング配列を再利用してしまい、同じ配列を共有する別のAmiFL変数を静かに壊しうるため、常にコピーしてから追記する防御的な実装にした。
+
+**`map`/`filter`/`reduce`/`sortBy`のクロージャー引数は、Step 5の「クロージャーリテラルは`let`の直接の値としてのみ許可」という制約と正面から両立した**：これらの組み込み関数はStep 5が意図的に先送りした「高階関数」の具体的な要求そのものだが、実装してみると全く新しい仕組みは要らなかった——`f`は常に「既に`let`で束縛されたクロージャー変数」への参照（`ast.IdentExpr`）であり、その型（`fn(T)->U`という内部エンコーディング、Step5確立）を`checkExpr(args[1], "")`で無条件に読み取り、`funcTypeParts`で分解してT/Uを取り出すだけで、xsの要素型との整合性を検査できた。ユーザー向けの`fn(...)->...`型注釈構文（Step5では意図的に未実装）を一切追加する必要が無かった——**組み込み関数の引数型はGoコード側（sema resolver）で定義されるため、AmiFL表面文法の型注釈能力とは独立している**という発見。codegenでもクロージャーの値（名前付きGo関数型）がamiflrtの`func(T)U`という無名関数型パラメータへそのまま代入可能（Goの代入可能性規則、split/joinと同じ理屈）なため、アダプタは不要だった。
+
+**`map`/`filter`/`reduce`がArrayも受け付ける際は、事前にスライス化する**：amiflrtの各ジェネリクス関数は`[]T`（スライス）を要求するが、Arrayは固定長のGoネイティブ配列（`[N]T`）で別の型のため、`arr[:]`（`VAR`宣言済みの配列はアドレス取得可能なのでGoで合法）に相当する`SLICE ... _ _`を挟んでスライス化してから渡す（`arrayAwareSliceValue`ヘルパー）。
+
+**実地検証（`amivm`→`go build`→実行）で確認した項目**：`examples/data_ops.aml`——28関数すべてを最低1回は呼び出し、`len`/`slice`/`at`/`setAt`/`contains`/`index`/文字列8関数/`map`/`filter`/`reduce`/`sort`/`sortBy`/`reverse`（List・Array・String全形）/`unique`/`flatten`/`zip`/`push`/`pop`/`insert`/`removeAt`/`concat`（List・String両方）を1つの関数内で連鎖させた。トップレベル`fn`ではなく`let`束縛のローカルクロージャーを`map`/`filter`/`reduce`/`sortBy`へ渡す必要がある点（トップレベル`fn`を値として渡す構文は無い、Step5の既存制約）を実装中に再確認し、サンプルもそれに合わせて構成した。生成されたIRを目視確認し、`Flatten`の2型引数呼び出し・`reverse`のArray分岐が手書きループになっていること・`zip`がFSETでTuple2を組み立てていること・`contains`がMap/SetでMGETのokフォームを使っていることを確認。実行結果は終了コード46（POSIXの256モジュロ込みで手計算した558と一致：内訳は`8+4+5+10+3+99+4=133`＋`198+3+127+1+5=334`＋`6+40+3+4+11=64`＋`3+3+3+3+4+6=22`＋`boolSum=5`）を確認。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。
 
 ## 開発の進め方
 
