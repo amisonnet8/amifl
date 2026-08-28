@@ -71,8 +71,8 @@ func TestGenerate_StringWithQuoteIsEscaped(t *testing.T) {
 
 func TestGenerate_LetEmitsVarAndSet(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", ResolvedType: "Int64", Value: &ast.IntLit{Value: 42}},
-		&ast.IdentExpr{Name: "x", ResolvedType: "Int64"},
+		&ast.LetExpr{Name: "x", InternalName: "x", ResolvedType: "Int64", Value: &ast.IntLit{Value: 42}},
+		&ast.IdentExpr{Name: "x", InternalName: "x", ResolvedType: "Int64"},
 	)
 	ir, err := Generate(f)
 	if err != nil {
@@ -91,9 +91,9 @@ func TestGenerate_LetEmitsVarAndSet(t *testing.T) {
 
 func TestGenerate_AssignEmitsSet(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", ResolvedType: "Int64", Value: &ast.IntLit{Value: 1}},
-		&ast.AssignExpr{Name: "x", Value: &ast.IntLit{Value: 2}},
-		&ast.IdentExpr{Name: "x", ResolvedType: "Int64"},
+		&ast.LetExpr{Name: "x", InternalName: "x", ResolvedType: "Int64", Value: &ast.IntLit{Value: 1}},
+		&ast.AssignExpr{Name: "x", InternalName: "x", Value: &ast.IntLit{Value: 2}},
+		&ast.IdentExpr{Name: "x", InternalName: "x", ResolvedType: "Int64"},
 	)
 	ir, err := Generate(f)
 	if err != nil {
@@ -123,7 +123,7 @@ func TestGenerate_ConstIsInlinedNotDeclared(t *testing.T) {
 
 func TestGenerate_FloatLiteralAlwaysHasADecimalPoint(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", ResolvedType: "Float64", Value: &ast.FloatLit{Value: 5}},
+		&ast.LetExpr{Name: "x", InternalName: "x", ResolvedType: "Float64", Value: &ast.FloatLit{Value: 5}},
 		&ast.IntLit{Value: 0},
 	)
 	ir, err := Generate(f)
@@ -137,7 +137,7 @@ func TestGenerate_FloatLiteralAlwaysHasADecimalPoint(t *testing.T) {
 
 func TestGenerate_BoolLiteral(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "ok", ResolvedType: "Bool", Value: &ast.BoolLit{Value: true}},
+		&ast.LetExpr{Name: "ok", InternalName: "ok", ResolvedType: "Bool", Value: &ast.BoolLit{Value: true}},
 		&ast.IntLit{Value: 0},
 	)
 	ir, err := Generate(f)
@@ -170,7 +170,7 @@ func TestGenerate_BinaryExprEmitsTempAndInstruction(t *testing.T) {
 
 func TestGenerate_StringPlusEmitsConcat(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "s", ResolvedType: "String", Value: &ast.BinaryExpr{
+		&ast.LetExpr{Name: "s", InternalName: "s", ResolvedType: "String", Value: &ast.BinaryExpr{
 			Op: "+", Left: &ast.StringLit{Value: "a"}, Right: &ast.StringLit{Value: "b"}, ResolvedType: "String",
 		}},
 		&ast.IntLit{Value: 0},
@@ -230,8 +230,8 @@ func TestGenerate_DoubleUnaryMinusOfLiteralCollapses(t *testing.T) {
 
 func TestGenerate_UnaryMinusOfVariableEmitsSub(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", ResolvedType: "Int64", Value: &ast.IntLit{Value: 5}},
-		&ast.UnaryExpr{Op: "-", Operand: &ast.IdentExpr{Name: "x", ResolvedType: "Int64"}, ResolvedType: "Int64"},
+		&ast.LetExpr{Name: "x", InternalName: "x", ResolvedType: "Int64", Value: &ast.IntLit{Value: 5}},
+		&ast.UnaryExpr{Op: "-", Operand: &ast.IdentExpr{Name: "x", InternalName: "x", ResolvedType: "Int64"}, ResolvedType: "Int64"},
 	)
 	ir, err := Generate(f)
 	if err != nil {
@@ -300,6 +300,189 @@ func TestGenerate_ConstOperatorExpressionRegeneratesAtUseSite(t *testing.T) {
 	}
 	if !strings.Contains(ir, "ADD\t%amifl_tmp1\t40\t2") || !strings.Contains(ir, "RET\t%amifl_tmp1") {
 		t.Errorf("expected the const's operator expression regenerated inline; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_IfWithoutElseEmitsIfEndif(t *testing.T) {
+	f := mainFile(
+		&ast.IfExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Then: &ast.Block{Exprs: []ast.Expr{
+				&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "hi"}}},
+			}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{"IF\ttrue", `CALL	:	?fmt.Println	"hi"`, "ENDIF"} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+	if strings.Contains(ir, "ELSE") {
+		t.Errorf("an else-less if should emit no ELSE; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_IfWithElseEmitsValueViaTemp(t *testing.T) {
+	f := mainFile(
+		&ast.IfExpr{
+			Cond:         &ast.BoolLit{Value: true},
+			Then:         &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
+			Else:         &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 2}}},
+			ResolvedType: "Int64",
+		},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"VAR\t%amifl_tmp1\t^int64",
+		"IF\ttrue",
+		"SET\t%amifl_tmp1\t1",
+		"ELSE",
+		"SET\t%amifl_tmp1\t2",
+		"ENDIF",
+		"RET\t%amifl_tmp1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_ElifEmitsNestedIfInsideElseNotAmivmElif(t *testing.T) {
+	f := mainFile(
+		&ast.IfExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Then: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
+			Else: &ast.IfExpr{
+				Cond: &ast.BoolLit{Value: false},
+				Then: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 2}}},
+				Else: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 3}}},
+			},
+			ResolvedType: "Int64",
+		},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if strings.Contains(ir, "ELIF") {
+		t.Errorf("elif must desugar to ELSE + a nested IF, never AMIVM's ELIF; got:\n%s", ir)
+	}
+	// Exactly one temp declared and threaded through every branch (not one
+	// per branch) — the nested if reuses the outer if's dest.
+	if strings.Count(ir, "VAR\t%amifl_tmp1") != 1 {
+		t.Errorf("expected exactly one VAR for the shared result temp; got:\n%s", ir)
+	}
+	if strings.Count(ir, "SET\t%amifl_tmp1") != 3 {
+		t.Errorf("expected all three branches to SET the same temp; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_WhileLowersToLoopIfBreak(t *testing.T) {
+	f := mainFile(
+		&ast.WhileExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Body: &ast.Block{Exprs: []ast.Expr{&ast.BreakExpr{}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{"LOOP", "NOT\t%amifl_tmp1\ttrue", "IF\t%amifl_tmp1", "BREAK", "ENDIF", "ENDLOOP"} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+	// The loop body's own break must appear after the condition-check
+	// IF/ENDIF, i.e. twice total ("BREAK" appears once for the
+	// condition-exit and once for the user's own break).
+	if strings.Count(ir, "\tBREAK\n") != 2 {
+		t.Errorf("expected 2 BREAKs (loop-exit + user break), got IR:\n%s", ir)
+	}
+}
+
+func TestGenerate_ContinueEmitsContinue(t *testing.T) {
+	f := mainFile(
+		&ast.WhileExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Body: &ast.Block{Exprs: []ast.Expr{&ast.ContinueExpr{}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "\tCONTINUE\n") {
+		t.Errorf("generated IR missing CONTINUE; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_ShadowingLetGetsDistinctInternalNames(t *testing.T) {
+	// Regression test for a real bug found via the full amivm -> go build
+	// pipeline (CLAUDE.md's "確定した設計判断" for step 4): two `let`s
+	// sharing the same emitted Go name — even though real block shadowing
+	// makes that legal Go — broke amivm's unused-variable self-healing,
+	// which assumes one declaration per name per function. Every `let`
+	// must get its own InternalName, whether or not it shadows anything.
+	f := mainFile(
+		&ast.LetExpr{Name: "x", InternalName: "x_1", ResolvedType: "Int64", Value: &ast.IntLit{Value: 1}},
+		&ast.IfExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Then: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "x", InternalName: "x_2", ResolvedType: "Int64", Value: &ast.IntLit{Value: 2}},
+			}},
+		},
+		&ast.IdentExpr{Name: "x", InternalName: "x_1", ResolvedType: "Int64"},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "VAR\t%x_1\t^int64") || !strings.Contains(ir, "VAR\t%x_2\t^int64") {
+		t.Errorf("expected distinct VAR declarations for x_1 and x_2; got:\n%s", ir)
+	}
+	if strings.Contains(ir, "%x\t") || strings.Contains(ir, "%x\n") {
+		t.Errorf("did not expect the bare (unsuffixed) name %%x anywhere; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_DiscardOfNonUnitIfStillRunsSideEffectsInsideIt(t *testing.T) {
+	// `_ = if c { print("x"); 1 } else { 2 }` — the if's own type is
+	// Int64 (not Unit), so it's not a CallExpr and the old genDiscardStmt
+	// would have silently dropped it (and the print inside it) entirely.
+	f := mainFile(
+		&ast.DiscardExpr{Value: &ast.IfExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Then: &ast.Block{Exprs: []ast.Expr{
+				&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "x"}}},
+				&ast.IntLit{Value: 1},
+			}},
+			Else:         &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 2}}},
+			ResolvedType: "Int64",
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, `CALL	:	?fmt.Println	"x"`) {
+		t.Errorf("expected the print inside the discarded if's branch to still run; got:\n%s", ir)
+	}
+	// The branch values themselves are never captured anywhere (nothing
+	// reads the if's result), so no VAR/SET should be emitted for them.
+	if strings.Contains(ir, "SET") {
+		t.Errorf("discarding the if's value should emit no SET at all; got:\n%s", ir)
 	}
 }
 

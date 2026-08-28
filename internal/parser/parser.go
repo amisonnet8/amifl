@@ -396,9 +396,226 @@ func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
 			return nil, err
 		}
 		return inner, nil
+	case lexer.KwIf:
+		return p.parseIfExpr()
+	case lexer.KwSwitch:
+		return p.parseSwitchExpr()
+	case lexer.KwWhile:
+		return p.parseWhileExpr()
+	case lexer.KwBreak:
+		tok := p.cur
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		return &ast.BreakExpr{Line: tok.Line}, nil
+	case lexer.KwContinue:
+		tok := p.cur
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		return &ast.ContinueExpr{Line: tok.Line}, nil
 	default:
 		return nil, p.errorf("unexpected %s, expected an expression", p.cur.Kind)
 	}
+}
+
+// parseIfExpr parses `if cond { ... } [elif cond { ... }]* [else { ... }]?`
+// (amifl-spec.md section 7). The condition is parsed with parseOrExpr, not
+// parseExpr — a bare `{` can't otherwise be told apart from the start of
+// a struct literal once step 6 adds those, so conditions deliberately stay
+// at "any operator expression" and never reach statement-only forms
+// (let/const/assign/discard) or a leading `{`.
+//
+// `elif`/`else` must directly follow the previous branch's closing `}` on
+// the same line — parseOptionalElse never skips a Newline to look for one
+// (CLAUDE.md's "確定した設計判断": elif/else must be "cuddled", mirroring
+// how the example in amifl-spec.md section 5 writes the whole chain on one
+// line). Writing `elif`/`else` on its own line leaves it as a dangling
+// token that statement-position parsing rejects with a clear "unexpected
+// 'elif'" error, rather than silently accepting two different layouts.
+func (p *parser) parseIfExpr() (ast.Expr, error) {
+	kwTok, err := p.expect(lexer.KwIf)
+	if err != nil {
+		return nil, err
+	}
+	cond, err := p.parseOrExpr()
+	if err != nil {
+		return nil, err
+	}
+	then, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	elseBody, err := p.parseOptionalElse()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.IfExpr{Cond: cond, Then: then, Else: elseBody, Line: kwTok.Line}, nil
+}
+
+func (p *parser) parseOptionalElse() (ast.ElseBody, error) {
+	switch p.cur.Kind {
+	case lexer.KwElif:
+		elifTok := p.cur
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		cond, err := p.parseOrExpr()
+		if err != nil {
+			return nil, err
+		}
+		then, err := p.parseBlock()
+		if err != nil {
+			return nil, err
+		}
+		nested, err := p.parseOptionalElse()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.IfExpr{Cond: cond, Then: then, Else: nested, Line: elifTok.Line}, nil
+	case lexer.KwElse:
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		block, err := p.parseBlock()
+		if err != nil {
+			return nil, err
+		}
+		return block, nil
+	default:
+		return nil, nil
+	}
+}
+
+func (p *parser) parseWhileExpr() (ast.Expr, error) {
+	kwTok, err := p.expect(lexer.KwWhile)
+	if err != nil {
+		return nil, err
+	}
+	cond, err := p.parseOrExpr()
+	if err != nil {
+		return nil, err
+	}
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.WhileExpr{Cond: cond, Body: body, Line: kwTok.Line}, nil
+}
+
+// switchCase is one `case <bool-expr>: <value-expr>` or
+// `default: <value-expr>` clause, collected before desugaring (see
+// parseSwitchExpr).
+type switchCase struct {
+	cond ast.Expr // nil for `default`
+	body ast.Expr
+	line int
+}
+
+// parseSwitchExpr parses AmiFL's step-4 subset of `switch` (amifl-spec.md
+// section 10): no subject, no `is Type`/`in [...]`/enum patterns — every
+// case is a plain Bool expression, evaluated in order. This is exactly an
+// if/elif/else chain with different keywords (principle 3: "1つの仕組みで
+// 足りるものを2つ用意しない"), so it desugars straight into an *ast.IfExpr
+// here rather than getting its own AST node or any sema/codegen support of
+// its own. A real subject-carrying SwitchExpr node — needed once `is
+// Type`/enum patterns arrive — is deliberately not designed yet (CLAUDE.md
+// development rule: don't build for a future step's requirements before
+// they're concretely known).
+func (p *parser) parseSwitchExpr() (ast.Expr, error) {
+	if _, err := p.expect(lexer.KwSwitch); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.LBrace); err != nil {
+		return nil, err
+	}
+	if err := p.skipNewlines(); err != nil {
+		return nil, err
+	}
+
+	var cases []switchCase
+	haveDefault := false
+	for p.cur.Kind != lexer.RBrace {
+		var c switchCase
+		switch p.cur.Kind {
+		case lexer.KwCase:
+			caseTok := p.cur
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			cond, err := p.parseOrExpr()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.Colon); err != nil {
+				return nil, err
+			}
+			body, err := p.parseOrExpr()
+			if err != nil {
+				return nil, err
+			}
+			c = switchCase{cond: cond, body: body, line: caseTok.Line}
+		case lexer.KwDefault:
+			defTok := p.cur
+			if haveDefault {
+				return nil, p.errorf("duplicate 'default' in switch")
+			}
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.Colon); err != nil {
+				return nil, err
+			}
+			body, err := p.parseOrExpr()
+			if err != nil {
+				return nil, err
+			}
+			haveDefault = true
+			c = switchCase{cond: nil, body: body, line: defTok.Line}
+		case lexer.EOF:
+			return nil, p.errorf("unexpected end of file, expected '}'")
+		default:
+			return nil, p.errorf("expected 'case' or 'default' in switch, got %s", p.cur.Kind)
+		}
+		cases = append(cases, c)
+		if p.cur.Kind == lexer.RBrace {
+			break
+		}
+		if p.cur.Kind != lexer.Newline {
+			return nil, p.errorf("expected newline after switch case, got %s", p.cur.Kind)
+		}
+		if err := p.skipNewlines(); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RBrace); err != nil {
+		return nil, err
+	}
+	if len(cases) == 0 || (len(cases) == 1 && cases[0].cond == nil) {
+		return nil, p.errorf("switch must have at least one 'case'")
+	}
+
+	var elseBody ast.ElseBody
+	if haveDefault && cases[len(cases)-1].cond == nil {
+		last := cases[len(cases)-1]
+		elseBody = &ast.Block{Exprs: []ast.Expr{last.body}}
+		cases = cases[:len(cases)-1]
+	}
+	var result *ast.IfExpr
+	for i := len(cases) - 1; i >= 0; i-- {
+		c := cases[i]
+		if c.cond == nil {
+			return nil, fmt.Errorf("line %d: 'default' must be the last clause in a switch", c.line)
+		}
+		result = &ast.IfExpr{
+			Cond: c.cond,
+			Then: &ast.Block{Exprs: []ast.Expr{c.body}},
+			Else: elseBody,
+			Line: c.line,
+		}
+		elseBody = result
+	}
+	return result, nil
 }
 
 func (p *parser) parseLetExpr() (ast.Expr, error) {

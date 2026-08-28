@@ -67,11 +67,13 @@ func findMain(f *ast.File) *ast.FuncDecl {
 	return nil
 }
 
-// gen holds the per-function codegen state. Step 2 has no control flow
-// yet (that lands in step 4), so there is nothing to hoist VAR
-// declarations past — each `let` emits its VAR right where it's
-// declared. Revisit this once goto-producing constructs (switch's break,
-// for-in's continue) exist; see CLAUDE.md's "過去に踏まれた地雷" #1.
+// gen holds the per-function codegen state. Step 4's if/while compile to
+// AMIVM's IF/LOOP, which are themselves genuinely nested Go blocks (not
+// goto-based), so there is still nothing to hoist VAR declarations past —
+// each `let` emits its VAR right where it's declared, at whatever nesting
+// depth that is. Revisit this once an actually goto-producing construct
+// (switch's break-out-of-multiple-cases, for-in's continue) exists; see
+// CLAUDE.md's "過去に踏まれた地雷" #1.
 type gen struct {
 	b      *strings.Builder
 	tmpSeq int
@@ -90,22 +92,53 @@ func (g *gen) newTemp() string {
 	return fmt.Sprintf("amifl_tmp%d", g.tmpSeq)
 }
 
-// genBlock emits a block's statements, treating the last expression as
-// the enclosing function's return value (sema's checkBlock guarantees
-// this typechecks against the function's declared return type).
+// genBlock emits a function body's statements, treating the last
+// expression as the enclosing function's return value (sema's checkBlock
+// guarantees this typechecks against the function's declared return
+// type).
 func (g *gen) genBlock(exprs []ast.Expr) error {
 	if len(exprs) == 0 {
 		return fmt.Errorf("codegen: empty block (sema should have rejected this)")
 	}
-	for i, e := range exprs {
-		if i == len(exprs)-1 {
-			return g.genReturn(e)
-		}
+	if err := g.genStmtBlock(exprs[:len(exprs)-1]); err != nil {
+		return err
+	}
+	return g.genReturn(exprs[len(exprs)-1])
+}
+
+// genStmtBlock emits every expression in exprs purely for whatever side
+// effect it has, discarding any value each one produces — used for a
+// Unit-typed block body (an if/while branch used as a statement) and for
+// a function body's non-final statements (genBlock), which is exactly
+// the same thing: nothing downstream reads their value.
+func (g *gen) genStmtBlock(exprs []ast.Expr) error {
+	for _, e := range exprs {
 		if err := g.genStmt(e); err != nil {
 			return err
 		}
 	}
-	panic("unreachable")
+	return nil
+}
+
+// genValueBlock is genStmtBlock's counterpart for a value-producing
+// branch of an if-expression: exprs[:len-1] run purely for effect exactly
+// like genStmtBlock, and the final expression's value is computed and
+// written into dest (a temp genIfValue already declared) with SET, rather
+// than RET like a function body's genBlock — an if-branch's "return" is a
+// value flowing out of a control-flow block, not out of a function.
+func (g *gen) genValueBlock(exprs []ast.Expr, dest string) error {
+	if len(exprs) == 0 {
+		return fmt.Errorf("codegen: empty block used as a value (sema should have rejected this)")
+	}
+	if err := g.genStmtBlock(exprs[:len(exprs)-1]); err != nil {
+		return err
+	}
+	val, err := g.genValue(exprs[len(exprs)-1])
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(g.b, "\tSET\t%%%s\t%s\n", dest, val)
+	return nil
 }
 
 func (g *gen) genReturn(e ast.Expr) error {
@@ -117,6 +150,21 @@ func (g *gen) genReturn(e ast.Expr) error {
 	return nil
 }
 
+// genStmt emits whatever instructions are needed to run e purely for its
+// side effect, discarding any value it produces. This doubles as both
+// "emit a Unit-typed expression found in statement position" (the case
+// for every expression this function normally sees, since sema already
+// requires a block's non-final expressions — and, once desugared, an
+// if/while used as a statement — to be Unit-typed) and `_ = expr`'s own
+// codegen (ast.DiscardExpr recurses right back into genStmt): discarding
+// a value is exactly "run it for effect, ignore the result", the same
+// operation either way. That equivalence matters concretely once a
+// discarded expression can contain control flow — e.g. `_ = if c {
+// print("x"); 1 } else { 2 }` — where the discarded if's *own* type isn't
+// Unit (its branches resolve to Int64), but a side effect (print) buried
+// inside one of its branches still has to run; routing it through
+// genIfBranch (the same statement-form emitter normal Unit-typed ifs use)
+// via this function is what makes that happen.
 func (g *gen) genStmt(e ast.Expr) error {
 	switch v := e.(type) {
 	case *ast.CallExpr:
@@ -130,7 +178,25 @@ func (g *gen) genStmt(e ast.Expr) error {
 	case *ast.AssignExpr:
 		return g.genAssignStmt(v)
 	case *ast.DiscardExpr:
-		return g.genDiscardStmt(v)
+		return g.genStmt(v.Value)
+	case *ast.IfExpr:
+		return g.genIfBranch(v)
+	case *ast.WhileExpr:
+		return g.genWhileStmt(v)
+	case *ast.BreakExpr:
+		g.b.WriteString("\tBREAK\n")
+		return nil
+	case *ast.ContinueExpr:
+		g.b.WriteString("\tCONTINUE\n")
+		return nil
+	case *ast.IntLit, *ast.FloatLit, *ast.BoolLit, *ast.StringLit,
+		*ast.IdentExpr, *ast.BinaryExpr, *ast.UnaryExpr:
+		// Pure value expressions have no side effect to run at all. A
+		// block's own forced-Unit non-final position never produces one of
+		// these directly (none of these kinds ever resolves to Unit in
+		// sema), but a discarded non-Unit expression's tail can — e.g. the
+		// `2` ending the else-branch in the doc comment's example above.
+		return nil
 	default:
 		return fmt.Errorf("codegen: unsupported statement %T", e)
 	}
@@ -152,6 +218,10 @@ func (g *gen) genCallStmt(c *ast.CallExpr) error {
 	return nil
 }
 
+// genLetStmt emits a `let`'s VAR/SET under its InternalName (sema's
+// freshInternalName), never its bare surface Name — see
+// ast.LetExpr.InternalName for why a shadowing `let` needs a distinct Go
+// name even though AmiFL itself lets it reuse the outer name.
 func (g *gen) genLetStmt(v *ast.LetExpr) error {
 	goType, ok := goTypeNames[v.ResolvedType]
 	if !ok {
@@ -161,8 +231,8 @@ func (g *gen) genLetStmt(v *ast.LetExpr) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", v.Name, goType)
-	fmt.Fprintf(g.b, "\tSET\t%%%s\t%s\n", v.Name, val)
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", v.InternalName, goType)
+	fmt.Fprintf(g.b, "\tSET\t%%%s\t%s\n", v.InternalName, val)
 	return nil
 }
 
@@ -171,26 +241,122 @@ func (g *gen) genAssignStmt(v *ast.AssignExpr) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(g.b, "\tSET\t%%%s\t%s\n", v.Name, val)
+	fmt.Fprintf(g.b, "\tSET\t%%%s\t%s\n", v.InternalName, val)
 	return nil
 }
 
-// genDiscardStmt handles `_ = expr`. A discardable value — a literal, a
-// variable/const read, or (as of step 3) any operator expression built
-// from those — has no side effect, so there's nothing to emit for it at
-// all: not even the instructions that would compute it, since nothing
-// ever reads the result. amivm's own unused-variable self-healing
-// (CLAUDE.md's amivm reference: "未使用変数の救済方法") takes care of any
-// resulting unused Go variable for the *operand* declarations that do get
-// emitted elsewhere, so codegen doesn't need to synthesize a Go `_ = x`
-// either. A discarded *call*, however, still needs its side effect to
-// run — there's no such call yet since print is already Unit-typed, but
-// this keeps codegen forward-compatible with step 5's general
-// (non-Unit-returning) function calls.
-func (g *gen) genDiscardStmt(v *ast.DiscardExpr) error {
-	if c, ok := v.Value.(*ast.CallExpr); ok {
-		return g.genCallStmt(c)
+// genIfBranch emits one IfExpr as AMIVM control flow only — its branches
+// run purely for effect (genStmtBlock), and no value is captured from any
+// of them. This is what a Unit-typed if/elif/else (including a discarded
+// non-Unit one — see genStmt's doc comment) compiles to. `elif` was
+// already desugared into a nested Else IfExpr at parse time, so the
+// recursive case here is what actually emits the chain as nested
+// IF/ELSE/ENDIF rather than AMIVM's ELIF (CLAUDE.md's "過去に踏まれた地雷"
+// #2).
+func (g *gen) genIfBranch(v *ast.IfExpr) error {
+	condVal, err := g.genValue(v.Cond)
+	if err != nil {
+		return err
 	}
+	fmt.Fprintf(g.b, "\tIF\t%s\n", condVal)
+	if err := g.genStmtBlock(v.Then.Exprs); err != nil {
+		return err
+	}
+	if err := g.genElseStmt(v.Else); err != nil {
+		return err
+	}
+	g.b.WriteString("\tENDIF\n")
+	return nil
+}
+
+func (g *gen) genElseStmt(e ast.ElseBody) error {
+	switch v := e.(type) {
+	case nil:
+		return nil
+	case *ast.Block:
+		g.b.WriteString("\tELSE\n")
+		return g.genStmtBlock(v.Exprs)
+	case *ast.IfExpr:
+		g.b.WriteString("\tELSE\n")
+		return g.genIfBranch(v)
+	default:
+		return fmt.Errorf("codegen: unexpected else-body %T", e)
+	}
+}
+
+// genIfValue emits a value-producing IfExpr (sema guarantees it has an
+// else — see genIfValueBranch's default case): AMIVM's IF has no value of
+// its own (it's pure control flow, unlike Go's own if-as-expression-
+// adjacent ternary), so the result has to flow out through a
+// pre-declared temp that every branch SETs as its last step instead.
+func (g *gen) genIfValue(v *ast.IfExpr) (string, error) {
+	goType, ok := goTypeNames[v.ResolvedType]
+	if !ok {
+		return "", fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", v.ResolvedType)
+	}
+	dest := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", dest, goType)
+	if err := g.genIfValueBranch(v, dest); err != nil {
+		return "", err
+	}
+	return "%" + dest, nil
+}
+
+func (g *gen) genIfValueBranch(v *ast.IfExpr, dest string) error {
+	condVal, err := g.genValue(v.Cond)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(g.b, "\tIF\t%s\n", condVal)
+	if err := g.genValueBlock(v.Then.Exprs, dest); err != nil {
+		return err
+	}
+	switch e := v.Else.(type) {
+	case *ast.Block:
+		g.b.WriteString("\tELSE\n")
+		if err := g.genValueBlock(e.Exprs, dest); err != nil {
+			return err
+		}
+	case *ast.IfExpr:
+		g.b.WriteString("\tELSE\n")
+		if err := g.genIfValueBranch(e, dest); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("codegen: if used as a value must have an else (sema should have rejected this)")
+	}
+	g.b.WriteString("\tENDIF\n")
+	return nil
+}
+
+// genWhileStmt lowers `while cond { ... }` (amifl-spec.md section 7) into
+// AMIVM's documented while-loop pattern (`ignored/amivm/amivm_spec.md`
+// section 4.11: "条件付きループ(while相当)はLOOPの中でIFとBREAKを組み合わ
+// せて表現する") — AMIVM has no conditional-loop instruction of its own.
+// cond is (re)computed fresh at the top of every iteration since its
+// instructions are emitted inside the LOOP/ENDLOOP span, and Go's native
+// `continue` (AMIVM's CONTINUE) jumps back to exactly that recheck — while
+// never needs the goto-based continue-target workaround CLAUDE.md's "過去
+// に踏まれた地雷" #3 warns about, because that problem is specifically
+// about a loop with required work *after* the body (a for-loop's index
+// increment), and a while's only "required work" (the condition check) is
+// already at the top.
+func (g *gen) genWhileStmt(v *ast.WhileExpr) error {
+	g.b.WriteString("\tLOOP\n")
+	condVal, err := g.genValue(v.Cond)
+	if err != nil {
+		return err
+	}
+	notTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^bool\n", notTmp)
+	fmt.Fprintf(g.b, "\tNOT\t%%%s\t%s\n", notTmp, condVal)
+	fmt.Fprintf(g.b, "\tIF\t%%%s\n", notTmp)
+	g.b.WriteString("\tBREAK\n")
+	g.b.WriteString("\tENDIF\n")
+	if err := g.genStmtBlock(v.Body.Exprs); err != nil {
+		return err
+	}
+	g.b.WriteString("\tENDLOOP\n")
 	return nil
 }
 
@@ -213,11 +379,13 @@ func (g *gen) genValue(e ast.Expr) (string, error) {
 		if v.ConstValue != nil {
 			return g.genValue(v.ConstValue)
 		}
-		return "%" + v.Name, nil
+		return "%" + v.InternalName, nil
 	case *ast.BinaryExpr:
 		return g.genBinaryValue(v)
 	case *ast.UnaryExpr:
 		return g.genUnaryValue(v)
+	case *ast.IfExpr:
+		return g.genIfValue(v)
 	default:
 		return "", fmt.Errorf("codegen: %T is not a value expression (sema should have rejected this)", e)
 	}

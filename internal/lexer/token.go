@@ -15,6 +15,15 @@ const (
 	KwConst
 	KwTrue
 	KwFalse
+	KwIf
+	KwElif
+	KwElse
+	KwWhile
+	KwBreak
+	KwContinue
+	KwSwitch
+	KwCase
+	KwDefault
 	LParen
 	RParen
 	LBrace
@@ -72,6 +81,24 @@ func (k Kind) String() string {
 		return "'true'"
 	case KwFalse:
 		return "'false'"
+	case KwIf:
+		return "'if'"
+	case KwElif:
+		return "'elif'"
+	case KwElse:
+		return "'else'"
+	case KwWhile:
+		return "'while'"
+	case KwBreak:
+		return "'break'"
+	case KwContinue:
+		return "'continue'"
+	case KwSwitch:
+		return "'switch'"
+	case KwCase:
+		return "'case'"
+	case KwDefault:
+		return "'default'"
 	case LParen:
 		return "'('"
 	case RParen:

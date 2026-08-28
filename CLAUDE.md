@@ -195,10 +195,10 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 1 ✅ | ブートストラップ | lexer/parser/ast/codegen最小構成。`fn main() -> Int { print("Hello, AmiFL!") 0 }`をamivm→go build→実行まで通す | `FUNC` `RET` `ENDFUNC` `CALL` | `main`のブリッジ方式確定（下記「確定した設計判断」参照） |
 | 2 ✅ | スカラー型・`let`/`const`・式指向の基礎 | `Int`系/`UInt`系/`Float`系/`Bool`/`String`、`let`（トップレベル禁止）・`const`（インライン展開）、ブロック値・`Unit`強制の検査 | `VAR` `SET` | — |
 | 3 ✅ | 演算子 | 算術・比較・論理・ビット・シフト・`Concatenable`の`+`、優先順位表の実地検証 | `ADD` `SUB` `MUL` `DIV` `MOD` `BAND` `BOR` `BXOR` `BCLEAR` `BNOT` `SHL` `SHR` `AND` `OR` `NOT` `EQ` `NEQ` `LT` `LTE` `GT` `GTE` `CONCAT` | — |
-| 4 | 制御構文（式指向） | `if`/`elif`/`else`、`while`、`for`（`Unit`版のみ）。`switch`は`Bool`式のみ（`is Type`/`in [...]`/enumは後続） | `IF` `ELIF` `ELSE` `ENDIF` `LOOP` `BREAK` `CONTINUE` `ENDLOOP` | — |
+| 4 ✅ | 制御構文（式指向） | `if`/`elif`/`else`、`while`、`switch`は`Bool`式のみ（`is Type`/`in [...]`/enumは後続）。**`for`はStep 7へ延期**（ユーザーとの協議で確定——`items`に相当する型〈`List`/`Array`/`Set`/`Map`〉が1つも無い段階では書けないため） | `IF` `ELSE` `ENDIF` `LOOP` `BREAK` `CONTINUE` `ENDLOOP`（`ELIF`は不使用——下記「確定した設計判断」参照） | — |
 | 5 | 関数・クロージャ | トップレベル`fn`（自己再帰可）、ローカルクロージャー（多引数直接・カリー化なし）、`Func`型 | `FNTYPE` `CLOS` `ENDCLOS` | — |
 | 6 | `Tuple2〜8`・`struct` | タプルリテラル・`.0`等の糖衣、`struct`定義・フィールドアクセス | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` | 設計課題3（Tuple表現） |
-| 7 | `Array[T;N]`・`List[T]` | 固定長配列（多次元糖衣込み）、可変長リスト、`x[i]`/`x[i]=v`/`x[a:b]`糖衣 | `SLTYPE` `SLMAKE` `SLICE` `ASET` `AGET` | 設計課題2（Array表現） |
+| 7 | `Array[T;N]`・`List[T]`・`for` | 固定長配列（多次元糖衣込み）、可変長リスト、`x[i]`/`x[i]=v`/`x[a:b]`糖衣。**Step 4から延期した`for x in items { ... }`（`Unit`版のみ、`yield`はStep 9）もここで実装**——`items`に相当する型がこの時点で初めて存在するため | `SLTYPE` `SLMAKE` `SLICE` `ASET` `AGET` | 設計課題2（Array表現） |
 | 8 | `enum`・`switch`拡張 | バリアント定義・値生成、`switch`での判定/フィールド取り出し、バリアント網羅性検査 | （設計課題4の結論による） | **設計課題4（先例無し・最大の山場の1つ）** |
 | 9 | パイプ演算子`|>` | `_`プレースホルダー、`for...yield`糖衣、`|>`の優先順位（最低） | （新規命令無し。糖衣構文） | 設計課題7 |
 | 10 | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5 |
@@ -280,7 +280,7 @@ amivm自身が「生成したGoコードに未使用変数があれば`_ = 変�
 
 二項/単項演算子式は`ADD`/`SUB`/`LT`等の三番地コード命令へ展開する必要があり（`a + b * c`のようなネストは、演算子ごとに中間結果を一時変数へ書き出す一本の命令列に平坦化しなければならない）、`internal/codegen/codegen.go`の`gen`構造体に関数ごとの通し番号カウンタ（`tmpSeq`）を持たせ、`newTemp()`が`amifl_tmp1`, `amifl_tmp2`, ...を発行する。
 
-**既知の限界**: この命名はユーザーが`let amifl_tmp1 = ...`のような名前を偶然（または意図的に）使った場合に衝突しうる、素朴な「予約プレフィックス」方式でしかない。Cascadeの`freshName`（ユーザー宣言・内部一時変数を問わず全ての名前に、関数内で共有する1つの通し番号カウンタから連番を必ず付与し、衝突を構造的に起こらなくする方式）の方が堅牢だが、Step 3時点ではまだ`let`が常にユーザーの生の名前をそのまま使う設計（Step 2のまま）で、シャドーイングも無い（sema `funcChecker.declare`が同名の再宣言を拒否する）。**Step 4でネストしたブロックスコープとシャドーイングに対応する際、CLAUDE.md「過去に踏まれた地雷」#4の検討と合わせて、Cascade方式への切り替えをまとめて行う**のが最も合理的なタイミングだと判断し、Step 3ではこの限界を許容してスコープを絞った。
+**既知の限界**: この命名はユーザーが`let amifl_tmp1 = ...`のような名前を偶然（または意図的に）使った場合に衝突しうる、素朴な「予約プレフィックス」方式でしかない。Cascadeの`freshName`（ユーザー宣言・内部一時変数を問わず全ての名前に、関数内で共有する1つの通し番号カウンタから連番を必ず付与し、衝突を構造的に起こらなくする方式）の方が堅牢だが、Step 3時点ではまだ`let`が常にユーザーの生の名前をそのまま使う設計（Step 2のまま）で、シャドーイングも無い（sema `funcChecker.declare`が同名の再宣言を拒否する）。**Step 4でネストしたブロックスコープとシャドーイングに対応する際、CLAUDE.md「過去に踏まれた地雷」#4の検討と合わせて、Cascade方式への切り替えをまとめて行う**のが最も合理的なタイミングだと判断し、Step 3ではこの限界を許容してスコープを絞った——実際にStep 4で`let`側はCascade方式（`freshInternalName`）へ切り替えた（下記「ブロックに本物のレキシカルスコープを導入し...」参照）。この一時変数（`amifl_tmpN`）自体は`let`と衝突しない別の命名空間なので現状の予約プレフィックス方式のままで問題ない。
 
 ### `const`の演算子式は畳み込まず、参照箇所ごとに再生成する（Step 3で確定）
 
@@ -289,6 +289,32 @@ amivm自身が「生成したGoコードに未使用変数があれば`_ = 変�
 実装検討時、最初は「`const X = 1 + 2`を宣言時点でGoの算術を使って`3`という単一のリテラルへコンパイル時に畳み込む」という定数畳み込み（constant folding）方式を検討したが、これは型ごとのラップアラウンド演算（符号・幅ごとに異なるオーバーフロー規則）をsema内に再実装する必要があり、**Goの生成コード自身が実行時に同じ計算を正しく行える**（`go build`が最終的な型検査・算術を担ってくれる）ことを考えると二重実装になる。そこで採った方式は、**`const`の初期化式を（型検査済みの状態で）そのまま`ConstValue`として保持し、参照箇所ごとに`codegen`の`genValue`が同じ式を再生成する**というもの——`const C = A + B`への参照は、`%C`のような専用変数を読むのではなく、参照するたびに`ADD %tmp A B`（またはリテラルなら畳み込み済みトークン）を再度出力する。これは「`const`は実行時ストレージを持たない」というamifl-spec.mdの要求を満たしつつ（`%C`という変数は最後まで一度も生成されない）、型ごとの正しい算術意味論をAmiFL側で二重に持たずに済む、という一石二鳥の選択。
 
 このため`internal/sema/expr.go`の`resolveConstDecl`は「初期化式を1個のリテラルへ畳み込む」処理をやめ、代わりに**`requireConstExpr`という検証専用の関数**に置き換えた——初期化式の木を辿り、リテラル・`const`参照・演算子式（の枝の中に現れる限り）だけを許可し、`let`やパラメータのような実行時にしか値が決まらない識別子への参照が混ざっていたら拒否する（型チェック自体は既存の`checkExpr`が担い、`requireConstExpr`は純粋にamifl-spec.md 4節の「コンパイル時にのみ存在する値」という制約の番人）。**トレードオフ**: `const`を複数回参照すると、その都度同じ計算が（無駄に）再実行される——ただし現時点で副作用を持つ関数呼び出しをconst初期化式に書く手段が無い（Unit型の`print`しか呼べず、それも束縛禁止）ため、実害は無い。将来const初期化式が純粋関数呼び出しを許すようになった場合はこの前提を再確認すること。
+
+### `for`はStep 4から見送り、Step 7（`List`/`Array`導入時）へ延期（Step 4でユーザーと協議のうえ確定）
+
+CLAUDE.mdの実装ステップ計画は当初Step 4に`for`（`Unit`版のみ）を含めていたが、着手時点で`for x in items { ... }`の`items`に相当する型が言語仕様上まだ1つも存在しない（`List`/`Array`はStep 7、`Set`/`Map`はStep 10、`Range`は仕様上「内部的に`Stream[Int]`の特殊形」でStream自体はStep 12）ことに気づいた。数値範囲限定の`for`だけ先行実装する案（`a..b`をRange型を作らずLOOPへ直接展開する構文糖衣）も検討したが、ユーザーに選択肢を提示した結果「Step4はforを見送り、実際にitemsとなる型が揃うStep 7で実装する」を選択——`for`は上記実装ステップ計画の表でStep 7へ移動した。
+
+### `switch`はBool専用ケースのifへの構文糖衣として実装し、専用ASTノードを持たない（Step 4で確定）
+
+`amifl-spec.md` 10節の`switch`は本来「`is Type`・`in [...]`・任意の`Bool`式をcase節に書けるパターンマッチ」だが、Step 4時点では`is Type`（`Any`型が無い）も`in [...]`（コレクション型が無い）も使えず、**Bool式のみのcase**しか書けない。ここで気づいた重要な点：**サブジェクト無し・Bool式のみのswitchは、構文が違うだけで意味的には`if`/`elif`/`else`と完全に同一**（`switch { case c1: e1  case c2: e2  default: e3 }` ≡ `if c1 { e1 } elif c2 { e2 } else { e3 }`）。これは原則3「1つの仕組みで足りるものを2つ用意しない」の直接の適用対象と判断し、`internal/parser`の`parseSwitchExpr`が**パース時点で`*ast.IfExpr`のチェーンへ丸ごと構文糖衣として展開する**——`ast.SwitchExpr`のような専用ノードは作らず、sema・codegenのどちらにも`switch`固有のコードは1行も無い（`default`必須ルールすら、`if`の「`else`が無ければ`Unit`型限定」ルールがそのまま横流用できるため専用チェックが不要）。
+
+**この判断のトレードオフ**: `switch`由来の型エラーが（現状では）「if/elif/else」的な文言で出る（例：「branch 2 has type ...」）。`case`固有の文言が欲しくなった場合はエラーメッセージ側だけ調整すればよく、根本設計への影響は無い。また、`is Type`/`in [...]`/`enum`パターンが入るStep 8では、サブジェクト式・パターンごとの束縛（`Status.Retry(delay)`の`delay`等）を表現する必要が出てくるため、**その時点で初めて本物の`SwitchExpr`ノードを新設する**——「将来の要求を先読みして今から一般化した構造を作らない」というCLAUDE.mdの開発方針どおり、Step 4では最小の実装に留めた。
+
+### `elif`/`else`は直前の`}`と同じ行に書く（改行を挟むと構文エラー、Step 4で確定）
+
+`amifl-spec.md`は`if`/`elif`/`else`の区切り方法を明記していない（5節の例は`if score >= 90 { "A" } elif score >= 70 { "B" } else { "C" }`と1行にまとめて書かれているのみ）。Step 1で確定した「ブロック内の改行は区切りとして意味を持つ」設計と、`elif`/`else`が「ブロックの外側・トップレベルの並び」のどちらとも言えない中間的な位置にある（`if`式全体としては1つの式だが、内部に複数の`{ }`ブロックを持つ）ことから、**`elif`/`else`は直前の`}`の直後（改行を挟まない同一行）にしか書けない**という規則を採用した——`internal/parser`の`parseOptionalElse`は`parseBlock`が`}`を消費した直後の`p.cur`をそのまま見て`KwElif`/`KwElse`かどうか判定するだけで、`skipNewlines`を一切呼ばない。改行を挟んで`elif`を書くと、その`elif`はブロックの外側（次の文の位置）で待ち構えている文法要素として扱われ、`parseExpr`（文位置）の分岐に無い`KwElif`として「unexpected 'elif'」エラーになる。Go自身が`else`に対して同じ「直前の`}`と同じ行」制約を持つ（ASIの都合）ことに倣った判断だが、AmiFLにはASIが無いため理由は異なる——単に仕様の曖昧さをどちらかに倒す必要があり、複数行に渡る書き方を許すとブロック外の改行の扱いに新しい特殊ケースが増えるため、より単純な「同じ行必須」を選んだ。
+
+### ブロックに本物のレキシカルスコープを導入し、`let`のシャドーイングを許可した——ただし当初案の「codegenはリネーム不要」は実地検証で誤りと判明し、Cascade方式のユニーク名採番に切り替えた（Step 4で確定・最重要の発見）
+
+Step 2の時点で「スコープはStep 4で入れ子ブロックが必要になった時点で再検討する」と申し送っていた課題。`internal/sema/scope.go`に`scope`（`parent`ポインタを持つチェーン）を導入し、`funcChecker.pushScope`/`popScope`を`if`/`elif`/`else`各ブランチ・`while`本体ごとに呼ぶことで、Weave方式（sema側だけが親子スコープを持つ）を採用した。
+
+**当初の設計判断（誤り）**: 「AMIVMの`IF`/`LOOP`は本物のネストしたGoブロックを生成する（`ignored/amivm/amivm_spec.md`で確認済み）ため、codegen側は一切リネームせず素朴に`%変数名`をそのまま使い続けても、Goのブロックスコープが自然にシャドーイングを実現してくれるはず」と考え、一度その設計で実装した。
+
+**実地検証で発覚したバグ**: `let x = 1; if true { let x = 2; print("ok") } \n x` という、内側の`x`が未使用（かつ外側の`x`は使用済み）というプログラムを実際に`amivm`→`go build`まで通したところ、`amivm`が`Error: unused variable resolution reached the retry limit (5 attempts)`で失敗した。原因を`ignored/amivm/cmd/amivm/compile.go`の`findAndInsertBlank`/`appendBlankAssignsTargeted`を読んで特定：amivmの未使用変数自己修復機構は、「未使用と報告された変数名」を手がかりに、その名前を宣言している`VAR`文をASTの中から**名前一致だけで**探し、最初に見つかった宣言の直後に`_ = 変数名`を挿入する——**関数内で同じ名前を持つ`VAR`宣言は1つしか無い、という前提**に立っている。AmiFLが同じ`%x`という名前を（内側の`if`ブロックでのシャドーイングにより）2箇所で宣言すると、amivmは常に**最初に見つかった方**（このケースでは外側の、既に使用済みの`x`）を「未使用」の宣言だと誤認して`_ = x`を挿入し続け、本当に未使用な内側の`x`は永遠に修復されないまま同じエラーが再発し、リトライ上限に達して失敗する。
+
+CLAUDE.md「過去に踏まれた地雷」#4はまさにこの「シャドーイングを許すならcodegen側で一意な内部名を採番する必要がある（Seed/Cascade方式）」という選択肢を事前に警告していたが、「AMIVMの`IF`/`LOOP`が本物のGoブロックだから大丈夫だろう」という判断で一度それを退けてしまっていた——**Goの構文としては正しくても、amivm自身の未使用変数自己修復機構という「もう1つの前提」（関数内で変数名は一意）を見落としていた**というのが実地検証で初めて判明した教訓。「動かして初めて見つかるバグ」の典型例として`amifl_implementation_notes.md`にも記録する。
+
+**最終的な設計**: Cascadeの`freshName`と同じ発想で、`internal/sema/scope.go`の`funcChecker.freshInternalName(name)`が関数全体で共有する1つの通し番号カウンタから`name_N`という内部名を発行し、`let`宣言のたびに（シャドーイングの有無に関わらず無条件で）採番する。`ast.LetExpr`/`ast.AssignExpr`/`ast.IdentExpr`に`InternalName`フィールドを追加し、sema側（`resolveLetExpr`/`resolveAssignExpr`/`resolveIdentExpr`）が該当する束縛の`InternalName`を書き込み、`internal/codegen`はそれをそのまま`%`に続けて出力するだけ（`Name`ではなく`InternalName`を使う）——「semaが計算した情報をASTにアノテーションし、codegenは読むだけ」という既存パターンを踏襲した（`const`の`ConstValue`と全く同じ設計）。これにより関数内で同じ`%`変数名が2度と現れなくなり、amivmの未使用変数自己修復の前提と衝突しなくなった。
 
 ## 開発の進め方
 

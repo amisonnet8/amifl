@@ -7,11 +7,20 @@ import (
 )
 
 var keywords = map[string]Kind{
-	"fn":    KwFn,
-	"let":   KwLet,
-	"const": KwConst,
-	"true":  KwTrue,
-	"false": KwFalse,
+	"fn":       KwFn,
+	"let":      KwLet,
+	"const":    KwConst,
+	"true":     KwTrue,
+	"false":    KwFalse,
+	"if":       KwIf,
+	"elif":     KwElif,
+	"else":     KwElse,
+	"while":    KwWhile,
+	"break":    KwBreak,
+	"continue": KwContinue,
+	"switch":   KwSwitch,
+	"case":     KwCase,
+	"default":  KwDefault,
 }
 
 // Lexer tokenizes AmiFL source text one Token at a time via Next.

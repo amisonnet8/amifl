@@ -50,6 +50,14 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 		return fc.resolveBinaryExpr(v, expected)
 	case *ast.UnaryExpr:
 		return fc.resolveUnaryExpr(v, expected)
+	case *ast.IfExpr:
+		return fc.resolveIfExpr(v, expected)
+	case *ast.WhileExpr:
+		return fc.resolveWhileExpr(v)
+	case *ast.BreakExpr:
+		return fc.resolveBreakExpr(v)
+	case *ast.ContinueExpr:
+		return fc.resolveContinueExpr(v)
 	default:
 		return "", fmt.Errorf("sema: unsupported expression %T", e)
 	}
@@ -95,6 +103,8 @@ func (fc *funcChecker) resolveIdentExpr(v *ast.IdentExpr) (string, error) {
 	v.ResolvedType = b.typ
 	if b.isConst {
 		v.ConstValue = b.value
+	} else {
+		v.InternalName = b.internalName
 	}
 	return b.typ, nil
 }
@@ -128,10 +138,12 @@ func (fc *funcChecker) resolveLetExpr(v *ast.LetExpr) (string, error) {
 	if typ == unitType {
 		return "", fmt.Errorf("line %d: cannot bind %q to a Unit-typed value", v.Line, v.Name)
 	}
-	if err := fc.declare(v.Name, &binding{typ: typ}); err != nil {
+	internalName := fc.freshInternalName(v.Name)
+	if err := fc.declare(v.Name, &binding{typ: typ, internalName: internalName}); err != nil {
 		return "", fmt.Errorf("line %d: %s", v.Line, err)
 	}
 	v.ResolvedType = typ
+	v.InternalName = internalName
 	return unitType, nil
 }
 
@@ -158,6 +170,7 @@ func (fc *funcChecker) resolveAssignExpr(v *ast.AssignExpr) (string, error) {
 	if _, err := fc.checkExpr(v.Value, b.typ); err != nil {
 		return "", err
 	}
+	v.InternalName = b.internalName
 	return unitType, nil
 }
 
@@ -406,6 +419,158 @@ func (fc *funcChecker) resolveNegatedIntLit(lit *ast.IntLit, expected string, v 
 	default:
 		return "", fmt.Errorf("line %d: %s is not a numeric type; cannot use a negated integer literal here", lit.Line, target)
 	}
+}
+
+// collectIfBranches walks v's elif chain (desugared at parse time into
+// nested IfExpr.Else values — CLAUDE.md's "過去に踏まれた地雷" #2, "ELIFは
+// ELSEの中に次のIFをネストする"), type-checking every condition along the
+// way in the scope active where the whole if-expression appears (none of
+// a branch's own bindings are visible to a sibling condition) and
+// collecting each branch's body block. hasElse reports whether the chain
+// ends in an explicit `else` (a *ast.Block) rather than running out
+// (nil) — see resolveIfExpr for why that distinction controls the whole
+// if-expression's type.
+func (fc *funcChecker) collectIfBranches(v *ast.IfExpr) ([]*ast.Block, bool, error) {
+	var branches []*ast.Block
+	cur := v
+	for {
+		if _, err := fc.checkExpr(cur.Cond, "Bool"); err != nil {
+			return nil, false, err
+		}
+		branches = append(branches, cur.Then)
+		switch e := cur.Else.(type) {
+		case nil:
+			return branches, false, nil
+		case *ast.Block:
+			branches = append(branches, e)
+			return branches, true, nil
+		case *ast.IfExpr:
+			cur = e
+		default:
+			return nil, false, fmt.Errorf("sema: unexpected if-else kind %T", e)
+		}
+	}
+}
+
+// resolveBranches type-checks a set of value-producing block branches (an
+// if/elif/else chain's bodies) so they all resolve to the same type,
+// returning it. A branch whose last expression is an untyped literal
+// adapts to whichever sibling branch has a concrete type first — the same
+// order-independence fix as resolveOperandTypes (step 3's design
+// decision for binary operators), generalized from 2 operands to N
+// branches, for exactly the same reason: resolving strictly in written
+// order would make `if c { 1 } else { x }` behave differently from
+// `if c { x } else { 1 }` even though they should be symmetric.
+func (fc *funcChecker) resolveBranches(branches []*ast.Block, expected string) (string, error) {
+	checkBranch := func(b *ast.Block, want string) (string, error) {
+		fc.pushScope()
+		defer fc.popScope()
+		return fc.checkBlock(b, want)
+	}
+
+	anchor := 0
+	for i, b := range branches {
+		if !blockEndsInAdaptableLiteral(b) {
+			anchor = i
+			break
+		}
+	}
+
+	target, err := checkBranch(branches[anchor], expected)
+	if err != nil {
+		return "", err
+	}
+	for i, b := range branches {
+		if i == anchor {
+			continue
+		}
+		if _, err := checkBranch(b, target); err != nil {
+			return "", err
+		}
+	}
+	return target, nil
+}
+
+func blockEndsInAdaptableLiteral(b *ast.Block) bool {
+	if len(b.Exprs) == 0 {
+		return false
+	}
+	return isAdaptableLiteral(b.Exprs[len(b.Exprs)-1])
+}
+
+// resolveIfExpr type-checks `if`/`elif`/`else` (amifl-spec.md section 7).
+// Without an else, the whole expression is Unit-typed and every branch
+// must be too (a value with nowhere to flow when the condition is
+// false); with one, every branch (then, each elif, and else) must agree
+// on a single type, which becomes the if-expression's own type. A
+// `switch`'s Bool-only case list (step 4's scope) desugars into an IfExpr
+// at parse time, so this same function — and this same "default required
+// to produce a value" rule, since a missing default is exactly a missing
+// else — handles it too without switch needing any sema code of its own.
+func (fc *funcChecker) resolveIfExpr(v *ast.IfExpr, expected string) (string, error) {
+	branches, hasElse, err := fc.collectIfBranches(v)
+	if err != nil {
+		return "", err
+	}
+	branchExpected := expected
+	if !hasElse {
+		branchExpected = unitType
+	}
+	typ, err := fc.resolveBranches(branches, branchExpected)
+	if err != nil {
+		return "", err
+	}
+	v.ResolvedType = typ
+	return typ, nil
+}
+
+// resolveWhileExpr type-checks `while cond { ... }` (amifl-spec.md section
+// 7): always Unit-typed, so its body is checked the same way a function
+// body's non-final statements are — every expression in it must itself be
+// Unit-typed.
+func (fc *funcChecker) resolveWhileExpr(v *ast.WhileExpr) (string, error) {
+	if _, err := fc.checkExpr(v.Cond, "Bool"); err != nil {
+		return "", err
+	}
+	fc.loopDepth++
+	fc.pushScope()
+	_, err := fc.checkBlock(v.Body, unitType)
+	fc.popScope()
+	fc.loopDepth--
+	if err != nil {
+		return "", err
+	}
+	return unitType, nil
+}
+
+// resolveBreakExpr and resolveContinueExpr just enforce amifl-spec.md
+// section 7's "break/continueは最も内側のループのみに作用" by rejecting
+// one found with no enclosing `while` at all — loopDepth is a simple
+// counter rather than a stack because AmiFL has no labeled break/continue
+// (ignored/amivm/amivm_spec.md section 4.11 confirms AMIVM's BREAK/
+// CONTINUE are unlabeled too), so which specific loop is "innermost"
+// never needs to be named, only whether one exists.
+//
+// Both are Unit-typed rather than the Never type amifl-spec.md gives
+// `return` (section 5) — a deliberate, narrower scope for step 4: Never's
+// "unifies with any type" behavior isn't implemented anywhere yet (no
+// `return` exists until step 5), and break/continue's only real use case
+// here is as a bare Unit-typed statement inside a loop body, which this
+// already covers. Using break/continue as a value-producing if/switch
+// branch (`if done { break } else { 5 }`) is consequently rejected for
+// now — revisit once `return`/Never's design is settled for real.
+func (fc *funcChecker) resolveBreakExpr(v *ast.BreakExpr) (string, error) {
+	if fc.loopDepth == 0 {
+		return "", fmt.Errorf("line %d: break outside of a loop", v.Line)
+	}
+	return unitType, nil
+}
+
+func (fc *funcChecker) resolveContinueExpr(v *ast.ContinueExpr) (string, error) {
+	if fc.loopDepth == 0 {
+		return "", fmt.Errorf("line %d: continue outside of a loop", v.Line)
+	}
+	return unitType, nil
 }
 
 // resolveConstDecl type-checks a const declaration's initializer and

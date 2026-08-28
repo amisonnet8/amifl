@@ -6,13 +6,14 @@ import (
 	"github.com/amisonnet8/amifl/internal/ast"
 )
 
-// Check performs step 2's semantic validation: scalar type checking,
-// let/const scope resolution (with const inlining), and the
+// Check performs semantic validation: scalar type checking, let/const
+// scope resolution (with const inlining), operators (step 3), if/elif/
+// else/while/switch and their lexical scoping (step 4), and the
 // expression-oriented "every non-final expression in a block must be
 // Unit-typed" rule (amifl-spec.md principle 1). AmiFL's full type system
 // (structs, enums, collections, capability resolution, general function
 // calls, ...) grows across later steps — see CLAUDE.md's implementation
-// step plan. Step 2 still only supports a single `fn main`; declaring and
+// step plan. Only a single `fn main` is supported so far; declaring and
 // calling other functions arrives in step 5.
 func Check(f *ast.File) error {
 	c := &checker{globals: map[string]*binding{}}
@@ -94,8 +95,9 @@ func (c *checker) checkFunc(fn *ast.FuncDecl) error {
 // expression-oriented rule that every non-final expression must be
 // Unit-typed (amifl-spec.md principle 1), and returns the block's own
 // type: the last expression's type, checked against expected ("" for no
-// context). Written to be reusable once nested blocks (if/while bodies)
-// arrive in step 4.
+// context). Reused as-is for nested blocks (if/elif/else/while bodies,
+// step 4) — callers wrap it with fc.pushScope/popScope so a nested
+// block's own declarations don't leak out.
 func (fc *funcChecker) checkBlock(b *ast.Block, expected string) (string, error) {
 	if len(b.Exprs) == 0 {
 		if expected != "" && expected != unitType {

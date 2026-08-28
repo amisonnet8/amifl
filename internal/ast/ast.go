@@ -73,6 +73,17 @@ type LetExpr struct {
 	Line  int
 
 	ResolvedType string // filled in by sema
+	// InternalName is the Go variable name codegen emits for this
+	// binding — Name suffixed with a function-wide unique counter (sema's
+	// funcChecker.freshInternalName), never Name verbatim. See
+	// CLAUDE.md's "確定した設計判断" for step 4: two `let`s named the same
+	// (an outer one and a shadowing inner one, now that if/while bodies
+	// get their own nested scope) would otherwise emit two Go variable
+	// declarations with the *identical* generated name — legal Go
+	// (genuine block shadowing), but it broke amivm's unused-variable
+	// self-healing, which locates "the" declaration of a name assuming
+	// there's only ever one per function.
+	InternalName string
 }
 
 // AssignExpr reassigns an existing `let`-bound local (amifl-spec.md
@@ -84,6 +95,8 @@ type AssignExpr struct {
 	Name  string
 	Value Expr
 	Line  int
+
+	InternalName string // filled in by sema; see LetExpr.InternalName
 }
 
 // DiscardExpr explicitly discards a non-Unit-typed expression's value
@@ -104,6 +117,9 @@ type IdentExpr struct {
 	// literal to inline in its place — AmiFL constants have no runtime
 	// storage (amifl-spec.md section 4, "参照箇所へインライン展開される").
 	ConstValue Expr
+	// InternalName is set instead of ConstValue when Name resolves to a
+	// `let` — see LetExpr.InternalName.
+	InternalName string
 }
 
 // CallExpr is a function call `callee(args...)`.
@@ -170,31 +186,86 @@ type UnaryExpr struct {
 	ResolvedType string // filled in by sema
 }
 
+// ElseBody is an IfExpr's second-and-later branch: nil (no else, which
+// forces the whole if-expression to be Unit-typed — amifl-spec.md section
+// 7, "else省略時はUnit型限定"), an *IfExpr (continuing an elif chain), or
+// a *Block (the final else's body).
+type ElseBody interface {
+	elseBodyNode()
+}
+
+func (*IfExpr) elseBodyNode() {}
+func (*Block) elseBodyNode()  {}
+
+// IfExpr is `if cond { ... } [elif cond { ... }]* [else { ... }]?`
+// (amifl-spec.md section 7) — a full expression, not a statement. `elif`
+// desugars at parse time into a nested else-branch IfExpr rather than
+// getting its own field or AMIVM instruction (CLAUDE.md's "過去に踏まれた
+// 地雷" #2: codegen emits ELSE + a nested IF, never AMIVM's ELIF, since
+// ELIF's condition operand can't itself span multiple instructions).
+// `switch`'s Bool-only case form (step 4's scope; `is Type`/`in [...]`/
+// enum patterns are later steps) desugars into this same node at parse
+// time too — with no subject and only plain Bool conditions, a switch
+// case list *is* an elif chain (amifl-spec.md principle 3: "1つの仕組みで
+// 足りるものを2つ用意しない").
+type IfExpr struct {
+	Cond Expr
+	Then *Block
+	Else ElseBody // nil | *IfExpr | *Block
+	Line int
+
+	ResolvedType string // filled in by sema; "Unit" when Else doesn't end in a *Block
+}
+
+// WhileExpr is `while cond { ... }` (amifl-spec.md section 7): always
+// Unit-typed. break/continue inside Body act on this loop only, never
+// crossing a closure boundary (enforced by sema, not representable in the
+// AST).
+type WhileExpr struct {
+	Cond Expr
+	Body *Block
+	Line int
+}
+
+// BreakExpr and ContinueExpr are `break`/`continue` (amifl-spec.md section
+// 7): always Unit-typed, only legal inside a WhileExpr's Body (sema
+// rejects one found outside any loop).
+type BreakExpr struct{ Line int }
+type ContinueExpr struct{ Line int }
+
 func (*FuncDecl) topLevelDeclNode()  {}
 func (*ConstDecl) topLevelDeclNode() {}
 
-func (*ConstDecl) exprNode()   {}
-func (*LetExpr) exprNode()     {}
-func (*AssignExpr) exprNode()  {}
-func (*DiscardExpr) exprNode() {}
-func (*IdentExpr) exprNode()   {}
-func (*CallExpr) exprNode()    {}
-func (*StringLit) exprNode()   {}
-func (*IntLit) exprNode()      {}
-func (*FloatLit) exprNode()    {}
-func (*BoolLit) exprNode()     {}
-func (*BinaryExpr) exprNode()  {}
-func (*UnaryExpr) exprNode()   {}
+func (*ConstDecl) exprNode()    {}
+func (*LetExpr) exprNode()      {}
+func (*AssignExpr) exprNode()   {}
+func (*DiscardExpr) exprNode()  {}
+func (*IdentExpr) exprNode()    {}
+func (*CallExpr) exprNode()     {}
+func (*StringLit) exprNode()    {}
+func (*IntLit) exprNode()       {}
+func (*FloatLit) exprNode()     {}
+func (*BoolLit) exprNode()      {}
+func (*BinaryExpr) exprNode()   {}
+func (*UnaryExpr) exprNode()    {}
+func (*IfExpr) exprNode()       {}
+func (*WhileExpr) exprNode()    {}
+func (*BreakExpr) exprNode()    {}
+func (*ContinueExpr) exprNode() {}
 
-func (n *ConstDecl) Pos() int   { return n.Line }
-func (n *LetExpr) Pos() int     { return n.Line }
-func (n *AssignExpr) Pos() int  { return n.Line }
-func (n *DiscardExpr) Pos() int { return n.Line }
-func (n *IdentExpr) Pos() int   { return n.Line }
-func (n *CallExpr) Pos() int    { return n.Line }
-func (n *StringLit) Pos() int   { return n.Line }
-func (n *IntLit) Pos() int      { return n.Line }
-func (n *FloatLit) Pos() int    { return n.Line }
-func (n *BoolLit) Pos() int     { return n.Line }
-func (n *BinaryExpr) Pos() int  { return n.Line }
-func (n *UnaryExpr) Pos() int   { return n.Line }
+func (n *ConstDecl) Pos() int    { return n.Line }
+func (n *LetExpr) Pos() int      { return n.Line }
+func (n *AssignExpr) Pos() int   { return n.Line }
+func (n *DiscardExpr) Pos() int  { return n.Line }
+func (n *IdentExpr) Pos() int    { return n.Line }
+func (n *CallExpr) Pos() int     { return n.Line }
+func (n *StringLit) Pos() int    { return n.Line }
+func (n *IntLit) Pos() int       { return n.Line }
+func (n *FloatLit) Pos() int     { return n.Line }
+func (n *BoolLit) Pos() int      { return n.Line }
+func (n *BinaryExpr) Pos() int   { return n.Line }
+func (n *UnaryExpr) Pos() int    { return n.Line }
+func (n *IfExpr) Pos() int       { return n.Line }
+func (n *WhileExpr) Pos() int    { return n.Line }
+func (n *BreakExpr) Pos() int    { return n.Line }
+func (n *ContinueExpr) Pos() int { return n.Line }

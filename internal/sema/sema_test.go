@@ -541,3 +541,282 @@ func TestCheck_LetBoundToUnitIsAnError(t *testing.T) {
 		t.Fatal("expected an error for binding a let to a Unit-typed value")
 	}
 }
+
+func boolIdent(name string) *ast.IdentExpr { return &ast.IdentExpr{Name: name} }
+
+func TestCheck_IfWithElseUnifiesBranchTypes(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "cond", Type: "Bool", Value: &ast.BoolLit{Value: true}},
+		&ast.LetExpr{Name: "x", Value: &ast.IfExpr{
+			Cond: boolIdent("cond"),
+			Then: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
+			Else: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 2}}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	let := f.Decls[0].(*ast.FuncDecl).Body.Exprs[1].(*ast.LetExpr)
+	if let.ResolvedType != "Int64" {
+		t.Fatalf("got ResolvedType %q, want Int64", let.ResolvedType)
+	}
+}
+
+func TestCheck_IfBranchLiteralAdaptsToSiblingsConcreteType(t *testing.T) {
+	// Mirrors step 3's binary-operand fix: a literal branch must adapt to
+	// a sibling's concrete type regardless of which branch is written
+	// first.
+	for _, thenIsLiteral := range []bool{true, false} {
+		var then, elseBlk *ast.Block
+		lit := &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}}
+		concrete := &ast.Block{Exprs: []ast.Expr{&ast.IdentExpr{Name: "x"}}}
+		if thenIsLiteral {
+			then, elseBlk = lit, concrete
+		} else {
+			then, elseBlk = concrete, lit
+		}
+		f := mainFile(
+			&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.IntLit{Value: 5}},
+			&ast.LetExpr{Name: "cond", Type: "Bool", Value: &ast.BoolLit{Value: true}},
+			&ast.LetExpr{Name: "y", Value: &ast.IfExpr{Cond: boolIdent("cond"), Then: then, Else: elseBlk}},
+			&ast.IntLit{Value: 0},
+		)
+		if err := Check(f); err != nil {
+			t.Fatalf("Check() error (thenIsLiteral=%v): %v", thenIsLiteral, err)
+		}
+	}
+}
+
+func TestCheck_IfWithoutElseMustBeUnit(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "cond", Type: "Bool", Value: &ast.BoolLit{Value: true}},
+		&ast.LetExpr{Name: "x", Value: &ast.IfExpr{
+			Cond: boolIdent("cond"),
+			Then: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for binding an else-less if (Unit-typed) to a let")
+	}
+}
+
+func TestCheck_IfWithoutElseUsedAsAStatementIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "cond", Type: "Bool", Value: &ast.BoolLit{Value: true}},
+		&ast.IfExpr{
+			Cond: boolIdent("cond"),
+			Then: &ast.Block{Exprs: []ast.Expr{printStr("a")}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_IfBranchTypeMismatchIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "cond", Type: "Bool", Value: &ast.BoolLit{Value: true}},
+		&ast.LetExpr{Name: "x", Value: &ast.IfExpr{
+			Cond: boolIdent("cond"),
+			Then: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
+			Else: &ast.Block{Exprs: []ast.Expr{&ast.StringLit{Value: "a"}}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for if/else branches of different types")
+	}
+}
+
+func TestCheck_ElifChainIsCheckedThroughTheDesugaredElse(t *testing.T) {
+	// if a {1} elif b {2} else {3} — an IfExpr nested in Else, exactly as
+	// the parser desugars elif (CLAUDE.md's "過去に踏まれた地雷" #2).
+	f := mainFile(
+		&ast.LetExpr{Name: "a", Type: "Bool", Value: &ast.BoolLit{Value: true}},
+		&ast.LetExpr{Name: "b", Type: "Bool", Value: &ast.BoolLit{Value: false}},
+		&ast.LetExpr{Name: "x", Value: &ast.IfExpr{
+			Cond: boolIdent("a"),
+			Then: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
+			Else: &ast.IfExpr{
+				Cond: boolIdent("b"),
+				Then: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 2}}},
+				Else: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 3}}},
+			},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_IfConditionMustBeBool(t *testing.T) {
+	f := mainFile(
+		&ast.IfExpr{
+			Cond: &ast.IntLit{Value: 1},
+			Then: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a non-Bool if condition")
+	}
+}
+
+func TestCheck_NestedLetShadowsOuterLet(t *testing.T) {
+	// The inner `x` is String-typed; printing it only type-checks (print
+	// requires a String argument) if the reference resolves to the inner
+	// shadow, not the outer Int `x`.
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: "Int", Value: &ast.IntLit{Value: 1}},
+		&ast.IfExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Then: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "x", Type: "String", Value: &ast.StringLit{Value: "inner"}},
+				&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.IdentExpr{Name: "x"}}},
+			}},
+		},
+		&ast.IdentExpr{Name: "x"},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_InnerScopeDeclarationDoesNotLeakOut(t *testing.T) {
+	f := mainFile(
+		&ast.IfExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Then: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "y", Value: &ast.IntLit{Value: 1}},
+			}},
+		},
+		&ast.IdentExpr{Name: "y"},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for referencing a name only declared inside an if-branch")
+	}
+}
+
+func TestCheck_WhileConditionMustBeBool(t *testing.T) {
+	f := mainFile(
+		&ast.WhileExpr{Cond: &ast.IntLit{Value: 1}, Body: &ast.Block{}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a non-Bool while condition")
+	}
+}
+
+func TestCheck_WhileBodyMustBeUnit(t *testing.T) {
+	f := mainFile(
+		&ast.WhileExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a while body whose last expression isn't Unit")
+	}
+}
+
+func TestCheck_WhileIsAlwaysUnit(t *testing.T) {
+	f := mainFile(
+		&ast.WhileExpr{Cond: &ast.BoolLit{Value: false}, Body: &ast.Block{}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_BreakInsideWhileIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.WhileExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Body: &ast.Block{Exprs: []ast.Expr{&ast.BreakExpr{}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ContinueInsideWhileIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.WhileExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Body: &ast.Block{Exprs: []ast.Expr{&ast.ContinueExpr{}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_BreakOutsideLoopIsAnError(t *testing.T) {
+	f := mainFile(&ast.BreakExpr{}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for break outside of a loop")
+	}
+}
+
+func TestCheck_ContinueOutsideLoopIsAnError(t *testing.T) {
+	f := mainFile(&ast.ContinueExpr{}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for continue outside of a loop")
+	}
+}
+
+func TestCheck_BreakInsideIfInsideWhileIsValid(t *testing.T) {
+	// break/continue only need *some* enclosing loop, not necessarily the
+	// immediately enclosing block.
+	f := mainFile(
+		&ast.WhileExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.IfExpr{
+					Cond: &ast.BoolLit{Value: true},
+					Then: &ast.Block{Exprs: []ast.Expr{&ast.BreakExpr{}}},
+				},
+			}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_BreakOutsideLoopButInsideIfIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.IfExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Then: &ast.Block{Exprs: []ast.Expr{&ast.BreakExpr{}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for break inside an if but outside any loop")
+	}
+}
+
+func TestCheck_LoopDepthRestoredAfterWhileExits(t *testing.T) {
+	// A break after a while loop has finished checking must still be
+	// rejected — loopDepth must be decremented back down, not just ever
+	// incremented.
+	f := mainFile(
+		&ast.WhileExpr{Cond: &ast.BoolLit{Value: true}, Body: &ast.Block{Exprs: []ast.Expr{&ast.BreakExpr{}}}},
+		&ast.BreakExpr{},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for break after the while it was inside of has ended")
+	}
+}

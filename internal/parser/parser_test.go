@@ -375,6 +375,153 @@ func TestParse_AllOperatorTokensParse(t *testing.T) {
 	}
 }
 
+func TestParse_IfWithoutElse(t *testing.T) {
+	expr := parseStmtExpr(t, "if true { 1 }")
+	ifExpr, ok := expr.(*ast.IfExpr)
+	if !ok {
+		t.Fatalf("got %T, want *ast.IfExpr", expr)
+	}
+	if ifExpr.Else != nil {
+		t.Fatalf("got Else %#v, want nil", ifExpr.Else)
+	}
+	if len(ifExpr.Then.Exprs) != 1 {
+		t.Fatalf("got %d then-exprs, want 1", len(ifExpr.Then.Exprs))
+	}
+}
+
+func TestParse_IfElse(t *testing.T) {
+	expr := parseExprSrc(t, "if true { 1 } else { 2 }")
+	ifExpr, ok := expr.(*ast.IfExpr)
+	if !ok {
+		t.Fatalf("got %T, want *ast.IfExpr", expr)
+	}
+	block, ok := ifExpr.Else.(*ast.Block)
+	if !ok {
+		t.Fatalf("Else: got %T, want *ast.Block", ifExpr.Else)
+	}
+	if len(block.Exprs) != 1 {
+		t.Fatalf("got %d else-exprs, want 1", len(block.Exprs))
+	}
+}
+
+func TestParse_ElifDesugarsToNestedElseIf(t *testing.T) {
+	expr := parseExprSrc(t, "if a { 1 } elif b { 2 } else { 3 }")
+	outer, ok := expr.(*ast.IfExpr)
+	if !ok {
+		t.Fatalf("got %T, want *ast.IfExpr", expr)
+	}
+	inner, ok := outer.Else.(*ast.IfExpr)
+	if !ok {
+		t.Fatalf("Else: got %T, want *ast.IfExpr (elif desugars to a nested if)", outer.Else)
+	}
+	if _, ok := inner.Cond.(*ast.IdentExpr); !ok {
+		t.Fatalf("inner cond: got %T, want *ast.IdentExpr", inner.Cond)
+	}
+	if _, ok := inner.Else.(*ast.Block); !ok {
+		t.Fatalf("inner Else: got %T, want *ast.Block", inner.Else)
+	}
+}
+
+func TestParse_ElifOnANewLineIsAnError(t *testing.T) {
+	// elif/else must directly follow the previous branch's closing '}' on
+	// the same line (CLAUDE.md's "確定した設計判断"); on a line of its own
+	// it dangles as an unexpected token at statement position.
+	src := "fn main() -> Int {\n    if true {\n        1\n    }\n    elif false {\n        2\n    }\n    0\n}\n"
+	if _, err := Parse(src); err == nil {
+		t.Fatal("expected an error for 'elif' on its own line")
+	}
+}
+
+func TestParse_WhileExpr(t *testing.T) {
+	stmt := parseStmtExpr(t, "while true { break }")
+	while, ok := stmt.(*ast.WhileExpr)
+	if !ok {
+		t.Fatalf("got %T, want *ast.WhileExpr", stmt)
+	}
+	if len(while.Body.Exprs) != 1 {
+		t.Fatalf("got %d body exprs, want 1", len(while.Body.Exprs))
+	}
+	if _, ok := while.Body.Exprs[0].(*ast.BreakExpr); !ok {
+		t.Fatalf("body[0]: got %T, want *ast.BreakExpr", while.Body.Exprs[0])
+	}
+}
+
+func TestParse_BreakAndContinue(t *testing.T) {
+	src := "fn main() -> Int {\n    while true {\n        break\n        continue\n    }\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	while := parseFuncMain(t, f).Body.Exprs[0].(*ast.WhileExpr)
+	if _, ok := while.Body.Exprs[0].(*ast.BreakExpr); !ok {
+		t.Fatalf("body[0]: got %T, want *ast.BreakExpr", while.Body.Exprs[0])
+	}
+	if _, ok := while.Body.Exprs[1].(*ast.ContinueExpr); !ok {
+		t.Fatalf("body[1]: got %T, want *ast.ContinueExpr", while.Body.Exprs[1])
+	}
+}
+
+func TestParse_SwitchDesugarsToIfChain(t *testing.T) {
+	expr := parseExprSrc(t, `switch {
+        case a: 1
+        case b: 2
+        default: 3
+    }`)
+	outer, ok := expr.(*ast.IfExpr)
+	if !ok {
+		t.Fatalf("got %T, want *ast.IfExpr (switch desugars to if/elif/else)", expr)
+	}
+	if _, ok := outer.Cond.(*ast.IdentExpr); !ok {
+		t.Fatalf("outer cond: got %T, want *ast.IdentExpr", outer.Cond)
+	}
+	middle, ok := outer.Else.(*ast.IfExpr)
+	if !ok {
+		t.Fatalf("outer Else: got %T, want *ast.IfExpr", outer.Else)
+	}
+	final, ok := middle.Else.(*ast.Block)
+	if !ok {
+		t.Fatalf("middle Else: got %T, want *ast.Block (the default clause)", middle.Else)
+	}
+	if len(final.Exprs) != 1 {
+		t.Fatalf("got %d default exprs, want 1", len(final.Exprs))
+	}
+}
+
+func TestParse_SwitchWithoutDefaultHasNoElse(t *testing.T) {
+	expr := parseExprSrc(t, `switch {
+        case a: 1
+        case b: 2
+    }`)
+	outer := expr.(*ast.IfExpr)
+	inner, ok := outer.Else.(*ast.IfExpr)
+	if !ok {
+		t.Fatalf("Else: got %T, want *ast.IfExpr", outer.Else)
+	}
+	if inner.Else != nil {
+		t.Fatalf("innermost Else: got %#v, want nil (no default)", inner.Else)
+	}
+}
+
+func TestParse_SwitchWithNoCasesIsAnError(t *testing.T) {
+	if _, err := Parse("fn main() -> Int {\n    _ = switch {}\n    0\n}\n"); err == nil {
+		t.Fatal("expected an error for a switch with no cases")
+	}
+}
+
+func TestParse_SwitchDefaultNotLastIsAnError(t *testing.T) {
+	src := "fn main() -> Int {\n    _ = switch {\n        default: 1\n        case a: 2\n    }\n    0\n}\n"
+	if _, err := Parse(src); err == nil {
+		t.Fatal("expected an error for 'default' not being the last clause")
+	}
+}
+
+func TestParse_SwitchDuplicateDefaultIsAnError(t *testing.T) {
+	src := "fn main() -> Int {\n    _ = switch {\n        case a: 1\n        default: 2\n        default: 3\n    }\n    0\n}\n"
+	if _, err := Parse(src); err == nil {
+		t.Fatal("expected an error for a duplicate 'default'")
+	}
+}
+
 func TestParse_IntLiteralIsNotFloat(t *testing.T) {
 	f, err := Parse("fn main() -> Int {\n    let x = 42\n    0\n}\n")
 	if err != nil {

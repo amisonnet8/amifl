@@ -119,6 +119,22 @@ func TestNext_BoolKeywords(t *testing.T) {
 	}
 }
 
+func TestNext_ControlFlowKeywords(t *testing.T) {
+	toks := tokenize(t, "if elif else while break continue switch case default")
+	want := []Kind{
+		KwIf, KwElif, KwElse, KwWhile, KwBreak, KwContinue, KwSwitch, KwCase, KwDefault,
+		EOF,
+	}
+	if len(toks) != len(want) {
+		t.Fatalf("got %d tokens, want %d: %+v", len(toks), len(want), toks)
+	}
+	for i, k := range want {
+		if toks[i].Kind != k {
+			t.Errorf("token %d: got Kind %v, want %v", i, toks[i].Kind, k)
+		}
+	}
+}
+
 func TestNext_FloatLiterals(t *testing.T) {
 	for _, tc := range []struct {
 		src  string

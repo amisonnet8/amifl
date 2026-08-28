@@ -1,0 +1,60 @@
+fn main() -> Int {
+    let score: Int = 82
+    let grade: String = if score >= 90 {
+        "A"
+    } elif score >= 80 {
+        "B"
+    } elif score >= 70 {
+        "C"
+    } else {
+        "F"
+    }
+    print(grade)
+
+    let category: String = switch {
+        case score >= 90: "excellent"
+        case score >= 70: "good"
+        default: "needs work"
+    }
+    print(category)
+
+    if score >= 80 {
+        print("passed")
+    } else {
+        print("failed")
+    }
+
+    let mut: Int = 100
+    if mut > 0 {
+        mut = mut - 1
+    }
+
+    let mut2: Int = 0
+    while mut2 < 5 {
+        mut2 = mut2 + 1
+    }
+
+    let sumTo: Int = 10
+    let mut3: Int = 0
+    let total: Int = 0
+    while mut3 < sumTo {
+        mut3 = mut3 + 1
+        if mut3 == 4 {
+            continue
+        }
+        if mut3 > 8 {
+            break
+        }
+        total = total + mut3
+    }
+
+    let shadowTest: Int = 1
+    if true {
+        let shadowTest: Int = 99
+        print(if shadowTest == 99 { "shadowed" } else { "not shadowed" })
+    }
+
+    let unitIf: Int = if false { 1 } else { 2 }
+
+    total + shadowTest + unitIf + mut + mut2
+}
