@@ -53,6 +53,19 @@ type Param struct {
 	ResolvedType string // filled in by sema
 }
 
+// StructDecl is a top-level `struct Name { field1: Type1, ... }` declaration
+// (amifl-spec.md section 2.2). Fields only, no methods (principle 4). Like
+// FuncDecl, sema resolves every field's type in a dedicated pass before any
+// function body is checked, so one struct's field may reference another
+// struct declared later in the file (or, symmetrically, be referenced by
+// one declared earlier) — order-independent, the same reasoning that
+// motivates step 5's two-pass function signature collection.
+type StructDecl struct {
+	Name   string
+	Fields []Param // reuses Param{Name,Type,Line,ResolvedType}; a field has no "reassignable" concept of its own
+	Line   int
+}
+
 // ConstDecl is a `const` declaration (amifl-spec.md section 4): a
 // compile-time-only binding that is inlined at every reference site
 // rather than compiled to a runtime variable. It doubles as both a
@@ -220,6 +233,71 @@ type ClosureLit struct {
 	ResolvedType string
 }
 
+// TupleLit is `(v1, v2, ...)` (amifl-spec.md section 2.2), always 2-8
+// elements — the parser also produces this node for a syntactically
+// ambiguous 1-element form `(x,)` (the trailing comma that disambiguates a
+// tuple from a parenthesized grouping `(x)`, per the spec's own note on
+// this), leaving sema to reject that arity (Tuple2~Tuple8 is the whole
+// range the type system actually has; grouping already covers "wrap one
+// expression in parens", so there is nothing a real Tuple1 would add).
+//
+// Step 6 restricts every element's own type to a scalar or a struct type —
+// never itself a Tuple or a Func (sema's resolveTupleLit enforces this) —
+// so ResolvedType's encoding (types.go's makeTupleType/tupleTypeParts,
+// mirroring step 5's makeFuncType) never has to parse a nested, comma-
+// containing element type back out of the flat comma-joined string it
+// builds. Revisit only once a concrete need for nested tuples appears
+// (mirrors step 5's identical scope cut for nested Func types).
+type TupleLit struct {
+	Elems []Expr
+	Line  int
+
+	ResolvedType string // filled by sema: types.go's makeTupleType(elemTypes)
+}
+
+// StructLit is `TypeName{field1: v1, field2: v2, ...}` (amifl-spec.md
+// section 2.2/8.4). Every one of the struct's declared fields must be
+// given exactly once; order doesn't matter (each is matched by name, not
+// position) — sema's resolveStructLit checks both completeness and
+// duplicates.
+type StructLit struct {
+	TypeName string
+	Fields   []StructLitField
+	Line     int
+
+	ResolvedType string // filled by sema: always == TypeName (struct types aren't aliased)
+}
+
+// StructLitField is one `name: value` entry inside a StructLit.
+type StructLitField struct {
+	Name  string
+	Value Expr
+	Line  int
+}
+
+// FieldExpr is postfix `target.field` (amifl-spec.md section 3.2): tuple
+// index sugar (`t.0`, `t.1`, ...) when Target's type is a Tuple, or
+// ordinary struct field access when it's a struct — the same syntax and
+// the same AST node either way, since both ultimately compile to one
+// AMIVM instruction (FGET). Field is exactly the text the user wrote ("0",
+// "1", ... or a struct field name); AmivmField is what codegen actually
+// emits after FGET's `>` prefix — sema computes it once (a synthesized
+// "F0"/"F1"/... for a tuple index, since Go struct fields can't be named
+// with a bare digit, or Field verbatim for a struct) so codegen never has
+// to re-derive tuple-vs-struct from ResolvedType (whose two encodings
+// codegen has no vocabulary to tell apart — see types.go's doc comment on
+// why that encoding is sema-internal). This mirrors LetExpr.Token/
+// CallExpr.CalleeToken: sema resolves the AMIVM-facing detail once, onto
+// the node, and codegen just reads it.
+type FieldExpr struct {
+	Target Expr
+	Field  string
+	Line   int
+
+	ResolvedType string // filled by sema
+	AmivmField   string // filled by sema
+}
+
 // StringLit is a string literal.
 type StringLit struct {
 	Value string
@@ -324,8 +402,9 @@ type WhileExpr struct {
 type BreakExpr struct{ Line int }
 type ContinueExpr struct{ Line int }
 
-func (*FuncDecl) topLevelDeclNode()  {}
-func (*ConstDecl) topLevelDeclNode() {}
+func (*FuncDecl) topLevelDeclNode()   {}
+func (*ConstDecl) topLevelDeclNode()  {}
+func (*StructDecl) topLevelDeclNode() {}
 
 func (*ConstDecl) exprNode()    {}
 func (*LetExpr) exprNode()      {}
@@ -344,6 +423,9 @@ func (*WhileExpr) exprNode()    {}
 func (*BreakExpr) exprNode()    {}
 func (*ContinueExpr) exprNode() {}
 func (*ClosureLit) exprNode()   {}
+func (*TupleLit) exprNode()     {}
+func (*StructLit) exprNode()    {}
+func (*FieldExpr) exprNode()    {}
 
 func (n *ConstDecl) Pos() int    { return n.Line }
 func (n *LetExpr) Pos() int      { return n.Line }
@@ -362,3 +444,6 @@ func (n *WhileExpr) Pos() int    { return n.Line }
 func (n *BreakExpr) Pos() int    { return n.Line }
 func (n *ContinueExpr) Pos() int { return n.Line }
 func (n *ClosureLit) Pos() int   { return n.Line }
+func (n *TupleLit) Pos() int     { return n.Line }
+func (n *StructLit) Pos() int    { return n.Line }
+func (n *FieldExpr) Pos() int    { return n.Line }

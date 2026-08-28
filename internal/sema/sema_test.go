@@ -1117,3 +1117,348 @@ func TestCheck_LocalClosureShadowsSameNamedTopLevelFunc(t *testing.T) {
 		t.Fatalf("Check() error: %v", err)
 	}
 }
+
+func pointStructDecl() *ast.StructDecl {
+	return &ast.StructDecl{
+		Name: "Point",
+		Fields: []ast.Param{
+			{Name: "x", Type: "Int"},
+			{Name: "y", Type: "Int"},
+		},
+	}
+}
+
+func pointLit(x, y uint64) *ast.StructLit {
+	return &ast.StructLit{
+		TypeName: "Point",
+		Fields: []ast.StructLitField{
+			{Name: "x", Value: &ast.IntLit{Value: x}},
+			{Name: "y", Value: &ast.IntLit{Value: y}},
+		},
+	}
+}
+
+func TestCheck_StructLitAndFieldAccessAreValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Value: pointLit(1, 2)},
+		&ast.FieldExpr{Target: &ast.IdentExpr{Name: "p"}, Field: "x"},
+	)
+	f.Decls = append(f.Decls, pointStructDecl())
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_StructFieldAccessResolvesFieldType(t *testing.T) {
+	field := &ast.FieldExpr{Target: &ast.IdentExpr{Name: "p"}, Field: "x"}
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Value: pointLit(1, 2)},
+		&ast.DiscardExpr{Value: field},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, pointStructDecl())
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if field.ResolvedType != "Int64" {
+		t.Fatalf("got ResolvedType %q, want Int64", field.ResolvedType)
+	}
+	if field.AmivmField != "x" {
+		t.Fatalf("got AmivmField %q, want \"x\" (struct field verbatim)", field.AmivmField)
+	}
+}
+
+func TestCheck_DuplicateStructNameIsAnError(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, pointStructDecl(), pointStructDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for two structs with the same name")
+	}
+}
+
+func TestCheck_DuplicateStructFieldNameIsAnError(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, &ast.StructDecl{
+		Name: "Bad",
+		Fields: []ast.Param{
+			{Name: "x", Type: "Int"},
+			{Name: "x", Type: "Int"},
+		},
+	})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a struct with two fields named the same")
+	}
+}
+
+func TestCheck_StructFieldWithUnknownTypeIsAnError(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, &ast.StructDecl{
+		Name:   "Bad",
+		Fields: []ast.Param{{Name: "x", Type: "Nope"}},
+	})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a struct field with an unknown type")
+	}
+}
+
+func TestCheck_StructFieldsCanForwardReferenceAnotherStruct(t *testing.T) {
+	// Line's `to` field names Point, declared *after* Line in Decls order —
+	// registerStructName's pass runs for every struct before
+	// registerStructFields resolves any of them, so this must not depend
+	// on file order.
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls,
+		&ast.StructDecl{Name: "Line", Fields: []ast.Param{{Name: "to", Type: "Point"}}},
+		pointStructDecl(),
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_StructLitMissingFieldIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Value: &ast.StructLit{
+			TypeName: "Point",
+			Fields:   []ast.StructLitField{{Name: "x", Value: &ast.IntLit{Value: 1}}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, pointStructDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a struct literal missing a field")
+	}
+}
+
+func TestCheck_StructLitDuplicateFieldIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Value: &ast.StructLit{
+			TypeName: "Point",
+			Fields: []ast.StructLitField{
+				{Name: "x", Value: &ast.IntLit{Value: 1}},
+				{Name: "x", Value: &ast.IntLit{Value: 2}},
+			},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, pointStructDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a struct literal repeating a field")
+	}
+}
+
+func TestCheck_StructLitUnknownFieldIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Value: &ast.StructLit{
+			TypeName: "Point",
+			Fields: []ast.StructLitField{
+				{Name: "x", Value: &ast.IntLit{Value: 1}},
+				{Name: "z", Value: &ast.IntLit{Value: 2}},
+			},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, pointStructDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a struct literal naming a field the struct doesn't have")
+	}
+}
+
+func TestCheck_StructLitFieldValueTypeMismatchIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Value: &ast.StructLit{
+			TypeName: "Point",
+			Fields: []ast.StructLitField{
+				{Name: "x", Value: &ast.StringLit{Value: "nope"}},
+				{Name: "y", Value: &ast.IntLit{Value: 2}},
+			},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, pointStructDecl())
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a struct field value of the wrong type")
+	}
+}
+
+func TestCheck_UndefinedStructTypeIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Value: &ast.StructLit{TypeName: "Nope"}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a struct literal naming an undeclared struct type")
+	}
+}
+
+func TestCheck_FieldAccessOnScalarIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: "Int", Value: &ast.IntLit{Value: 1}},
+		&ast.DiscardExpr{Value: &ast.FieldExpr{Target: &ast.IdentExpr{Name: "x"}, Field: "0"}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for field access on a scalar")
+	}
+}
+
+func TestCheck_StructReservedNameIsAnError(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, &ast.StructDecl{Name: reservedMainName})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a struct declared with the reserved amifl_main name")
+	}
+}
+
+func tupleLit(elems ...ast.Expr) *ast.TupleLit {
+	return &ast.TupleLit{Elems: elems}
+}
+
+func TestCheck_TupleLitAndFieldAccessAreValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "t", Value: tupleLit(&ast.IntLit{Value: 1}, &ast.StringLit{Value: "a"}, &ast.BoolLit{Value: true})},
+		&ast.DiscardExpr{Value: &ast.FieldExpr{Target: &ast.IdentExpr{Name: "t"}, Field: "1"}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_TupleFieldAccessResolvesElementTypeAndSynthesizesFieldName(t *testing.T) {
+	field := &ast.FieldExpr{Target: &ast.IdentExpr{Name: "t"}, Field: "1"}
+	f := mainFile(
+		&ast.LetExpr{Name: "t", Value: tupleLit(&ast.IntLit{Value: 1}, &ast.StringLit{Value: "a"})},
+		&ast.DiscardExpr{Value: field},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if field.ResolvedType != "String" {
+		t.Fatalf("got ResolvedType %q, want String", field.ResolvedType)
+	}
+	if field.AmivmField != "F1" {
+		t.Fatalf("got AmivmField %q, want \"F1\" (synthesized tuple field name)", field.AmivmField)
+	}
+}
+
+func TestCheck_TupleWithOneElementIsAnError(t *testing.T) {
+	// The parser produces a 1-element TupleLit for `(x,)` (its own doc
+	// comment) — sema is where Tuple2~Tuple8's actual range is enforced.
+	f := mainFile(
+		&ast.LetExpr{Name: "t", Value: tupleLit(&ast.IntLit{Value: 1})},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a 1-element tuple")
+	}
+}
+
+func TestCheck_TupleWithNineElementsIsAnError(t *testing.T) {
+	elems := make([]ast.Expr, 9)
+	for i := range elems {
+		elems[i] = &ast.IntLit{Value: uint64(i)}
+	}
+	f := mainFile(
+		&ast.LetExpr{Name: "t", Value: tupleLit(elems...)},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a tuple with more than 8 elements")
+	}
+}
+
+func TestCheck_TupleFieldIndexOutOfRangeIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "t", Value: tupleLit(&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2})},
+		&ast.DiscardExpr{Value: &ast.FieldExpr{Target: &ast.IdentExpr{Name: "t"}, Field: "5"}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a tuple field index out of range")
+	}
+}
+
+func TestCheck_NestedTupleElementIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "t", Value: tupleLit(
+			tupleLit(&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}),
+			&ast.IntLit{Value: 3},
+		)},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a tuple element that is itself a tuple")
+	}
+}
+
+func TestCheck_FuncTypedTupleElementIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "clos", Value: &ast.ClosureLit{
+			ReturnType: "Int",
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		}},
+		&ast.LetExpr{Name: "t", Value: tupleLit(&ast.IdentExpr{Name: "clos"}, &ast.IntLit{Value: 1})},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a tuple element that is a function value")
+	}
+}
+
+func TestCheck_StructEqualityIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "a", Value: pointLit(1, 2)},
+		&ast.LetExpr{Name: "b", Value: pointLit(1, 2)},
+		&ast.DiscardExpr{Value: &ast.BinaryExpr{Op: "==", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, pointStructDecl())
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_TupleEqualityIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "a", Value: tupleLit(&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2})},
+		&ast.LetExpr{Name: "b", Value: tupleLit(&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2})},
+		&ast.DiscardExpr{Value: &ast.BinaryExpr{Op: "==", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ConstStructLitIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.DiscardExpr{Value: &ast.FieldExpr{Target: &ast.IdentExpr{Name: "Origin"}, Field: "x"}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, pointStructDecl(), &ast.ConstDecl{Name: "Origin", Value: pointLit(0, 0)})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ConstStructLitReferencingNonConstIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "n", Type: "Int", Value: &ast.IntLit{Value: 1}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, pointStructDecl(), &ast.ConstDecl{
+		Name: "Bad",
+		Value: &ast.StructLit{
+			TypeName: "Point",
+			Fields: []ast.StructLitField{
+				{Name: "x", Value: &ast.IdentExpr{Name: "n"}},
+				{Name: "y", Value: &ast.IntLit{Value: 0}},
+			},
+		},
+	})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a const struct literal referencing a non-const (a `let`)")
+	}
+}

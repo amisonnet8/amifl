@@ -28,19 +28,47 @@ const reservedMainName = "amifl_main"
 // (structs, enums, collections, capability resolution, ...) grows across
 // later steps — see CLAUDE.md's implementation step plan.
 func Check(f *ast.File) error {
-	c := &checker{globals: map[string]*binding{}, funcs: map[string]funcSig{}}
+	c := &checker{globals: map[string]*binding{}, funcs: map[string]funcSig{}, structs: map[string]*structInfo{}}
 
+	var consts []*ast.ConstDecl
 	var funcs []*ast.FuncDecl
+	var structs []*ast.StructDecl
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *ast.ConstDecl:
-			if err := c.checkTopLevelConst(d); err != nil {
-				return err
-			}
+			consts = append(consts, d)
 		case *ast.FuncDecl:
 			funcs = append(funcs, d)
+		case *ast.StructDecl:
+			structs = append(structs, d)
 		default:
 			return fmt.Errorf("sema: unknown top-level declaration %T", decl)
+		}
+	}
+
+	// Pass 0: register every struct's name (0a) and then its fields (0b),
+	// before anything else — a `fn`'s param/return type, a `const`'s
+	// annotation/initializer, and another struct's own field can all name
+	// a struct type regardless of where in the file it's declared.
+	for _, st := range structs {
+		if err := c.registerStructName(st); err != nil {
+			return err
+		}
+	}
+	for _, st := range structs {
+		if err := c.registerStructFields(st); err != nil {
+			return err
+		}
+	}
+
+	// Consts are checked here, now that struct names/fields are known —
+	// unchanged from step 2-5 otherwise (still in file order, still no
+	// forward references between consts themselves), except a const's
+	// initializer may now itself be a struct/tuple literal referencing a
+	// struct type declared anywhere in the file.
+	for _, d := range consts {
+		if err := c.checkTopLevelConst(d); err != nil {
+			return err
 		}
 	}
 
@@ -113,6 +141,45 @@ func (c *checker) checkTopLevelConst(d *ast.ConstDecl) error {
 	return nil
 }
 
+// registerStructName reserves d's name (Check's pass 0a) — split from
+// registerStructFields (0b) so every struct name in the file is known
+// before any struct's fields (which may reference another struct, in
+// either declaration order) are resolved.
+func (c *checker) registerStructName(d *ast.StructDecl) error {
+	if d.Name == reservedMainName {
+		return fmt.Errorf("line %d: %q is a reserved name (used internally to compile `fn main`)", d.Line, d.Name)
+	}
+	if _, exists := c.structs[d.Name]; exists {
+		return fmt.Errorf("line %d: duplicate struct %q", d.Line, d.Name)
+	}
+	c.structs[d.Name] = &structInfo{Name: d.Name}
+	return nil
+}
+
+// registerStructFields resolves d's field types (Check's pass 0b) — every
+// struct name in the file, including d's own, is already registered by
+// registerStructName by the time this runs, so a field naming any struct
+// (declared earlier or later in the file) resolves via c.canonicalType.
+func (c *checker) registerStructFields(d *ast.StructDecl) error {
+	seen := map[string]bool{}
+	var fields []fieldInfo
+	for i := range d.Fields {
+		f := &d.Fields[i]
+		if seen[f.Name] {
+			return fmt.Errorf("line %d: duplicate field %q in struct %q", f.Line, f.Name, d.Name)
+		}
+		seen[f.Name] = true
+		ft, ok := c.canonicalType(f.Type)
+		if !ok {
+			return fmt.Errorf("line %d: unknown type %q", f.Line, f.Type)
+		}
+		f.ResolvedType = ft
+		fields = append(fields, fieldInfo{Name: f.Name, Typ: ft})
+	}
+	c.structs[d.Name].Fields = fields
+	return nil
+}
+
 // registerFuncSig resolves and records fn's signature (amifl-spec.md
 // section 8.7 forbids overloading, so one entry per name suffices) —
 // Check's pass 1, run for every top-level function before any body is
@@ -136,7 +203,7 @@ func (c *checker) registerFuncSig(fn *ast.FuncDecl) error {
 			return fmt.Errorf("line %d: duplicate parameter %q", p.Line, p.Name)
 		}
 		seen[p.Name] = true
-		pt, ok := canonicalType(p.Type)
+		pt, ok := c.canonicalType(p.Type)
 		if !ok {
 			return fmt.Errorf("line %d: unknown type %q", p.Line, p.Type)
 		}
@@ -144,7 +211,7 @@ func (c *checker) registerFuncSig(fn *ast.FuncDecl) error {
 		params = append(params, pt)
 	}
 
-	retType, ok := canonicalReturnType(fn.ReturnType)
+	retType, ok := c.canonicalReturnType(fn.ReturnType)
 	if !ok {
 		return fmt.Errorf("line %d: unknown type %q", fn.Line, fn.ReturnType)
 	}

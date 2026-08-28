@@ -21,6 +21,7 @@ var keywords = map[string]Kind{
 	"switch":   KwSwitch,
 	"case":     KwCase,
 	"default":  KwDefault,
+	"struct":   KwStruct,
 }
 
 // Lexer tokenizes AmiFL source text one Token at a time via Next.
@@ -76,6 +77,13 @@ func (l *Lexer) Next() (Token, error) {
 	case c == ':':
 		l.pos++
 		return Token{Kind: Colon, Line: line}, nil
+	case c == '.':
+		// A leading '.' never reaches here for a float literal (lexNumber,
+		// entered only when the *first* byte is a digit, consumes a '.'
+		// itself as part of a number) — so this is always the field-access/
+		// tuple-index operator (amifl-spec.md section 3.2, "t.0", step 6).
+		l.pos++
+		return Token{Kind: Dot, Line: line}, nil
 	case c == '=' && l.byteAt(1) == '=':
 		l.pos += 2
 		return Token{Kind: EqEq, Line: line}, nil

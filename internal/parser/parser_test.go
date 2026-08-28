@@ -620,3 +620,131 @@ func TestParse_ClosureLitWithNoParamsAndUnitReturn(t *testing.T) {
 		t.Fatalf("got ReturnType %q, want Unit", clos.ReturnType)
 	}
 }
+
+func TestParse_ParenIsGroupingNotTuple(t *testing.T) {
+	expr := parseExprSrc(t, "(1 + 2)")
+	if _, ok := expr.(*ast.BinaryExpr); !ok {
+		t.Fatalf("got %T, want the inner *ast.BinaryExpr (grouping unwrapped)", expr)
+	}
+}
+
+func TestParse_TupleLit(t *testing.T) {
+	tup := parseExprSrc(t, "(1, 2, 3)").(*ast.TupleLit)
+	if len(tup.Elems) != 3 {
+		t.Fatalf("got %d elems, want 3", len(tup.Elems))
+	}
+	for i, want := range []uint64{1, 2, 3} {
+		lit, ok := tup.Elems[i].(*ast.IntLit)
+		if !ok || lit.Value != want {
+			t.Errorf("elem %d: got %#v, want IntLit{Value: %d}", i, tup.Elems[i], want)
+		}
+	}
+}
+
+func TestParse_TupleLitTrailingComma(t *testing.T) {
+	tup := parseExprSrc(t, "(1, 2,)").(*ast.TupleLit)
+	if len(tup.Elems) != 2 {
+		t.Fatalf("got %d elems, want 2", len(tup.Elems))
+	}
+}
+
+func TestParse_OneElementTrailingCommaIsTupleLit(t *testing.T) {
+	// (x,) is syntactically a TupleLit (sema rejects its arity) — distinct
+	// from (x), which parseParenOrTupleExpr resolves as plain grouping.
+	tup, ok := parseExprSrc(t, "(1,)").(*ast.TupleLit)
+	if !ok {
+		t.Fatalf("got %T, want *ast.TupleLit", parseExprSrc(t, "(1,)"))
+	}
+	if len(tup.Elems) != 1 {
+		t.Fatalf("got %d elems, want 1", len(tup.Elems))
+	}
+}
+
+func TestParse_TupleFieldAccess(t *testing.T) {
+	f := parseExprSrc(t, "t.0").(*ast.FieldExpr)
+	if f.Field != "0" {
+		t.Fatalf("got Field %q, want \"0\"", f.Field)
+	}
+	target, ok := f.Target.(*ast.IdentExpr)
+	if !ok || target.Name != "t" {
+		t.Fatalf("got Target %#v, want IdentExpr{Name: \"t\"}", f.Target)
+	}
+}
+
+func TestParse_ChainedFieldAccess(t *testing.T) {
+	// l.from.x: the outer FieldExpr's Target is itself a FieldExpr.
+	outer := parseExprSrc(t, "l.from.x").(*ast.FieldExpr)
+	if outer.Field != "x" {
+		t.Fatalf("got outer Field %q, want \"x\"", outer.Field)
+	}
+	inner, ok := outer.Target.(*ast.FieldExpr)
+	if !ok || inner.Field != "from" {
+		t.Fatalf("got inner %#v, want FieldExpr{Field: \"from\"}", outer.Target)
+	}
+}
+
+func TestParse_StructLit(t *testing.T) {
+	lit := parseExprSrc(t, "Point{x: 1, y: 2}").(*ast.StructLit)
+	if lit.TypeName != "Point" {
+		t.Fatalf("got TypeName %q, want Point", lit.TypeName)
+	}
+	if len(lit.Fields) != 2 || lit.Fields[0].Name != "x" || lit.Fields[1].Name != "y" {
+		t.Fatalf("got Fields %+v", lit.Fields)
+	}
+}
+
+func TestParse_StructDecl(t *testing.T) {
+	src := "struct Point {\n    x: Float,\n    y: Float\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if len(f.Decls) != 1 {
+		t.Fatalf("got %d decls, want 1", len(f.Decls))
+	}
+	st, ok := f.Decls[0].(*ast.StructDecl)
+	if !ok {
+		t.Fatalf("got %T, want *ast.StructDecl", f.Decls[0])
+	}
+	if st.Name != "Point" || len(st.Fields) != 2 {
+		t.Fatalf("got StructDecl{Name: %q, len(Fields): %d}", st.Name, len(st.Fields))
+	}
+	if st.Fields[0].Name != "x" || st.Fields[0].Type != "Float" {
+		t.Errorf("field 0: got %+v", st.Fields[0])
+	}
+	if st.Fields[1].Name != "y" || st.Fields[1].Type != "Float" {
+		t.Errorf("field 1: got %+v", st.Fields[1])
+	}
+}
+
+func TestParse_IfWithBareBoolIdentCondNotSwallowedAsStructLit(t *testing.T) {
+	// `if flag { ... }` must still parse `flag` as a plain condition, not
+	// attempt to read `{ ... }` as a struct literal's field list (the
+	// noCompositeLit ambiguity documented on the parser struct).
+	src := "fn main() -> Int {\n    if flag {\n        0\n    }\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	ifExpr := parseFuncMain(t, f).Body.Exprs[0].(*ast.IfExpr)
+	cond, ok := ifExpr.Cond.(*ast.IdentExpr)
+	if !ok || cond.Name != "flag" {
+		t.Fatalf("got Cond %#v, want IdentExpr{Name: \"flag\"}", ifExpr.Cond)
+	}
+}
+
+func TestParse_StructLitAllowedInParenthesizedCond(t *testing.T) {
+	src := "fn main() -> Int {\n    if (Point{x: 1, y: 2} == p) {\n        0\n    }\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	ifExpr := parseFuncMain(t, f).Body.Exprs[0].(*ast.IfExpr)
+	bin, ok := ifExpr.Cond.(*ast.BinaryExpr)
+	if !ok || bin.Op != "==" {
+		t.Fatalf("got Cond %#v, want BinaryExpr{Op: \"==\"}", ifExpr.Cond)
+	}
+	if _, ok := bin.Left.(*ast.StructLit); !ok {
+		t.Fatalf("got Cond.Left %T, want *ast.StructLit", bin.Left)
+	}
+}

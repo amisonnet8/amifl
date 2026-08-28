@@ -50,6 +50,14 @@ func Generate(f *ast.File) (string, error) {
 	}
 
 	prog := &program{}
+	// User `struct` declarations are emitted first, ahead of every
+	// function body — see genStructDecl's doc comment.
+	for _, decl := range f.Decls {
+		if st, ok := decl.(*ast.StructDecl); ok {
+			genStructDecl(prog, st)
+		}
+	}
+
 	var funcsBuf strings.Builder
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -117,19 +125,11 @@ func genFuncDecl(prog *program, out *strings.Builder, fn *ast.FuncDecl) error {
 
 	out.WriteString("FUNC\t!" + name)
 	for _, p := range fn.Params {
-		goType, ok := goTypeNames[p.ResolvedType]
-		if !ok {
-			return fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", p.ResolvedType)
-		}
-		out.WriteString("\t^" + goType)
+		out.WriteString("\t^" + prog.resolveGoType(p.ResolvedType))
 	}
 	out.WriteString("\t:")
 	if fn.ResolvedReturnType != unitType {
-		goType, ok := goTypeNames[fn.ResolvedReturnType]
-		if !ok {
-			return fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", fn.ResolvedReturnType)
-		}
-		out.WriteString("\t^" + goType)
+		out.WriteString("\t^" + prog.resolveGoType(fn.ResolvedReturnType))
 	}
 	out.WriteString("\n")
 
@@ -287,6 +287,17 @@ func (g *gen) genStmt(e ast.Expr) error {
 		// sema), but a discarded non-Unit expression's tail can — e.g. the
 		// `2` ending the else-branch in the doc comment's example above.
 		return nil
+	case *ast.TupleLit, *ast.StructLit, *ast.FieldExpr:
+		// Unlike the pure-value kinds above, a tuple/struct literal's
+		// elements/fields (or a field-access target) may themselves be an
+		// effectful call — `_ = Point{x: sideEffecting(), y: 2}` must still
+		// run sideEffecting() even though the resulting Point is discarded —
+		// so this constructs the value in full via the normal genValue path
+		// and discards the token it hands back (an unused temp amivm's own
+		// self-healing cleans up, same as every other discard here —
+		// CLAUDE.md's step-2 "確定した設計判断").
+		_, err := g.genValue(v)
+		return err
 	default:
 		return fmt.Errorf("codegen: unsupported statement %T", e)
 	}
@@ -333,10 +344,7 @@ func (g *gen) genCallValue(c *ast.CallExpr) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	goType, ok := goTypeNames[c.ResolvedType]
-	if !ok {
-		return "", fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", c.ResolvedType)
-	}
+	goType := g.prog.resolveGoType(c.ResolvedType)
 	tmp := g.newTemp()
 	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, goType)
 	g.writeCall("%"+tmp, calleeToken, argVals)
@@ -403,10 +411,7 @@ func (g *gen) genLetStmt(v *ast.LetExpr) error {
 	if clos, ok := v.Value.(*ast.ClosureLit); ok {
 		return g.genClosureLitInto(v.Token, clos)
 	}
-	goType, ok := goTypeNames[v.ResolvedType]
-	if !ok {
-		return fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", v.ResolvedType)
-	}
+	goType := g.prog.resolveGoType(v.ResolvedType)
 	val, err := g.genValue(v.Value)
 	if err != nil {
 		return err
@@ -470,10 +475,7 @@ func (g *gen) genElseStmt(e ast.ElseBody) error {
 // adjacent ternary), so the result has to flow out through a
 // pre-declared temp that every branch SETs as its last step instead.
 func (g *gen) genIfValue(v *ast.IfExpr) (string, error) {
-	goType, ok := goTypeNames[v.ResolvedType]
-	if !ok {
-		return "", fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", v.ResolvedType)
-	}
+	goType := g.prog.resolveGoType(v.ResolvedType)
 	dest := g.newTemp()
 	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", dest, goType)
 	if err := g.genIfValueBranch(v, dest); err != nil {
@@ -568,6 +570,12 @@ func (g *gen) genValue(e ast.Expr) (string, error) {
 		return g.genIfValue(v)
 	case *ast.CallExpr:
 		return g.genCallValue(v)
+	case *ast.TupleLit:
+		return g.genTupleLitValue(v)
+	case *ast.StructLit:
+		return g.genStructLitValue(v)
+	case *ast.FieldExpr:
+		return g.genFieldValue(v)
 	default:
 		return "", fmt.Errorf("codegen: %T is not a value expression (sema should have rejected this)", e)
 	}

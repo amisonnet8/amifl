@@ -24,6 +24,7 @@ const (
 	KwSwitch
 	KwCase
 	KwDefault
+	KwStruct
 	LParen
 	RParen
 	LBrace
@@ -31,6 +32,7 @@ const (
 	Arrow
 	Comma
 	Colon
+	Dot
 	Assign
 
 	// Operators (amifl-spec.md section 6).
@@ -99,6 +101,8 @@ func (k Kind) String() string {
 		return "'case'"
 	case KwDefault:
 		return "'default'"
+	case KwStruct:
+		return "'struct'"
 	case LParen:
 		return "'('"
 	case RParen:
@@ -113,6 +117,8 @@ func (k Kind) String() string {
 		return "','"
 	case Colon:
 		return "':'"
+	case Dot:
+		return "'.'"
 	case Assign:
 		return "'='"
 	case Plus:

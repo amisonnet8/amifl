@@ -665,3 +665,165 @@ func TestGenerate_ClosureCapturesOuterLetTokenDirectly(t *testing.T) {
 		t.Errorf("expected the closure body to reference the captured outer %%base_1 token directly; got:\n%s", ir)
 	}
 }
+
+func TestGenerate_StructDeclEmitsSttype(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, &ast.StructDecl{
+		Name: "Point",
+		Fields: []ast.Param{
+			{Name: "x", Type: "Int", ResolvedType: "Int64"},
+			{Name: "y", Type: "Int", ResolvedType: "Int64"},
+		},
+	})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"STTYPE\t^Point",
+		"FIELD\t>x\t^int64",
+		"FIELD\t>y\t^int64",
+		"ENDSTTYPE",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func pointStructLit(x, y uint64) *ast.StructLit {
+	return &ast.StructLit{
+		TypeName:     "Point",
+		ResolvedType: "Point",
+		Fields: []ast.StructLitField{
+			{Name: "x", Value: &ast.IntLit{Value: x}},
+			{Name: "y", Value: &ast.IntLit{Value: y}},
+		},
+	}
+}
+
+func TestGenerate_StructLitEmitsVarAndFset(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Token: "%p_1", ResolvedType: "Point", Value: pointStructLit(1, 2)},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, &ast.StructDecl{
+		Name: "Point",
+		Fields: []ast.Param{
+			{Name: "x", Type: "Int", ResolvedType: "Int64"},
+			{Name: "y", Type: "Int", ResolvedType: "Int64"},
+		},
+	})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"VAR\t%amifl_tmp1\t^Point",
+		"FSET\t%amifl_tmp1\t>x\t1",
+		"FSET\t%amifl_tmp1\t>y\t2",
+		"VAR\t%p_1\t^Point",
+		"SET\t%p_1\t%amifl_tmp1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_StructFieldAccessEmitsFget(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Token: "%p_1", ResolvedType: "Point", Value: pointStructLit(1, 2)},
+		&ast.FieldExpr{Target: &ast.IdentExpr{Name: "p", ResolvedType: "Point", Token: "%p_1"}, Field: "x", ResolvedType: "Int64", AmivmField: "x"},
+	)
+	f.Decls = append(f.Decls, &ast.StructDecl{
+		Name: "Point",
+		Fields: []ast.Param{
+			{Name: "x", Type: "Int", ResolvedType: "Int64"},
+			{Name: "y", Type: "Int", ResolvedType: "Int64"},
+		},
+	})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "FGET\t%amifl_tmp2\t%p_1\t>x") {
+		t.Errorf("expected FGET reading field x from %%p_1; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_TupleLitEmitsSynthesizedSttypeWithNumberedFields(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "t", Token: "%t_1", ResolvedType: "Tuple(Int64,String)", Value: &ast.TupleLit{
+			ResolvedType: "Tuple(Int64,String)",
+			Elems:        []ast.Expr{&ast.IntLit{Value: 1}, &ast.StringLit{Value: "a"}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"STTYPE\t^AmiflTuple1",
+		"FIELD\t>F0\t^int64",
+		"FIELD\t>F1\t^string",
+		"ENDSTTYPE",
+		"VAR\t%amifl_tmp1\t^AmiflTuple1",
+		"FSET\t%amifl_tmp1\t>F0\t1",
+		"FSET\t%amifl_tmp1\t>F1\t\"a\"",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_SameShapedTuplesShareOneSttype(t *testing.T) {
+	tupType := "Tuple(Int64,Int64)"
+	f := mainFile(
+		&ast.LetExpr{Name: "a", Token: "%a_1", ResolvedType: tupType, Value: &ast.TupleLit{
+			ResolvedType: tupType,
+			Elems:        []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}},
+		}},
+		&ast.LetExpr{Name: "b", Token: "%b_2", ResolvedType: tupType, Value: &ast.TupleLit{
+			ResolvedType: tupType,
+			Elems:        []ast.Expr{&ast.IntLit{Value: 3}, &ast.IntLit{Value: 4}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if strings.Count(ir, "STTYPE\t^AmiflTuple1") != 1 {
+		t.Errorf("expected exactly one STTYPE for the shared tuple shape; got:\n%s", ir)
+	}
+	if !strings.Contains(ir, "VAR\t%a_1\t^AmiflTuple1") || !strings.Contains(ir, "VAR\t%b_2\t^AmiflTuple1") {
+		t.Errorf("expected both tuples to use the same synthesized type; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_TupleFieldAccessEmitsFgetWithSynthesizedFieldName(t *testing.T) {
+	tupType := "Tuple(Int64,String)"
+	f := mainFile(
+		&ast.LetExpr{Name: "t", Token: "%t_1", ResolvedType: tupType, Value: &ast.TupleLit{
+			ResolvedType: tupType,
+			Elems:        []ast.Expr{&ast.IntLit{Value: 1}, &ast.StringLit{Value: "a"}},
+		}},
+		&ast.DiscardExpr{Value: &ast.FieldExpr{
+			Target:       &ast.IdentExpr{Name: "t", ResolvedType: tupType, Token: "%t_1"},
+			Field:        "1",
+			ResolvedType: "String",
+			AmivmField:   "F1",
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "FGET\t%amifl_tmp2\t%t_1\t>F1") {
+		t.Errorf("expected FGET reading field F1 from %%t_1; got:\n%s", ir)
+	}
+}

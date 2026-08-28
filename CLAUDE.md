@@ -157,7 +157,7 @@ Seed/Cascadeが通っていない領域、あるいはAmiFL固有の設計判断
 
 1. **`Any`型・`extern`境界の値表現**：AmiFLの変数は全て静的型（`Any`は`extern`経由のみ登場）だが、`extern`で束縛したGo関数の引数・戻り値に`Any`が現れる場合、その実行時表現をどうするか。Weaveの結論（`gotype`/`gofunc`/`gomethod`は最終的に`reflect`経由の`CallGoFuncList`/`CallGoMethodList`へ一本化——「型ヒントを書けばネイティブ」という中間案は複雑さに見合わず削除された）をAmiFLにそのまま採用してよいか、あるいはAmiFLの`extern bind`宣言（15.1節）が常に具体的なAmiFL型シグネチャを要求する（Weaveの`gofunc`と違い、宣言時点で引数・戻り値型が全て確定している）という違いを活かし、**Seed/Cascade同様にネイティブな`CALL ?pkg.Func`を直接生成できる可能性がある**——`Any`が絡まないbindは静的に型付けされたネイティブ呼び出しにできるはずで、`Any`を含む場合のみreflect相当（`ASSERT`+`amiflrt`ヘルパー）に倒す、というハイブリッド設計を検討する
 2. **`Array[T;N]`の実行時表現**：Nがコンパイル時定数であるため、Seedの「配列は常にGoスライス（サイズが実行時変数になりうるため）」という判断はAmiFLにはそのまま当てはまらない可能性がある。Goのネイティブ固定長配列型`[N]T`（値型、コピーセマンティクス）を使うか、Seed同様スライス+「resizeを生成しない」規律で表現するかは、値渡し/参照渡しの意味論（8.4節の構造体的な扱いとの整合、配列の`+`が`List`を返す規則との整合）を含めて検討が必要
-3. **`Tuple2〜8`の実行時表現**：フィールド`.0 .1 ...`を持つ、コンパイラが型ごと（要素型の組み合わせごと）に発行する名前付き`STTYPE`が最有力（Weaveの「名前付き代役型」パターン、Cascadeの`struct`実装がそのまま応用できる）。等値比較（`==`はTuple同士も許可されるか要確認——2.2節はTupleにメソッド無しとのみ書かれ比較演算子の扱いは6節の`Ordered`/`Numeric`能力表に明記が無い。仕様側の確認が先に必要）
+3. ✅ **`Tuple2〜8`の実行時表現**：Step 6で確定。下記「確定した設計判断」参照（型ごとに発行する名前付き`STTYPE`、フィールド名`F0`〜、等値比較は許可）
 4. **`enum`（タグ付きバリアント）の実行時表現**：`switch`でのバリアント判定・フィールド取り出し専用（2.2節）、値生成は`型名.バリアント名(...)`という通常の式。Goには直接対応するネイティブ機構が無く、タグ（int）+バリアントごとに異なるフィールド集合、という表現が必要——Cascadeの`error`型実装（コンパイラが自動登録する`STTYPE`）や、複数バリアントを1つの`STTYPE`に全フィールドを`Union`的に持たせる案（Goの構造体は値型なので単純にフィールドを足せる）、複数の`STTYPE`+タグによる判別のどちらが良いか検討する。`switch`のバリアント網羅性検査（コンパイル時にバリアント集合が閉じている）はsemaが担う
 5. **`Set[T]`の実行時表現**：Cascadeの実績（`MPTYPE ^T ^bool`または`^struct{}`相当）をそのまま踏襲できる見込み。要素順序は不定と明記済み（16.2節で解決済みの検討事項）なので、Goのmapイテレーション順序をそのまま使ってよい（Weaveのようにソートで決定的にする必要はない——`toList(_) |> sort`という運用に統一する方針が既に確定している）
 6. **`capability`（組み込み多相）の実装方式**：ユーザーには一切公開されない、コンパイラ内部限定の多相。各呼び出し箇所で引数の静的型からどの実装（`len`ならString/List/Array/Map/Set/Bytes/Chanのどれか）を使うか**コンパイル時に一意に確定**させ、その型専用のコード（ネイティブ命令 or `amiflrt`関数）を直接生成する——ジェネリクスも動的ディスパッチも不要な、最も単純な「多相」（各呼び出しが実質的にモノモーフィックにコンパイルされる）という理解でよいか、実装時に確認する
@@ -197,7 +197,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 3 ✅ | 演算子 | 算術・比較・論理・ビット・シフト・`Concatenable`の`+`、優先順位表の実地検証 | `ADD` `SUB` `MUL` `DIV` `MOD` `BAND` `BOR` `BXOR` `BCLEAR` `BNOT` `SHL` `SHR` `AND` `OR` `NOT` `EQ` `NEQ` `LT` `LTE` `GT` `GTE` `CONCAT` | — |
 | 4 ✅ | 制御構文（式指向） | `if`/`elif`/`else`、`while`、`switch`は`Bool`式のみ（`is Type`/`in [...]`/enumは後続）。**`for`はStep 7へ延期**（ユーザーとの協議で確定——`items`に相当する型〈`List`/`Array`/`Set`/`Map`〉が1つも無い段階では書けないため） | `IF` `ELSE` `ENDIF` `LOOP` `BREAK` `CONTINUE` `ENDLOOP`（`ELIF`は不使用——下記「確定した設計判断」参照） | — |
 | 5 ✅ | 関数・クロージャ | トップレベル`fn`（自己再帰可）、ローカルクロージャー（多引数直接・カリー化なし）、`Func`型 | `FNTYPE` `CLOS` `ENDCLOS` | — |
-| 6 | `Tuple2〜8`・`struct` | タプルリテラル・`.0`等の糖衣、`struct`定義・フィールドアクセス | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` | 設計課題3（Tuple表現） |
+| 6 ✅ | `Tuple2〜8`・`struct` | タプルリテラル・`.0`等の糖衣、`struct`定義・フィールドアクセス | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` | 設計課題3（Tuple表現、下記「確定した設計判断」参照） |
 | 7 | `Array[T;N]`・`List[T]`・`for` | 固定長配列（多次元糖衣込み）、可変長リスト、`x[i]`/`x[i]=v`/`x[a:b]`糖衣。**Step 4から延期した`for x in items { ... }`（`Unit`版のみ、`yield`はStep 9）もここで実装**——`items`に相当する型がこの時点で初めて存在するため | `SLTYPE` `SLMAKE` `SLICE` `ASET` `AGET` | 設計課題2（Array表現） |
 | 8 | `enum`・`switch`拡張 | バリアント定義・値生成、`switch`での判定/フィールド取り出し、バリアント網羅性検査 | （設計課題4の結論による） | **設計課題4（先例無し・最大の山場の1つ）** |
 | 9 | パイプ演算子`|>` | `_`プレースホルダー、`for...yield`糖衣、`|>`の優先順位（最低） | （新規命令無し。糖衣構文） | 設計課題7 |
@@ -363,6 +363,50 @@ Cascadeの`genClosureLitInto`はクロージャー本体用に独立した`funcG
 
 - クロージャー本体の中でさらに`let`束縛のクロージャーを宣言する**ネストしたクロージャー**（`&1-N`と`&2-N`の階層が正しく区別されること、外側のクロージャー引数を内側から素通しで捕捉できること）
 - クロージャーの引数名が外側の`let`と同名で、かつ内側の`let`が未使用というケース——Step 4で踏んだ「amivmの未使用変数自己修復は名前一意性を前提にする」バグ（前項参照）がクロージャーの文脈でも再発しないこと（`freshInternalName`の通し番号カウンタを`funcChecker`全体で共有しているため、クロージャー内外を問わず`%`トークンが衝突しないことがそのまま効いている）
+
+### `Tuple2〜8`は型ごとに発行する名前付き`STTYPE`（フィールド名`F0`〜`F7`）とし、同じ形なら1つの型を使い回す（Step 6で確定・設計課題3の解決）
+
+`Tuple2[A,B]`〜`Tuple8[...]`の実行時表現は、当初の想定どおり「コンパイラが型ごと（要素型の組み合わせごと）に発行する名前付き`STTYPE`」を採用した。フィールド名はAMIVMの`>`プレフィックス（構造体フィールド名）がGoの識別子をそのまま使う以上、`.0`という裸の数字はGoのフィールド名になれない——`F0`, `F1`, ... という合成名にした（`internal/sema/expr.go`の`resolveFieldExpr`が一度だけ`"F" + index`を計算し、`ast.FieldExpr.AmivmField`へ焼き込む。`internal/codegen/structs.go`のcodegen側は同じ規約を独立に知っている必要があり——ast以外を共有しない設計上、sema側の計算結果を読むだけで再計算はしない）。
+
+**重要な最適化判断**：クロージャーのFNTYPE（Step 5、形が同じでも都度新規発行）とは異なり、**タプルは同じ形（同じ要素型の並び）なら1つの`STTYPE`を使い回す**（`internal/codegen/structs.go`の`program.tupleTypes map[string]string`、キーはsemaが組み立てた正規化文字列`"Tuple(T1,T2,...)"`）。理由：タプルは値どうしの`==`比較（後述）や、将来関数シグネチャに現れる可能性（`Tuple2[T, Error]`パターン、Step 11）を考えると、同じ形のタプルが常に同じGo型であることが重要——クロージャーには外部の型注釈と一致させる必要がそもそも無かった（Step 5の`Func`型がユーザー向け注釈構文を持たないため）のに対し、タプルは「同じ形なら同じ型」という直感がユーザー体験上も自然。
+
+**`Tuple(T1,T2,...)`という正規化文字列表現**は`Func`型の`"fn(P1,P2)->R"`（Step 5）と全く同じ発想の内部限定エンコーディング（`internal/sema/types.go`の`makeTupleType`/`tupleTypeParts`/`isTupleType`）。デコードが単純なカンマ分割で安全なのは、**タプル要素の型がタプル自身・`Func`型を持てない**という制約（`resolveTupleLit`が明示的に拒否）を課しているため——ネストしたタプル（`((1,2), 3)`）を許すとカンマの中にカンマが現れ、深さを考慮したパーサーが要る（`Func`型がネストした`Func`引数を禁止したのと全く同じ理由・同じ解決）。ネストしたタプルへの需要が具体的に出た時点で再検討する。
+
+**等値比較（`==`/`!=`）はTuple・struct双方とも許可した**——設計課題3で「仕様側の確認が先に必要」としていた点を、着手時に以下の理由で解決側に倒して確定させた：(a) Goのネイティブ`==`はフィールドが全て比較可能な構造体に対しそのまま使え、Step 6の時点でタプル・struct双方のフィールドはスカラーか別のstruct/tupleに限られる（`List`/`Map`/`Set`/`Func`のような非比較可能な型は要素/フィールドとして使えない設計にしている）ため実装コストがゼロ、(b) Cascadeの先行実装も構造体の`==`比較をサポートしており矛盾しない、(c) 既存の`equalityOps`分岐（`internal/sema/expr.go`）はもともと「同じ型どうしなら許可、`Func`型のみ明示的に除外」という設計になっており、タプル/struct型を除外する理由が無い。`internal/codegen/codegen.go`の`genBinaryValue`はこの比較のために一切変更不要だった——`EQ`/`NEQ`命令はGoの`==`へそのまま落ち、Goの構造体比較セマンティクスをそのまま利用できるため。
+
+### `struct`宣言は関数と同じ「名前だけ先に登録→フィールド解決」の2段階パスで、宣言順序に依存しない相互参照を実現した（Step 6で確定）
+
+Step 5がトップレベル`fn`に対して確立した「シグネチャ収集→本体検査」の2パス構成を、`struct`にもそのまま適用した（`internal/sema/sema.go`の`registerStructName`→`registerStructFields`）。`struct`が2段階に分かれる理由はStep 5の`fn`と全く同じ：あるstructのフィールドが別のstruct型を参照でき（`struct Line { from: Point, to: Point }`）、かつファイル内の宣言順序に依存させたくない——`registerStructName`が全structの「名前」だけを先に`checker.structs`へ登録し終えてから、`registerStructFields`が各structの実際のフィールド型（他structへの前方/後方参照を含む）を解決する。この2フェーズ分割にはCheck関数内で**さらにもう1段階前**に置く必要があった：`const`の型注釈・初期化式がstruct型を参照しうる（`const origin: Point = Point{x:0,y:0}`）ため、`Check`は「structの名前とフィールドを両方確定させてから、`const`を検査する」という順序（Pass 0 → 旧来のconst検査 → Pass 1のfn登録 → Pass 2の本体検査）に組み替えた。
+
+### 型名解決（`canonicalType`/`canonicalReturnType`）をパッケージ関数からcheckerのメソッドへ変更した——struct名がファイルごとの動的な状態になったため（Step 6で確定）
+
+Step 2〜5では`canonicalType`はスカラー型のエイリアス表と固定集合だけを見る、状態を持たないパッケージレベル関数で足りていた。Step 6で「型注釈にstruct名を書ける」機能を追加するには、型解決が`checker.structs`（そのファイルで宣言されたstruct名の集合、動的）を参照する必要があり、これはもはや純粋関数ではいられない——`func canonicalType(name string) (string, bool)`を`func (c *checker) canonicalType(name string) (string, bool)`へ変更し、全呼び出し箇所（`registerFuncSig`・`registerStructFields`・`resolveLetExpr`・`checkClosureBody`・`resolveConstDecl`）を`c.`/`fc.`経由に書き換えた（`funcChecker`が`*checker`を埋め込んでいるため、`fc.canonicalType(...)`はメソッドのプロモーションでそのまま動く）。この変更により、`let p: Point = ...`のような構造体型注釈は、スカラー型注釈と全く同じ解決経路（`checkExpr`の`expected`機構）を素通りする——特別扱いのコードは一切増えていない。
+
+### タプル・struct両方の`.field`アクセスを1つのAST/sema/codegen経路に統一した——コンパイラの誰も「今どっちを見ているか」を二重に判定しない設計（Step 6で確定）
+
+`t.0`（タプル添字）と`p.x`（structフィールド）は構文上どちらも後置`.`であり（3.2節）、意味的にも「あるオフセットの値を読む」という点で同一のAMIVM命令（`FGET`）へ落ちる。これを活かし、`ast.FieldExpr{Target, Field, ResolvedType, AmivmField}`という単一のノードで両方を表現した——パーサー（`internal/parser/parser.go`の`parsePostfixExpr`）は`.`の後がタプル添字（数字トークン）かstructフィールド名（識別子トークン）かを一切区別せず、両方とも生の文字列として`Field`に格納するだけ。区別の唯一の場所は`internal/sema/expr.go`の`resolveFieldExpr`——Targetの型が`isTupleType`ならタプル添字として扱い（範囲外なら型エラー、`AmivmField`に`"F"+index`を焼き込む）、`fc.structs`にあるstruct型ならフィールド名として扱う（`AmivmField`は`Field`そのまま）。**codegen側（`internal/codegen/structs.go`の`genFieldValue`）はこの区別を一切知らない**——sema が既に計算した`AmivmField`をそのまま`FGET`の第3オペランドへ書くだけで、「今Targetがタプルかstructか」を再判定するロジックはcodegenに1行も無い。これはStep 5の`CalleeToken`/`Token`パターン（semaが計算した最終形をASTへ焼き込み、codegenは読むだけ）の直接の延長。
+
+### `if`/`elif`/`while`の条件式中の裸の複合リテラル（`Ident '{' ...`）を禁止した——Goの`exprLev`と同じ手法での曖昧性解消（Step 6で確定・struct導入前から予告されていた課題）
+
+`struct`リテラル（`Point{x:1,y:2}`）の導入により、`if`/`elif`/`while`の条件式パースに以前から予告されていた曖昧性（Step 4の`parseIfExpr`のdocコメントに「a bare `{` can't otherwise be told apart from the start of a struct literal once step 6 adds those」と明記済み）が実際に発生した：`if flag { ... }`の`flag`の直後の`{`は「if本体の開始」であるべきだが、`flag`が（構文解析時点では型が分からないため）struct名かもしれず、パーサーが素朴に「識別子の直後の`{`は常にstructリテラルの開始」と決め打つと、`if flag { ... }`のような最も基本的なコードが壊れる。
+
+Goが全く同じ問題を`if`/`for`/`switch`ヘッダで抱えており、`exprLev`という「今、複合リテラルを構文的に許してよい文脈にいるか」を表す状態をパーサーに持たせて解決している——**AmiFLも同じ手法をそのまま採用した**：`parser`構造体に`noCompositeLit bool`フィールドを追加し、`parseCondExpr`（if/elif/whileの条件をパースする専用ヘルパー、新設）だけがこれを`true`に設定して条件式全体をパースする。条件式の中でも、`(`・関数呼び出しの引数リスト・structリテラル自身のフィールド値・タプルリテラルの要素——つまり明示的な閉じトークンを持つ、曖昧性の生じようがない文脈——に入るたびに、その入れ子区間だけ`noCompositeLit`を`false`に戻す（`defer`で元の値へ復元）。この結果、`if flag { ... }`は`flag`を裸の識別子として読み切ってから`{`をif本体の開始として正しく解釈する一方、`if (Point{x:1,y:2} == other) { ... }`（丸括弧で包めば曖昧性が消える、Go同様の回避策）は正しくstructリテラルとして解釈される——両方とも`examples/tuples_structs.aml`で実地検証済み。
+
+### `struct`/タプルのフィールドは読み取り専用（`FGET`のみ）——`FSET`はリテラル構築時の内部実装としてのみ使い、フィールド代入構文（`p.x = 5`）はStep 6のスコープに含めなかった（Step 6で確定・意図的なスコープ限定）
+
+CLAUDE.mdの実装ステップ計画がStep 6で実証を想定する命令に`FSET`が含まれているが、これは構造体リテラル`Point{x:1,y:2}`自体のコード生成（ゼロ値の`VAR`を1つ確保し、フィールドごとに`FSET`で書き込んでいく——Cascadeの構造体リテラル実装パターンそのもの、`cascade_implementation_notes.md`で確認済み）で使われるのであって、ユーザーが書ける構文としての「フィールド代入」（`p.x = 5`）ではない。後者は今回実装していない——`ast.AssignExpr`の文法は`裸の識別子 '=' expr`のみで（Step 2以来変更なし）、`t.field = v`という構文はパーサーが受け付けず、書くと（`t.field`をパースした後に`=`が浮いた状態で残り）汎用の構文エラーになる。フィールドを書き換えたい場面は「新しい値を持つ構造体を作り直す」という関数型的なスタイル（`concept.md`の「データを引数として取り、新しいデータを返す素直な関数操作」という設計方針とも整合）で足りると判断し、ミュータブルなフィールド代入構文は具体的な必要が出るまで先送りにした——`FSET`を実装しないという意味ではなく、**ユーザー向けの構文としては提供しない**という限定である。
+
+### タプルリテラルの型注釈構文（`Tuple2[Int,String]`のような書き方）は実装しなかった——`Func`型と同じ理由によるスコープ限定（Step 6で確定）
+
+Step 5が`Func`型（`fn(T1,T2)->R`）についてユーザー向け型注釈構文を実装しなかった判断（クロージャーリテラル自身が完全に自己記述的なので冗長）と同じ理由で、`Tuple2[Int,String]`のようなブラケットジェネリクス構文の型注釈もパーサーに実装していない。タプルリテラル`(1, "a")`自体が要素の型を完全に決定するため、`let t: Tuple2[Int,String] = (1, "a")`と書く動機が薄く、しかも`[...]`ジェネリクス構文は`Array[T;N]`・`List[T]`・`Map[K,V]`（Step 7・10）とも共有されうる複雑な文法要素——単独の`Tuple`だけのために先行実装するコストに見合わない。結果として、`let`の値がタプルリテラルの場合は型注釈を一切書けない（書こうとすると`canonicalType`が構造体/スカラーいずれにも一致せず「unknown type」エラーになる——`ClosureLit`のような専用の早期拒否チェックすら不要で、既存の型名解決が自然に拒否してくれる）。ブラケットジェネリクス構文が必要になるStep 7で改めて設計する。
+
+### `const`の初期化式にタプル・struct両方のリテラルを許可した——`requireConstExpr`への自然な再帰拡張（Step 6で確定）
+
+`const`の初期化式が「リテラル・const参照・それらの演算」に限定される既存ルール（`internal/sema/expr.go`の`requireConstExpr`、Step 2〜3で確立）へ、`TupleLit`（各要素が同条件を満たす）・`StructLit`（各フィールド値が同条件を満たす）・`FieldExpr`（Targetが同条件を満たす）を再帰的に受理するケースを追加した。既存の`BinaryExpr`/`UnaryExpr`の再帰パターンをそのままなぞるだけの拡張で実装コストがほぼ無かったため、あえて禁止する理由もなく許可した——`const origin: Point = Point{x: 0, y: 0}`のような定数構造体が使えることを`examples/tuples_structs.aml`で実地検証済み（`const`はStep 2以来ランタイムストレージを持たず参照箇所で式が再生成される規約のままなので、struct/tupleのconstも同様に参照のたびに`VAR`+`FSET`が再生成される——副作用の無い構築なので実害無し）。
+
+### 実地検証（`amivm`→`go build`→実行）で確認した項目（Step 6）
+
+`examples/tuples_structs.aml`で以下を確認済み：ネストしたstruct（`Line`が`Point`型のフィールドを2つ持つ）とそのフィールドチェーンアクセス（`l.from.x`相当、`sumX`関数内）、関数の引数・戻り値としてのstruct型（`makePoint`・`sumX`）、struct等値比較（`==`）、3要素・2要素タプルリテラルとその添字アクセス（`.0`/`.1`/`.2`）、タプル要素に`String`/`Bool`を含む異種混合、`const`束縛のstructリテラルとそのフィールドアクセス、`if flag { ... }`（裸のBool識別子条件、複合リテラルと誤読されないこと）と`if (Point{...} == p) { ... }`（丸括弧で包んだ複合リテラル条件が正しく複合リテラルとして解釈されること）の両方。生成されたGoコードを目視確認し、`Point`/`Line`が素直な`struct`型、タプルが`AmiflTuple1`/`AmiflTuple2`/`AmiflTuple3`という合成名の`struct`型（フィールド`F0`,`F1`,...）へコンパイルされていることを確認。実行結果は出力5行（"same" / "flag was true" / "parenthesized struct literal in condition works" / "origin ok" / "info"）と終了コード40（`xs=4, tx=1, ty=2, tz=3, a=10, b=20`の合計）が手計算と一致することを確認。
 
 ## 開発の進め方
 

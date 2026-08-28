@@ -37,15 +37,23 @@ var scalarTypes = map[string]bool{
 const unitType = "Unit"
 
 // canonicalType resolves a type-annotation identifier to its canonical
-// scalar type name, or reports it as unknown.
-func canonicalType(name string) (string, bool) {
+// type name: a scalar (via typeAliases/scalarTypes) or, since step 6, a
+// user-declared `struct` name (c.structs — always its own name verbatim,
+// never aliased). This is a *checker* method, not a free function, exactly
+// because struct names are per-file state collected while checking a
+// particular file — step 2 through step 5 had no such state and could get
+// away with a package-level function, but step 6's struct names can't.
+func (c *checker) canonicalType(name string) (string, bool) {
 	if alias, ok := typeAliases[name]; ok {
 		name = alias
 	}
-	if !scalarTypes[name] {
-		return "", false
+	if scalarTypes[name] {
+		return name, true
 	}
-	return name, true
+	if _, ok := c.structs[name]; ok {
+		return name, true
+	}
+	return "", false
 }
 
 // canonicalReturnType is canonicalType plus one extra case usable only in
@@ -56,11 +64,11 @@ func canonicalType(name string) (string, bool) {
 // deliberately not a type a user can write (see unitType's doc comment;
 // it's still not accepted for a `let`/const annotation or a parameter
 // type, both of which go through plain canonicalType, unchanged).
-func canonicalReturnType(name string) (string, bool) {
+func (c *checker) canonicalReturnType(name string) (string, bool) {
 	if name == "Unit" {
 		return unitType, true
 	}
-	return canonicalType(name)
+	return c.canonicalType(name)
 }
 
 // makeFuncType/funcTypeParts/isFuncType encode a closure's signature as
@@ -95,6 +103,32 @@ func funcTypeParts(t string) (params []string, ret string, ok bool) {
 		params = strings.Split(paramsRaw, ",")
 	}
 	return params, ret, true
+}
+
+// makeTupleType/tupleTypeParts/isTupleType encode a TupleLit's shape as
+// "Tuple(T1,T2,...)" (Ti already-canonical scalar or struct type names) —
+// an internal sema/codegen convention exactly mirroring makeFuncType above,
+// with the identical reason a naive comma-split decoding stays safe:
+// sema's resolveTupleLit rejects any element whose own type isTupleType or
+// isFuncType (ast.TupleLit's doc comment), so no Ti can itself contain a
+// "," or ")" that would need bracket-depth-aware parsing to undo.
+func makeTupleType(elems []string) string {
+	return "Tuple(" + strings.Join(elems, ",") + ")"
+}
+
+func isTupleType(t string) bool {
+	return strings.HasPrefix(t, "Tuple(")
+}
+
+func tupleTypeParts(t string) (elems []string, ok bool) {
+	if !isTupleType(t) {
+		return nil, false
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(t, "Tuple("), ")")
+	if inner == "" {
+		return nil, true
+	}
+	return strings.Split(inner, ","), true
 }
 
 func isIntType(name string) bool {

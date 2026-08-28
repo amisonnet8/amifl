@@ -2,6 +2,8 @@ package sema
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/amisonnet8/amifl/internal/ast"
 )
@@ -58,6 +60,12 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 		return fc.resolveBreakExpr(v)
 	case *ast.ContinueExpr:
 		return fc.resolveContinueExpr(v)
+	case *ast.TupleLit:
+		return fc.resolveTupleLit(v)
+	case *ast.StructLit:
+		return fc.resolveStructLit(v)
+	case *ast.FieldExpr:
+		return fc.resolveFieldExpr(v)
 	case *ast.ClosureLit:
 		// A ClosureLit only ever reaches resolveType from somewhere other
 		// than resolveLetExpr's own dedicated check (which intercepts it
@@ -197,7 +205,7 @@ func (fc *funcChecker) resolveLetExpr(v *ast.LetExpr) (string, error) {
 
 	var expected string
 	if v.Type != "" {
-		t, ok := canonicalType(v.Type)
+		t, ok := fc.canonicalType(v.Type)
 		if !ok {
 			return "", fmt.Errorf("line %d: unknown type %q", v.Line, v.Type)
 		}
@@ -719,7 +727,7 @@ func (fc *funcChecker) checkClosureBody(v *ast.ClosureLit, depth int) (string, e
 			return "", fmt.Errorf("line %d: duplicate parameter %q", p.Line, p.Name)
 		}
 		seen[p.Name] = true
-		pt, ok := canonicalType(p.Type)
+		pt, ok := fc.canonicalType(p.Type)
 		if !ok {
 			return "", fmt.Errorf("line %d: unknown type %q", p.Line, p.Type)
 		}
@@ -731,7 +739,7 @@ func (fc *funcChecker) checkClosureBody(v *ast.ClosureLit, depth int) (string, e
 		paramTypes = append(paramTypes, pt)
 	}
 
-	retType, ok := canonicalReturnType(v.ReturnType)
+	retType, ok := fc.canonicalReturnType(v.ReturnType)
 	if !ok {
 		return "", fmt.Errorf("line %d: unknown type %q", v.Line, v.ReturnType)
 	}
@@ -743,6 +751,112 @@ func (fc *funcChecker) checkClosureBody(v *ast.ClosureLit, depth int) (string, e
 	typ := makeFuncType(paramTypes, retType)
 	v.ResolvedType = typ
 	return typ, nil
+}
+
+// resolveTupleLit type-checks `(v1, v2, ...)` (amifl-spec.md section 2.2).
+// Every element resolves its own type independent of any surrounding
+// `expected` context (like a CallExpr or ClosureLit's own type — nothing
+// here for an untyped literal element to adapt *to* beyond its own
+// default, since a tuple's type is entirely determined by its contents).
+// Elements whose own type is itself a Tuple or a Func are rejected — see
+// ast.TupleLit's doc comment for why (keeps makeTupleType's encoding a
+// flat, unambiguous comma-join).
+func (fc *funcChecker) resolveTupleLit(v *ast.TupleLit) (string, error) {
+	if len(v.Elems) < 2 || len(v.Elems) > 8 {
+		return "", fmt.Errorf("line %d: a tuple must have 2 to 8 elements (amifl-spec.md section 2.2, Tuple2~Tuple8), got %d", v.Line, len(v.Elems))
+	}
+	elemTypes := make([]string, len(v.Elems))
+	for i, e := range v.Elems {
+		t, err := fc.checkExpr(e, "")
+		if err != nil {
+			return "", err
+		}
+		if t == unitType {
+			return "", fmt.Errorf("line %d: a tuple element cannot be Unit-typed", e.Pos())
+		}
+		if isTupleType(t) || isFuncType(t) {
+			return "", fmt.Errorf("line %d: a tuple element cannot itself be a tuple or a function value (nested tuples aren't supported yet)", e.Pos())
+		}
+		elemTypes[i] = t
+	}
+	typ := makeTupleType(elemTypes)
+	v.ResolvedType = typ
+	return typ, nil
+}
+
+// resolveStructLit type-checks `TypeName{field1: v1, ...}` (amifl-spec.md
+// section 2.2/8.4): TypeName must be a declared struct, every one of its
+// fields must be given exactly once (in any order — matched by name, not
+// position), and each value is checked against its field's declared type
+// (so an untyped literal value adapts to that field's type exactly like a
+// `let`'s initializer would).
+func (fc *funcChecker) resolveStructLit(v *ast.StructLit) (string, error) {
+	info, ok := fc.structs[v.TypeName]
+	if !ok {
+		return "", fmt.Errorf("line %d: undefined struct type %q", v.Line, v.TypeName)
+	}
+	seen := map[string]bool{}
+	for i := range v.Fields {
+		f := &v.Fields[i]
+		if seen[f.Name] {
+			return "", fmt.Errorf("line %d: duplicate field %q in %s literal", f.Line, f.Name, v.TypeName)
+		}
+		seen[f.Name] = true
+		fieldTyp, ok := info.fieldType(f.Name)
+		if !ok {
+			return "", fmt.Errorf("line %d: struct %s has no field %q", f.Line, v.TypeName, f.Name)
+		}
+		if _, err := fc.checkExpr(f.Value, fieldTyp); err != nil {
+			return "", err
+		}
+	}
+	if len(seen) != len(info.Fields) {
+		var missing []string
+		for _, fld := range info.Fields {
+			if !seen[fld.Name] {
+				missing = append(missing, fld.Name)
+			}
+		}
+		return "", fmt.Errorf("line %d: %s literal is missing field(s): %s", v.Line, v.TypeName, strings.Join(missing, ", "))
+	}
+	v.ResolvedType = v.TypeName
+	return v.TypeName, nil
+}
+
+// resolveFieldExpr type-checks postfix `target.field` (amifl-spec.md
+// section 3.2) — tuple index sugar when Target's type is a Tuple, ordinary
+// struct field access when it's a struct. Either way it computes and
+// stores AmivmField, the exact string codegen writes after FGET's `>`
+// prefix (ast.FieldExpr's doc comment) — a synthesized "F0"/"F1"/... for a
+// tuple index (Go struct fields can't be named with a bare digit) or Field
+// verbatim for a struct, since codegen has no vocabulary of its own to
+// tell a Tuple's encoded ResolvedType apart from a struct's (see
+// makeTupleType's doc comment on why that stays sema-internal).
+func (fc *funcChecker) resolveFieldExpr(v *ast.FieldExpr) (string, error) {
+	targetTyp, err := fc.checkExpr(v.Target, "")
+	if err != nil {
+		return "", err
+	}
+	if isTupleType(targetTyp) {
+		elems, _ := tupleTypeParts(targetTyp)
+		idx, convErr := strconv.Atoi(v.Field)
+		if convErr != nil || idx < 0 || idx >= len(elems) {
+			return "", fmt.Errorf("line %d: tuple has no field .%s (it has %d element(s), .0 to .%d)", v.Line, v.Field, len(elems), len(elems)-1)
+		}
+		v.ResolvedType = elems[idx]
+		v.AmivmField = fmt.Sprintf("F%d", idx)
+		return v.ResolvedType, nil
+	}
+	if info, ok := fc.structs[targetTyp]; ok {
+		fieldTyp, ok := info.fieldType(v.Field)
+		if !ok {
+			return "", fmt.Errorf("line %d: struct %s has no field %q", v.Line, targetTyp, v.Field)
+		}
+		v.ResolvedType = fieldTyp
+		v.AmivmField = v.Field
+		return fieldTyp, nil
+	}
+	return "", fmt.Errorf("line %d: type %s has no fields to access with '.'", v.Line, targetTyp)
 }
 
 // resolveConstDecl type-checks a const declaration's initializer and
@@ -763,7 +877,7 @@ func (fc *funcChecker) checkClosureBody(v *ast.ClosureLit, depth int) (string, e
 func resolveConstDecl(fc *funcChecker, d *ast.ConstDecl) (string, ast.Expr, error) {
 	var expected string
 	if d.Type != "" {
-		t, ok := canonicalType(d.Type)
+		t, ok := fc.canonicalType(d.Type)
 		if !ok {
 			return "", nil, fmt.Errorf("line %d: unknown type %q", d.Line, d.Type)
 		}
@@ -803,6 +917,22 @@ func requireConstExpr(e ast.Expr) error {
 		return requireConstExpr(v.Right)
 	case *ast.UnaryExpr:
 		return requireConstExpr(v.Operand)
+	case *ast.TupleLit:
+		for _, e := range v.Elems {
+			if err := requireConstExpr(e); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *ast.StructLit:
+		for _, f := range v.Fields {
+			if err := requireConstExpr(f.Value); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *ast.FieldExpr:
+		return requireConstExpr(v.Target)
 	default:
 		return fmt.Errorf("must be a literal, a const reference, or an operator expression over those")
 	}

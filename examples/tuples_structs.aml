@@ -1,0 +1,55 @@
+struct Point {
+    x: Int,
+    y: Int
+}
+
+struct Line {
+    from: Point,
+    to: Point
+}
+
+fn makePoint(x: Int, y: Int) -> Point {
+    Point{x: x, y: y}
+}
+
+fn sumX(l: Line) -> Int {
+    l.from.x + l.to.x
+}
+
+const origin: Point = Point{x: 0, y: 0}
+
+fn main() -> Int {
+    let p1 = Point{x: 1, y: 2}
+    let p2 = makePoint(3, 4)
+    let line = Line{from: p1, to: p2}
+    let xs = sumX(line)
+
+    let same = Point{x: 1, y: 2} == p1
+    print(if same { "same" } else { "different" })
+
+    let flag = true
+    if flag {
+        print("flag was true")
+    }
+
+    if (Point{x: 1, y: 2} == p1) {
+        print("parenthesized struct literal in condition works")
+    }
+
+    let t = (1, 2, 3)
+    let tx = t.0
+    let ty = t.1
+    let tz = t.2
+
+    let pair = (10, 20)
+    let a = pair.0
+    let b = pair.1
+
+    let usesOrigin = origin.x == 0
+    print(if usesOrigin { "origin ok" } else { "origin bad" })
+
+    let tup2 = (100, "info")
+    print(tup2.1)
+
+    xs + tx + ty + tz + a + b
+}

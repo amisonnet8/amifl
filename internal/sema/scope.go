@@ -46,12 +46,40 @@ type funcSig struct {
 	ret    string
 }
 
+// structInfo is a top-level `struct`'s resolved shape (amifl-spec.md
+// section 2.2), registered once per file — before any function body or
+// other struct's own fields are checked, the same forward-reference-
+// friendly two-pass approach funcSig uses for `fn` (registerStructName
+// records the name alone; registerStructFields fills Fields once every
+// struct name in the file is already known, so one struct's field may
+// reference another declared later, or even earlier, in the file).
+type structInfo struct {
+	Name   string
+	Fields []fieldInfo
+}
+
+type fieldInfo struct {
+	Name string
+	Typ  string
+}
+
+// fieldType looks up one field's canonical type by name.
+func (s *structInfo) fieldType(name string) (string, bool) {
+	for _, f := range s.Fields {
+		if f.Name == name {
+			return f.Typ, true
+		}
+	}
+	return "", false
+}
+
 // checker holds state shared across an entire file: the global
-// (top-level) const bindings and the top-level `fn` signature table, both
-// visible to every function.
+// (top-level) const bindings, the top-level `fn` signature table, and the
+// top-level `struct` shape table, all visible to every function.
 type checker struct {
 	globals map[string]*binding
 	funcs   map[string]funcSig
+	structs map[string]*structInfo
 }
 
 // scope is one lexical block's bindings, chained to its enclosing scope

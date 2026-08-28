@@ -27,6 +27,21 @@ type parser struct {
 	lx    *lexer.Lexer
 	cur   lexer.Token
 	ahead *lexer.Token
+	// noCompositeLit suppresses treating `Ident '{'` as the start of a
+	// struct literal (ast.StructLit) — set only while parsing an if/elif/
+	// while condition, the one position a bare `{` is genuinely ambiguous
+	// between "start of a struct literal" and "start of the following
+	// block" (Go has the identical ambiguity and resolves it the same way:
+	// disallow an unparenthesized composite literal in a condition, still
+	// allow one wrapped in parens or nested inside any other delimiter —
+	// call args, a struct literal's own field values, a tuple literal's
+	// elements, since all of those already have an unambiguous closing
+	// token of their own). Every place that enters such an unambiguous
+	// context (the LParen branch of parsePrimaryExpr, parseCallArgs,
+	// parseStructLit) saves and clears this around its own parsing, so
+	// nesting composes correctly with no stack needed beyond the call
+	// stack itself.
+	noCompositeLit bool
 }
 
 func (p *parser) advance() error {
@@ -107,9 +122,38 @@ func (p *parser) parseTopLevelDecl() (ast.TopLevelDecl, error) {
 		return p.parseFuncDecl()
 	case lexer.KwConst:
 		return p.parseConstDecl()
+	case lexer.KwStruct:
+		return p.parseStructDecl()
 	default:
-		return nil, p.errorf("expected 'fn' or 'const' at top level, got %s", p.cur.Kind)
+		return nil, p.errorf("expected 'fn', 'const', or 'struct' at top level, got %s", p.cur.Kind)
 	}
+}
+
+// parseStructDecl parses `struct Name { field1: Type1, field2: Type2, ... }`
+// (amifl-spec.md section 2.2) — a field list with the exact same grammar
+// as parseParamList (comma-separated `name: Type`, single-line, no field
+// defaults), reused as ast.Param entries since a struct field and a
+// function parameter share every attribute that matters here.
+func (p *parser) parseStructDecl() (*ast.StructDecl, error) {
+	kwTok, err := p.expect(lexer.KwStruct)
+	if err != nil {
+		return nil, err
+	}
+	nameTok, err := p.expect(lexer.Ident)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.LBrace); err != nil {
+		return nil, err
+	}
+	fields, err := p.parseFieldTypeList(lexer.RBrace)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RBrace); err != nil {
+		return nil, err
+	}
+	return &ast.StructDecl{Name: nameTok.Value, Fields: fields, Line: kwTok.Line}, nil
 }
 
 func (p *parser) parseFuncDecl() (*ast.FuncDecl, error) {
@@ -151,8 +195,31 @@ func (p *parser) parseFuncDecl() (*ast.FuncDecl, error) {
 // isn't supported yet, so this never recurses into fn-type parsing the
 // way a hypothetical parseType would.
 func (p *parser) parseParamList() ([]ast.Param, error) {
-	var params []ast.Param
-	if p.cur.Kind != lexer.RParen {
+	fields, err := p.parseFieldTypeList(lexer.RParen)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RParen); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
+// parseFieldTypeList parses zero or more comma-separated `name: Type`
+// entries up to (but not consuming) end — the shared grammar behind both
+// a parameter list (parseParamList, terminated by `)`) and a `struct`
+// field list (parseStructDecl, terminated by `}`). Newlines are skipped
+// after the opening delimiter, after each comma, and before end, so a
+// struct's fields (unlike a `fn`'s, which are normally short enough to fit
+// one line) can be laid out one per line — the natural style once a
+// struct has more than a couple of fields, and how amifl-spec.md itself
+// formats `enum`'s analogous variant list (section 2.2).
+func (p *parser) parseFieldTypeList(end lexer.Kind) ([]ast.Param, error) {
+	if err := p.skipNewlines(); err != nil {
+		return nil, err
+	}
+	var fields []ast.Param
+	if p.cur.Kind != end {
 		for {
 			nameTok, err := p.expect(lexer.Ident)
 			if err != nil {
@@ -165,19 +232,22 @@ func (p *parser) parseParamList() ([]ast.Param, error) {
 			if err != nil {
 				return nil, err
 			}
-			params = append(params, ast.Param{Name: nameTok.Value, Type: typeTok.Value, Line: nameTok.Line})
+			fields = append(fields, ast.Param{Name: nameTok.Value, Type: typeTok.Value, Line: nameTok.Line})
 			if p.cur.Kind != lexer.Comma {
 				break
 			}
 			if err := p.advance(); err != nil {
 				return nil, err
 			}
+			if err := p.skipNewlines(); err != nil {
+				return nil, err
+			}
+		}
+		if err := p.skipNewlines(); err != nil {
+			return nil, err
 		}
 	}
-	if _, err := p.expect(lexer.RParen); err != nil {
-		return nil, err
-	}
-	return params, nil
+	return fields, nil
 }
 
 // parseClosureLit parses `fn(params) -> R { body }` as an expression
@@ -403,7 +473,7 @@ func (p *parser) parseUnaryExpr() (ast.Expr, error) {
 	case lexer.Tilde:
 		op = "~"
 	default:
-		return p.parsePrimaryExpr()
+		return p.parsePostfixExpr()
 	}
 	tok := p.cur
 	if err := p.advance(); err != nil {
@@ -414,6 +484,39 @@ func (p *parser) parseUnaryExpr() (ast.Expr, error) {
 		return nil, err
 	}
 	return &ast.UnaryExpr{Op: op, Operand: operand, Line: tok.Line}, nil
+}
+
+// parsePostfixExpr parses a primary expression followed by zero or more
+// `.field` accesses (amifl-spec.md section 3.2: tuple index sugar `t.0`,
+// `t.1`, ... and ordinary struct field access, both the same ast.FieldExpr
+// node — see its doc comment) — the highest-precedence level in section
+// 6's table (`() . [] 関数呼び出し 後置?`), above unary. Call parsing
+// (`f(...)`) already happens one level down inside parsePrimaryExpr
+// (parseIdentOrCall), so a chain like `f(x).0.y` composes for free: each
+// `.field` simply wraps whatever parsePrimaryExpr already produced.
+func (p *parser) parsePostfixExpr() (ast.Expr, error) {
+	expr, err := p.parsePrimaryExpr()
+	if err != nil {
+		return nil, err
+	}
+	for p.cur.Kind == lexer.Dot {
+		dotLine := p.cur.Line
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		var field string
+		switch p.cur.Kind {
+		case lexer.Int, lexer.Ident:
+			field = p.cur.Value
+		default:
+			return nil, p.errorf("expected a field name or tuple index after '.', got %s", p.cur.Kind)
+		}
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		expr = &ast.FieldExpr{Target: expr, Field: field, Line: dotLine}
+	}
+	return expr, nil
 }
 
 func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
@@ -453,17 +556,7 @@ func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
 	case lexer.Ident:
 		return p.parseIdentOrCall()
 	case lexer.LParen:
-		if err := p.advance(); err != nil {
-			return nil, err
-		}
-		inner, err := p.parseOrExpr()
-		if err != nil {
-			return nil, err
-		}
-		if _, err := p.expect(lexer.RParen); err != nil {
-			return nil, err
-		}
-		return inner, nil
+		return p.parseParenOrTupleExpr()
 	case lexer.KwIf:
 		return p.parseIfExpr()
 	case lexer.KwSwitch:
@@ -489,12 +582,24 @@ func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
 	}
 }
 
+// parseCondExpr parses an if/elif/while condition: parseOrExpr (never
+// parseExpr — conditions deliberately stay at "any operator expression"
+// and never reach statement-only forms: let/const/assign/discard), with
+// noCompositeLit set so a bare `Ident '{'` right at the end of the
+// condition is left for the following block to consume rather than being
+// swallowed as a struct literal — see noCompositeLit's doc comment on the
+// parser struct for the ambiguity this resolves (identical to Go's own
+// "no composite literal in an if/for header" rule, and for the same
+// reason).
+func (p *parser) parseCondExpr() (ast.Expr, error) {
+	saved := p.noCompositeLit
+	p.noCompositeLit = true
+	defer func() { p.noCompositeLit = saved }()
+	return p.parseOrExpr()
+}
+
 // parseIfExpr parses `if cond { ... } [elif cond { ... }]* [else { ... }]?`
-// (amifl-spec.md section 7). The condition is parsed with parseOrExpr, not
-// parseExpr — a bare `{` can't otherwise be told apart from the start of
-// a struct literal once step 6 adds those, so conditions deliberately stay
-// at "any operator expression" and never reach statement-only forms
-// (let/const/assign/discard) or a leading `{`.
+// (amifl-spec.md section 7).
 //
 // `elif`/`else` must directly follow the previous branch's closing `}` on
 // the same line — parseOptionalElse never skips a Newline to look for one
@@ -508,7 +613,7 @@ func (p *parser) parseIfExpr() (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-	cond, err := p.parseOrExpr()
+	cond, err := p.parseCondExpr()
 	if err != nil {
 		return nil, err
 	}
@@ -530,7 +635,7 @@ func (p *parser) parseOptionalElse() (ast.ElseBody, error) {
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
-		cond, err := p.parseOrExpr()
+		cond, err := p.parseCondExpr()
 		if err != nil {
 			return nil, err
 		}
@@ -562,7 +667,7 @@ func (p *parser) parseWhileExpr() (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-	cond, err := p.parseOrExpr()
+	cond, err := p.parseCondExpr()
 	if err != nil {
 		return nil, err
 	}
@@ -731,7 +836,9 @@ func (p *parser) parseDiscardExpr() (ast.Expr, error) {
 }
 
 // parseIdentOrCall parses whatever follows a plain identifier used as a
-// value: a call (`name(...)`) or a bare variable read. Reassignment
+// value: a call (`name(...)`), a struct literal (`Name{...}` — amifl-spec.md
+// section 2.2, suppressed by noCompositeLit inside an if/elif/while
+// condition, see its doc comment), or a bare variable read. Reassignment
 // (`name = expr`) is recognized earlier, at statement position in
 // parseExpr, and never reaches here (see parseExpr's doc comment).
 func (p *parser) parseIdentOrCall() (ast.Expr, error) {
@@ -742,6 +849,9 @@ func (p *parser) parseIdentOrCall() (ast.Expr, error) {
 	if p.cur.Kind == lexer.LParen {
 		return p.parseCallArgs(nameTok)
 	}
+	if p.cur.Kind == lexer.LBrace && !p.noCompositeLit {
+		return p.parseStructLit(nameTok)
+	}
 	return &ast.IdentExpr{Name: nameTok.Value, Line: nameTok.Line}, nil
 }
 
@@ -749,6 +859,10 @@ func (p *parser) parseCallArgs(nameTok lexer.Token) (ast.Expr, error) {
 	if _, err := p.expect(lexer.LParen); err != nil {
 		return nil, err
 	}
+	saved := p.noCompositeLit
+	p.noCompositeLit = false
+	defer func() { p.noCompositeLit = saved }()
+
 	var args []ast.Expr
 	if p.cur.Kind != lexer.RParen {
 		for {
@@ -769,4 +883,88 @@ func (p *parser) parseCallArgs(nameTok lexer.Token) (ast.Expr, error) {
 		return nil, err
 	}
 	return &ast.CallExpr{Callee: nameTok.Value, Args: args, Line: nameTok.Line}, nil
+}
+
+// parseParenOrTupleExpr parses `(` already having been seen: either a
+// parenthesized grouping `(expr)` (no comma at all — returned as just the
+// inner expression, exactly as before step 6) or a tuple literal `(v1, v2,
+// ...)` (amifl-spec.md section 2.2), told apart by whether a comma ever
+// follows the first element. A trailing comma right after the first (and
+// only) element — `(x,)` — produces a 1-element ast.TupleLit; sema rejects
+// that arity (see TupleLit's doc comment for why the parser doesn't).
+func (p *parser) parseParenOrTupleExpr() (ast.Expr, error) {
+	openLine := p.cur.Line
+	if err := p.advance(); err != nil { // consume '('
+		return nil, err
+	}
+	saved := p.noCompositeLit
+	p.noCompositeLit = false
+	defer func() { p.noCompositeLit = saved }()
+
+	first, err := p.parseOrExpr()
+	if err != nil {
+		return nil, err
+	}
+	elems := []ast.Expr{first}
+	sawComma := false
+	for p.cur.Kind == lexer.Comma {
+		sawComma = true
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		if p.cur.Kind == lexer.RParen {
+			break
+		}
+		elem, err := p.parseOrExpr()
+		if err != nil {
+			return nil, err
+		}
+		elems = append(elems, elem)
+	}
+	if _, err := p.expect(lexer.RParen); err != nil {
+		return nil, err
+	}
+	if !sawComma {
+		return first, nil
+	}
+	return &ast.TupleLit{Elems: elems, Line: openLine}, nil
+}
+
+// parseStructLit parses `Name{field1: v1, field2: v2, ...}` — nameTok is
+// the already-consumed type name, `{` is next.
+func (p *parser) parseStructLit(nameTok lexer.Token) (ast.Expr, error) {
+	if _, err := p.expect(lexer.LBrace); err != nil {
+		return nil, err
+	}
+	saved := p.noCompositeLit
+	p.noCompositeLit = false
+	defer func() { p.noCompositeLit = saved }()
+
+	var fields []ast.StructLitField
+	if p.cur.Kind != lexer.RBrace {
+		for {
+			fieldNameTok, err := p.expect(lexer.Ident)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.Colon); err != nil {
+				return nil, err
+			}
+			val, err := p.parseOrExpr()
+			if err != nil {
+				return nil, err
+			}
+			fields = append(fields, ast.StructLitField{Name: fieldNameTok.Value, Value: val, Line: fieldNameTok.Line})
+			if p.cur.Kind != lexer.Comma {
+				break
+			}
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RBrace); err != nil {
+		return nil, err
+	}
+	return &ast.StructLit{TypeName: nameTok.Value, Fields: fields, Line: nameTok.Line}, nil
 }

@@ -27,6 +27,13 @@ import (
 type program struct {
 	typeHeader strings.Builder
 	closureSeq int
+
+	// tupleTypes/tupleSeq back structs.go's tupleGoTypeName — a tuple
+	// shape's synthesized STTYPE, unlike a closure's FNTYPE, is minted
+	// once per distinct canonical shape and reused (see resolveGoType's
+	// doc comment for why).
+	tupleTypes map[string]string
+	tupleSeq   int
 }
 
 // newFuncTypeDecl emits one FNTYPE line for a closure shaped by
