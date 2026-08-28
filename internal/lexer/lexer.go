@@ -25,6 +25,7 @@ var keywords = map[string]Kind{
 	"enum":     KwEnum,
 	"for":      KwFor,
 	"in":       KwIn,
+	"yield":    KwYield,
 }
 
 // Lexer tokenizes AmiFL source text one Token at a time via Next.
@@ -132,6 +133,9 @@ func (l *Lexer) Next() (Token, error) {
 	case c == '|' && l.byteAt(1) == '|':
 		l.pos += 2
 		return Token{Kind: OrOr, Line: line}, nil
+	case c == '|' && l.byteAt(1) == '>':
+		l.pos += 2
+		return Token{Kind: PipeArrow, Line: line}, nil
 	case c == '|':
 		l.pos++
 		return Token{Kind: Pipe, Line: line}, nil

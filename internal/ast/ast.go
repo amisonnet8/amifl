@@ -264,7 +264,12 @@ type IdentExpr struct {
 // AmiFL has no syntax for calling the result of an arbitrary expression
 // (`(fn(x: Int) -> Int { x })(5)` isn't reachable — parseIdentOrCall only
 // ever produces a CallExpr from a bare identifier), so Callee never needs
-// to generalize beyond a name.
+// to generalize beyond a name. Step 9's `|>` (amifl-spec.md section 9) is
+// the one other producer of this node: `a |> f`/`a |> f(_, b)` desugar at
+// parse time straight into a CallExpr exactly as if the user had written
+// `f(a)`/`f(a, b)` by hand (parser's parsePipeRHS) — sema and codegen
+// never know a pipe was involved at all, requiring no code of their own
+// for the common case (CLAUDE.md's design-issue-7 prediction).
 type CallExpr struct {
 	Callee string
 	Args   []Expr
@@ -474,17 +479,35 @@ type SliceExpr struct {
 	ResolvedType string // filled by sema: always makeListType(elemType)
 }
 
-// ForExpr is `for x in items { ... }` (amifl-spec.md section 7): always
-// Unit-typed, side-effect-only. The `yield` form (a `map` pipeline sugar,
-// amifl-spec.md section 7) is step 9's job — this node has no field for
-// it, since step 7 never produces one. Items must be a List[T] or
-// Array[T;N] (the only iterable collection types that exist yet); break/
-// continue inside Body act on this loop exactly like WhileExpr's (same
-// loopDepth bookkeeping, never crossing a closure boundary).
+// ForExpr is `for x in items { ... }` (amifl-spec.md section 7, Body set,
+// Yield nil) — always Unit-typed, side-effect-only — or (step 9)
+// `for x in items yield expr` (Yield set, Body nil): amifl-spec.md's own
+// stated equivalence to `items |> map(x => expr)`, but codegen compiles it
+// directly into a length-preallocated List built by a single loop
+// (genForYieldValue) rather than literally generating a call to a builtin
+// named `map` — the general capability-dispatched builtin-function
+// machinery `map`/`filter`/etc. (2.3/13.4節) doesn't exist until step 11,
+// mirroring step 7's identical reasoning for why `x[i]` compiles directly
+// to AGET instead of routing through a named `at` function. Body and
+// Yield are mutually exclusive; exactly one is always set. Items must be
+// a List[T] or Array[T;N] (the only iterable collection types that exist
+// yet).
+//
+// break/continue inside Body act on this loop exactly like WhileExpr's
+// (same loopDepth bookkeeping, never crossing a closure boundary) — but
+// amifl-spec.md section 7 explicitly restricts break/continue to the
+// non-yield form ("breakcontinueはyield無し形のみで使用可"), so
+// resolveForExpr suppresses loopDepth (resets it to 0, exactly like a
+// closure body does for the identical "can't reach an enclosing loop"
+// reason) while checking Yield — a break/continue written inside a yield
+// expression is rejected with the ordinary "outside of a loop" error,
+// regardless of whether this ForExpr itself happens to be lexically
+// nested inside some other loop.
 type ForExpr struct {
 	Var   string
 	Items Expr
-	Body  *Block
+	Body  *Block // set iff Yield == nil
+	Yield Expr   // set iff Body == nil (step 9)
 	Line  int
 
 	// filled by sema:
@@ -497,6 +520,11 @@ type ForExpr struct {
 	// same silence about parameters was resolved the same conservative
 	// way, for the same "明示性 > 簡潔さ" reasoning).
 	VarToken string
+	// ResolvedType is set only for the Yield form: always
+	// makeListType(Yield's own resolved type) — unused (implicitly Unit)
+	// for the Body form, exactly like WhileExpr never bothers storing its
+	// own always-Unit type.
+	ResolvedType string
 }
 
 // SwitchExpr is `switch subject { case Type.Variant(binding, ...): body ...

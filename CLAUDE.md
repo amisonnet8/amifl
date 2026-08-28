@@ -162,7 +162,7 @@ Seed/Cascadeが通っていない領域、あるいはAmiFL固有の設計判断
 4. ✅ **`enum`（タグ付きバリアント）の実行時表現**：`switch`でのバリアント判定・フィールド取り出し専用（2.2節）、値生成は`型名.バリアント名(...)`という通常の式。Goには直接対応するネイティブ機構が無く、タグ（int）+バリアントごとに異なるフィールド集合、という表現が必要——Cascadeの`error`型実装（コンパイラが自動登録する`STTYPE`）や、複数バリアントを1つの`STTYPE`に全フィールドを`Union`的に持たせる案（Goの構造体は値型なので単純にフィールドを足せる）、複数の`STTYPE`+タグによる判別のどちらが良いか検討する。`switch`のバリアント網羅性検査（コンパイル時にバリアント集合が閉じている）はsemaが担う
 5. **`Set[T]`の実行時表現**：Cascadeの実績（`MPTYPE ^T ^bool`または`^struct{}`相当）をそのまま踏襲できる見込み。要素順序は不定と明記済み（16.2節で解決済みの検討事項）なので、Goのmapイテレーション順序をそのまま使ってよい（Weaveのようにソートで決定的にする必要はない——`toList(_) |> sort`という運用に統一する方針が既に確定している）
 6. **`capability`（組み込み多相）の実装方式**：ユーザーには一切公開されない、コンパイラ内部限定の多相。各呼び出し箇所で引数の静的型からどの実装（`len`ならString/List/Array/Map/Set/Bytes/Chanのどれか）を使うか**コンパイル時に一意に確定**させ、その型専用のコード（ネイティブ命令 or `amiflrt`関数）を直接生成する——ジェネリクスも動的ディスパッチも不要な、最も単純な「多相」（各呼び出しが実質的にモノモーフィックにコンパイルされる）という理解でよいか、実装時に確認する
-7. **パイプ演算子`|>`のコード生成**：糖衣構文（9節）であり新しいAMIVM命令は不要——`a |> f`は単なる`f(a)`、`a |> f(_, b)`は`f(a, b)`への変換で完結する見込み。`for x in items yield expr`が`items |> map(x => expr)`の糖衣という規定（7節）が指す「`x => expr`」の構文自体が仕様の他箇所に明記が無い点は要確認（無名関数`fn(x) -> R {...}`と同じものと推測されるが、仕様側の確認が先）
+7. ✅ **パイプ演算子`|>`のコード生成**：糖衣構文（9節）であり新しいAMIVM命令は不要——`a |> f`は単なる`f(a)`、`a |> f(_, b)`は`f(a, b)`への変換で完結する見込み。`for x in items yield expr`が`items |> map(x => expr)`の糖衣という規定（7節）が指す「`x => expr`」の構文自体が仕様の他箇所に明記が無い点は要確認（無名関数`fn(x) -> R {...}`と同じものと推測されるが、仕様側の確認が先）
 8. **`?`演算子とパイプラインDX機能（tap/peek・ステージ番号付きエラー表示）**：`?`自体はCascadeの後置`?`実装（8.6節「エラー処理」）がほぼそのまま参考になる。`tap`/`peek`（13.8節）・パイプラインの型不整合をステージ番号付きで示すコンパイルエラー表示（9.1節）はAmiFL独自のDX機能で先行実装が無く、sema側で新規に設計する必要がある
 
 ## 過去に踏まれた地雷（Seed/Cascade/Weaveからの申し送り・要約）
@@ -201,7 +201,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 6 ✅ | `Tuple2〜8`・`struct` | タプルリテラル・`.0`等の糖衣、`struct`定義・フィールドアクセス | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` | 設計課題3（Tuple表現、下記「確定した設計判断」参照） |
 | 7 ✅ | `Array[T;N]`・`List[T]`・`for` | 固定長配列（多次元糖衣込み）、可変長リスト、`x[i]`/`x[i]=v`/`x[a:b]`糖衣。**Step 4から延期した`for x in items { ... }`（`Unit`版のみ、`yield`はStep 9）もここで実装**——`items`に相当する型がこの時点で初めて存在するため | `SLTYPE` `SLMAKE` `SLICE` `ASET` `AGET` `ARTYPE`（AmiFLの機能要求によりamivm本体へ新規追加） | 設計課題2（Array表現、下記「確定した設計判断」参照） |
 | 8 ✅ | `enum`・`switch`拡張 | バリアント定義・値生成、`switch`での判定/フィールド取り出し、バリアント網羅性検査 | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` `IF` `ELSE` `ENDIF` `EQ`（新規命令ゼロ、Step 6/4の既存命令のみで実現） | 設計課題4（enum表現、下記「確定した設計判断」参照） |
-| 9 | パイプ演算子`|>` | `_`プレースホルダー、`for...yield`糖衣、`|>`の優先順位（最低） | （新規命令無し。糖衣構文） | 設計課題7 |
+| 9 ✅ | パイプ演算子`|>` | `_`プレースホルダー、`for...yield`糖衣、`|>`の優先順位（最低） | （新規命令無し。糖衣構文） | 設計課題7（下記「確定した設計判断」参照） |
 | 10 | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5 |
 | 11 | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開 | （`amiflrt`+ネイティブ命令の混在） | **設計課題6（capability多相の実装方式）** |
 | 12 | ファイルI/O・`Stream[T]`・並列処理 | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣、`spawn`/`send`/`recv`/`parallel` | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` `SPAWN` `SEL` `CASESEND` `CASERECV` `DEFAULT` `ENDSEL` `DEFER` | — |
@@ -472,6 +472,32 @@ Step 4の時点で「サブジェクト無しのBool専用switchは`IfExpr`へ�
 ### 実地検証（`amivm`→`go build`→実行）で確認した項目（Step 8）
 
 `examples/enums.aml`で以下を確認済み：3バリアント（`Ok`・`Retry(delay: Int)`・`Failed(reason: String)`）の`enum Status`宣言、`Status.Ok`（括弧無し・ゼロフィールド構築）と`Status.Retry(delay: 5)`（名前付きフィールド構築）、値を返す`switch`（exhaustive・`default`省略、`describe`/`code`関数）、`default`ありの`switch`（`delayOrZero`関数）、Unit型（文位置）の`switch`とその中での`print`呼び出し、フィールド束縛（`case Status.Retry(delay): delay`）が正しくバリアントのフィールドを読み出すこと。生成されたIRを目視確認し、`Status`が`Tag`(int)・`Retry_delay`(int64)・`Failed_reason`(string)の3フィールドを持つ単一の`STTYPE`へコンパイルされ、`switch`が`FGET`+`EQ`+ネストした`IF`/`ELSE`チェーンへ展開されていること、exhaustiveな`switch`の最後のcaseに`ELSE`が出力されていないことを確認。実行結果は終了コード22（`c1+c2+c3+r1+r2+sideEffect+eq1+eq2+eq3 = (1+5+3)+(0+5)+5+(1+1+1) = 22`という手計算と一致）を確認。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。
+
+### `|>`は完全にパース時の構文糖衣として実装し、sema・codegenには一切コードを追加していない（Step 9で確定・設計課題7の解決）
+
+`a |> f`・`a |> f(_, b)`・`a |> f(x, y)`（`_`省略時は第1引数へ注入）は、いずれもパーサーが`ast.CallExpr`へ直接組み立てる（`internal/parser/parser.go`の`parsePipeRHS`）——「`f(a)`をユーザーが手で書いた場合」と完全に区別が付かない、既存のCallExprそのものになる。CLAUDE.mdが事前に予想していたとおり、semaは`|>`の存在自体を一切知らず、codegenも同様——`CallExpr`の型検査・コード生成は元から存在する経路をそのまま素通りする。これはStep 4の`switch`（Bool専用ケース）がIfExprへ丸ごと展開された前例と同じ設計判断で、パイプは「構文的な別の書き方」でしかなく意味論的に新しい何かを持ち込まない、という判断に基づく。
+
+**優先順位は既存の演算子チェーンの外側にもう1段「入口」を追加する形で実装した**：`amifl-spec.md` 9節が`|>`を最低優先順位と規定しているため、Step 3で確立した優先順位クライミングのチェーン（`parseOrExpr`が最上位だった）の**さらに外側**に`parsePipeExpr`という新しい層を追加し、値表現の「入口」（リスト/タプル/struct/enumリテラルの要素、呼び出し引数、添字・スライスの境界、配列サイズ式、if/while/forのヘッダー式、switchのcase条件/本体、for-yieldの yield式、等——`parseExpr`の統計位置フォールバックを含む）を機械的に`p.parseOrExpr()`から`p.parsePipeExpr()`へ置き換えた。演算子チェーンの内部（`parseAndExpr`・`parseEqualityExpr`・...・`parseUnaryExpr`・`parsePostfixExpr`）は一切変更していない——`parsePipeExpr`は`parseOrExpr`を1回呼んでから`|>`ループへ入るだけの薄いラッパーであり、優先順位クライミングの「新しい最低優先順位レベルを追加する」という教科書通りの実装になっている。
+
+**`_`プレースホルダーは新しいASTノードを持たない**：`_`はパーサー内部だけで完結する「注入位置マーカー」であり、`parsePipeRHS`が引数リストをパースしながら`_`トークンを見つけた位置を記録し、最終的な`CallExpr.Args`スライスへ左辺の式ノードをその位置（`_`が無ければ先頭）へ直接埋め込む。ASTにもIRにも`_`という概念自体は一切現れない——Step 7の`SliceExpr`の省略境界（`xs[:]`）がAMIVM`_`プレースホルダートークンをcodegenだけの実装詳細として扱った判断と同じ発想だが、こちらはパーサー段階で完全に消えるという点でさらに一歩進んでいる。
+
+**`_`は1回の呼び出しにつき高々1つに制限した**（複数回書くと構文エラー）：左辺の式は一度だけ評価されるべきだが（副作用のある式が二重評価されてはならない）、`_`を複数回書けるようにすると同じASTノード（左辺の式）を`Args`の複数スロットへ再利用することになり、`genArgValues`がそれぞれの出現に対して`genValue`を呼ぶため二重評価が起きてしまう。この二重評価問題を避けるための一時変数機構（値を1回評価してから複数箇所で参照する）はAmiFLにまだ存在しない（`let`は文位置専用で式の内部に埋め込めない）ため、根本的に解決するより「`_`は高々1回」という制約を明示的なパースエラーとして課す方を選んだ——実用上の`_`の用途（引数リストの1箇所だけ差し替える）を損なわず、二重評価という静かなバグの芽を構文レベルで断つ。
+
+**インラインクロージャーを`|>`の右辺に書く形（`amifl-spec.md`「右辺がインラインクロージャーの場合、その唯一の引数として左辺値を渡す」）は意図的にStep 9のスコープ外とした**：`CallExpr.Callee`は常に裸の名前でなければならないという既存の不変条件（Step 1以来）と、`ClosureLit`は`let`の直接の値としてしか使えないという既存のスコープ制限（Step 5で確定）の両方に触れる——実現するには「クロージャーを一時トークンへbindしてから呼ぶ」という、AmiFLにまだ存在しない式レベルのブロック機構が必要になる。仕様の例が全て名前付き関数の連鎖（`data |> trim |> upper |> print`）であり、インラインクロージャーの例は1文で触れられているだけであることから、Step 5のClosureLitスコープ制限と同じ判断基準（「具体的な必要が出るまで先送りする」）で見送った——ドキュメント化された意図的なスコープカットであり見落としではない。
+
+### `for x in items yield expr`は`map`という名前の組み込み関数へ実際にディスパッチせず、コード生成が直接1つのループへ下げる（Step 9で確定）
+
+`amifl-spec.md`は`for x in items yield expr`を「`items |> map(x => expr)`の糖衣」と説明しているが、これは意味論的な等価性の記述であり、コンパイラが実際に`map`という名前の関数呼び出しを生成するという意味ではない——Step 7が`x[i]`をcapabilityベースの`at`関数へルーティングせず`AGET`へ直接コンパイルした判断（`at`/`setAt`/`slice`のような一般化されたcapability解決の仕組みはStep 11の役目）と全く同じ理由で、`map`もStep 11まで実在しない。`for...yield`はcodegen（`internal/codegen/collections.go`の`genForYieldValue`）が`?len`で長さを取得→`SLMAKE`で長さ分をプリアロケート→`genForStmt`と全く同じ「先に加算してから使う」インクリメント優先のLOOP構造（CLAUDE.md「過去に踏まれた地雷」#3参照）→各要素で`yield`式を評価して`ASET`、という単一のループへ直接下げる。
+
+**構文パースは`items`の直後のトークンが`yield`か`{`かで分岐する**（`internal/parser/parser.go`の`parseForExpr`）——`items`自体を読み終えるまでどちらの形か判定できないため、`switch`（`switch`直後のトークンだけで判定できる）とは違い、両形式を1つの関数で扱う。`yield`の式は`{ ... }`ブロックではなく単一の式（`parsePipeExpr`）——`switch`のcase本体（Step 4/8）が単一式であるのと同じ設計上の一貫性で、AmiFLには「式を返すブロック」という汎用機構が無いため。
+
+**`Yield`は`Unit`型を許可しない**——`let`が`Unit`値への束縛を禁止する既存ルール（Step 2）とは独立に、`for...yield`固有の理由で明示的に拒否する必要があった：`genForYieldValue`は`Yield`を`genValue`経由で評価するが、`Unit`型はそもそもGoランタイム表現を持たない（`goTypeNames`に対応エントリが無い）ため、`resolveGoType`が「未知の型名をそのまま文字列で返す」フォールバックへ落ち、存在しないGo型`^Unit`をVAR宣言してしまう——`go build`が初めて気づく壊れたコードを生成する寸前だった。単体テストでUnit型（`print`呼び出し）を`Yield`に使ってみたところ実際にこの壊れたIRが生成されることを確認し、sema側（`resolveForExpr`）へ「`Yield`が`Unit`型なら拒否」という明示的なチェックを追加して塞いだ——CLAUDE.md「意味検査の責任分担」原則どおり、codegenの内部エラーやamivmの`go/types`エラーとしてではなく、AmiFL自身のsemaが最初に捕まえる形にした。
+
+**`break`/`continue`は`yield`式の中では常に拒否される**（`amifl-spec.md`「break/continueはyield無し形のみで使用可」）——`resolveClosureLit`がクロージャー境界を越えるbreak/continueを防ぐために`loopDepth`を一時的に`0`へリセットする、という既存の仕組み（Step 5）をそのまま再利用した。`for...yield`自体がこの`yield`式を評価する間だけ`loopDepth`を退避＋ゼロ化することで、たとえこの`for...yield`が別の`while`ループの内側に構文的にネストしていても、`yield`式の中の`break`/`continue`は必ず「ループの外」と判定されエラーになる——実地テスト（`while`ループにネストした`for...yield`の中で`break`を書く）でこの挙動を確認済み。
+
+### 実地検証（`amivm`→`go build`→実行）で確認した項目（Step 9）
+
+`examples/pipe.aml`で以下を確認済み：`_`省略時の第1引数注入（`5 |> double`）、`_`を明示した位置への注入（`5 |> addN(_, 3)`・`5 |> addN(3, _)`）、`for x in nums yield x |> double`（パイプとyieldの組み合わせ）と`for x in nums yield addN(x, 10)`（通常の関数呼び出しのyield）。生成されたIRを目視確認し、`for...yield`が`?len`→`SLMAKE`（実行時に決まる長さを渡す、リテラルの`[1,2,3]`のような固定長ではない点がStep 7の`genListLitValue`との違い）→インクリメント優先の`LOOP`→`AGET`+`ASET`という単一ループへ下がっていること、パイプ式が単なる`CALL`列（`CALL !double 5`等）へ何の追加命令も無く展開されていることを確認。実行結果は終了コード96（`a+b+c+s1+s2 = 10+8+8+20+50 = 96`という手計算と一致）を確認。加えて、`_`の2回使用（構文エラー）・`yield`式内での`break`（単体・外側`while`ネスト時の両方でエラー）・`yield`式のUnit型拒否、をそれぞれ手動でCLIから確認し、いずれも期待どおりコンパイルエラーになることを確認した。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。
 
 ## 開発の進め方
 

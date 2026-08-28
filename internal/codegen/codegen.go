@@ -277,7 +277,7 @@ func (g *gen) genStmt(e ast.Expr) error {
 	case *ast.WhileExpr:
 		return g.genWhileStmt(v)
 	case *ast.ForExpr:
-		return g.genForStmt(v)
+		return g.genForExprStmt(v)
 	case *ast.IndexAssignExpr:
 		return g.genIndexAssignStmt(v)
 	case *ast.SwitchExpr:
@@ -593,6 +593,8 @@ func (g *gen) genValue(e ast.Expr) (string, error) {
 		return g.genSliceValue(v)
 	case *ast.SwitchExpr:
 		return g.genSwitchValue(v)
+	case *ast.ForExpr:
+		return g.genForYieldValue(v)
 	default:
 		return "", fmt.Errorf("codegen: %T is not a value expression (sema should have rejected this)", e)
 	}

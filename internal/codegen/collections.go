@@ -1,8 +1,9 @@
 // collections.go compiles amifl-spec.md section 2.2's List[T]/Array[T;N],
 // their shared `[...]` literal (ast.ListLit), postfix `[i]`/`[a:b]` access
-// (ast.IndexExpr/IndexAssignExpr/SliceExpr), and `for x in items { ... }`
-// (ast.ForExpr) — step 7. See codegen.go's package doc for the surrounding
-// step-by-step scope.
+// (ast.IndexExpr/IndexAssignExpr/SliceExpr), `for x in items { ... }`
+// (ast.ForExpr) — step 7 — and its `yield` form, `for x in items yield
+// expr` (step 9, section 7). See codegen.go's package doc for the
+// surrounding step-by-step scope.
 package codegen
 
 import (
@@ -272,4 +273,74 @@ func (g *gen) genForStmt(v *ast.ForExpr) error {
 	}
 	g.b.WriteString("\tENDLOOP\n")
 	return nil
+}
+
+// genForExprStmt is genStmt's ast.ForExpr case: the Body form (Unit-typed,
+// side-effect-only) runs genForStmt directly; the Yield form (step 9,
+// always List(T)-typed) only ever reaches statement position via
+// DiscardExpr's recursion (sema never lets a non-Unit expression appear
+// undiscarded in statement position) — genForYieldValue still runs in
+// full (Yield may itself contain side effects), its resulting List token
+// simply discarded, exactly like every other "value expression that may
+// contain an effectful sub-expression" genStmt already discards this way
+// (TupleLit, StructLit, ListLit, ...).
+func (g *gen) genForExprStmt(v *ast.ForExpr) error {
+	if v.Yield != nil {
+		_, err := g.genForYieldValue(v)
+		return err
+	}
+	return g.genForStmt(v)
+}
+
+// genForYieldValue lowers `for x in items yield expr` (amifl-spec.md
+// section 7, step 9) into a length-preallocated List built by a single
+// loop — SLMAKE up front (unlike genListLitValue's List path, whose size
+// is known from a literal's own element count, here it's `?len` of items,
+// a runtime value), then the exact same increment-first LOOP structure
+// genForStmt uses (see its doc comment for why the increment comes first),
+// ASETting each iteration's Yield value into the preallocated slot instead
+// of running Body purely for effect. This is a direct, single-loop
+// compilation — not a literal call to a builtin named `map` (see
+// ast.ForExpr's doc comment for why: capability-dispatched builtins don't
+// exist until step 11).
+func (g *gen) genForYieldValue(v *ast.ForExpr) (string, error) {
+	itemsVal, err := g.genValue(v.Items)
+	if err != nil {
+		return "", err
+	}
+
+	lenTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^int\n", lenTmp)
+	g.writeCall("%"+lenTmp, "?len", []string{itemsVal})
+
+	resultGoType := g.prog.resolveGoType(v.ResolvedType)
+	resultTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", resultTmp, resultGoType)
+	fmt.Fprintf(g.b, "\tSLMAKE\t%%%s\t^%s\t%%%s\n", resultTmp, resultGoType, lenTmp)
+
+	idxTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^int\n", idxTmp)
+	fmt.Fprintf(g.b, "\tSET\t%%%s\t-1\n", idxTmp)
+
+	g.b.WriteString("\tLOOP\n")
+	fmt.Fprintf(g.b, "\tADD\t%%%s\t%%%s\t1\n", idxTmp, idxTmp)
+	doneTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^bool\n", doneTmp)
+	fmt.Fprintf(g.b, "\tGTE\t%%%s\t%%%s\t%%%s\n", doneTmp, idxTmp, lenTmp)
+	fmt.Fprintf(g.b, "\tIF\t%%%s\n", doneTmp)
+	g.b.WriteString("\tBREAK\n")
+	g.b.WriteString("\tENDIF\n")
+
+	elemGoType := g.prog.resolveGoType(v.ElemType)
+	fmt.Fprintf(g.b, "\tVAR\t%s\t^%s\n", v.VarToken, elemGoType)
+	fmt.Fprintf(g.b, "\tAGET\t%s\t%s\t%%%s\n", v.VarToken, itemsVal, idxTmp)
+
+	yieldVal, err := g.genValue(v.Yield)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(g.b, "\tASET\t%%%s\t%%%s\t%s\n", resultTmp, idxTmp, yieldVal)
+
+	g.b.WriteString("\tENDLOOP\n")
+	return "%" + resultTmp, nil
 }

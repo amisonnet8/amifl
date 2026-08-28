@@ -282,7 +282,7 @@ func (p *parser) parseArrayType(nameTok lexer.Token) (ast.TypeExpr, error) {
 	}
 	var sizes []ast.Expr
 	for {
-		size, err := p.parseOrExpr()
+		size, err := p.parsePipeExpr()
 		if err != nil {
 			return nil, err
 		}
@@ -497,7 +497,7 @@ func (p *parser) parseExpr() (ast.Expr, error) {
 			return p.parseDiscardExpr()
 		}
 	}
-	expr, err := p.parseOrExpr()
+	expr, err := p.parsePipeExpr()
 	if err != nil {
 		return nil, err
 	}
@@ -556,10 +556,117 @@ func (p *parser) binaryLevel(next func() (ast.Expr, error), ops map[lexer.Kind]s
 	}
 }
 
+// parsePipeExpr is the top of the value-expression grammar — every
+// "start of an expression" entry point outside the operator-precedence
+// chain itself (list/tuple/struct/enum literal elements, call args via
+// parseExpr, index/slice bounds, array-size expressions, if/while/for
+// headers, switch case conditions/bodies, for-yield's own expression, ...)
+// parses through here rather than calling parseOrExpr directly, so that
+// `|>` (amifl-spec.md section 9, lower precedence than even `||` — see
+// parseOrExpr's doc comment) is reachable everywhere a value expression
+// already was, the same way the whole operator chain below it already is.
+// Left-associative: `a |> f |> g` parses as `(a |> f) |> g`, matching
+// every other binary-shaped operator here.
+func (p *parser) parsePipeExpr() (ast.Expr, error) {
+	left, err := p.parseOrExpr()
+	if err != nil {
+		return nil, err
+	}
+	for p.cur.Kind == lexer.PipeArrow {
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		left, err = p.parsePipeRHS(left)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return left, nil
+}
+
+// parsePipeRHS parses the right-hand side of one `|>` step, given the
+// already-parsed left-hand value lhs, and desugars the whole step directly
+// into an *ast.CallExpr (amifl-spec.md section 9) — see CallExpr's doc
+// comment. The right-hand side is always `name` or `name(args...)`
+// (CallExpr.Callee is always a bare name, never an arbitrary expression —
+// the same restriction parseIdentOrCall already enforces for an ordinary
+// call, so this doesn't introduce a new capability, just a new way to
+// reach the existing one). Section 9's other RHS form — an inline closure
+// literal receiving lhs as its sole argument — is a deliberate step 9
+// scope cut (CLAUDE.md's "確定した設計判断": revisit once a concrete need
+// appears, mirroring step 5's identical treatment of ClosureLit's other
+// restricted positions).
+func (p *parser) parsePipeRHS(lhs ast.Expr) (ast.Expr, error) {
+	nameTok, err := p.expect(lexer.Ident)
+	if err != nil {
+		return nil, err
+	}
+	if p.cur.Kind != lexer.LParen {
+		// `a |> f` — f takes lhs as its sole argument (amifl-spec.md
+		// section 9, "省略時は第1引数へ左辺値を注入する", the degenerate
+		// no-other-args case).
+		return &ast.CallExpr{Callee: nameTok.Value, Args: []ast.Expr{lhs}, Line: nameTok.Line}, nil
+	}
+	if err := p.advance(); err != nil { // consume '('
+		return nil, err
+	}
+	saved := p.noCompositeLit
+	p.noCompositeLit = false
+	defer func() { p.noCompositeLit = saved }()
+
+	// `a |> f(...)`: lhs is injected at an explicit `_` placeholder's
+	// position if one appears, or prepended as the first argument
+	// otherwise (amifl-spec.md section 9). `_` is recognized here as its
+	// own token, never routed through parsePipeExpr/parseExpr — unlike
+	// `_ = expr`'s discard statement (the only other place `_` means
+	// anything today), a bare `_` here isn't followed by `=`, so it can't
+	// reuse parseDiscardExpr's grammar; this is a new, narrower meaning
+	// specific to a pipe call's argument list.
+	var args []ast.Expr
+	placeholderIdx := -1
+	if p.cur.Kind != lexer.RParen {
+		for {
+			if p.cur.Kind == lexer.Ident && p.cur.Value == "_" {
+				if placeholderIdx >= 0 {
+					return nil, p.errorf("a pipe's '_' placeholder may appear at most once per call")
+				}
+				placeholderIdx = len(args)
+				args = append(args, nil) // filled in below, once lhs is known to go here
+				if err := p.advance(); err != nil {
+					return nil, err
+				}
+			} else {
+				arg, err := p.parsePipeExpr()
+				if err != nil {
+					return nil, err
+				}
+				args = append(args, arg)
+			}
+			if p.cur.Kind != lexer.Comma {
+				break
+			}
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RParen); err != nil {
+		return nil, err
+	}
+
+	if placeholderIdx >= 0 {
+		args[placeholderIdx] = lhs
+	} else {
+		args = append([]ast.Expr{lhs}, args...)
+	}
+	return &ast.CallExpr{Callee: nameTok.Value, Args: args, Line: nameTok.Line}, nil
+}
+
 // The chain implements amifl-spec.md section 6's precedence table
 // (high to low): unary `! - ~` -> `* / % << >> & &^` -> `+ - | ^` ->
-// `< <= > >=` -> `== !=` -> `&&` -> `||`. `|>` (lowest, step 9) and
-// postfix `. [] ?` (highest, later steps) aren't reachable yet.
+// `< <= > >=` -> `== !=` -> `&&` -> `||` -> `|>` (lowest, step 9,
+// parsePipeExpr above). postfix `. [] ?` (highest) sits below unary,
+// inside parsePostfixExpr.
 func (p *parser) parseOrExpr() (ast.Expr, error) {
 	return p.binaryLevel(p.parseAndExpr, map[lexer.Kind]string{lexer.OrOr: "||"})
 }
@@ -692,7 +799,7 @@ func (p *parser) parseEnumVariantArgs() ([]ast.StructLitField, error) {
 			if _, err := p.expect(lexer.Colon); err != nil {
 				return nil, err
 			}
-			val, err := p.parseOrExpr()
+			val, err := p.parsePipeExpr()
 			if err != nil {
 				return nil, err
 			}
@@ -727,7 +834,7 @@ func (p *parser) parseIndexOrSlice(target ast.Expr) (ast.Expr, error) {
 
 	var from ast.Expr
 	if p.cur.Kind != lexer.Colon {
-		from, err = p.parseOrExpr()
+		from, err = p.parsePipeExpr()
 		if err != nil {
 			return nil, err
 		}
@@ -757,7 +864,7 @@ func (p *parser) parseOptionalSliceBound() (ast.Expr, error) {
 	if p.cur.Kind == lexer.RBracket {
 		return nil, nil
 	}
-	return p.parseOrExpr()
+	return p.parsePipeExpr()
 }
 
 // parseListLit parses `[v1, v2, ...]` (amifl-spec.md sections 2.2/3.1) —
@@ -775,7 +882,7 @@ func (p *parser) parseListLit() (ast.Expr, error) {
 	var elems []ast.Expr
 	if p.cur.Kind != lexer.RBracket {
 		for {
-			elem, err := p.parseOrExpr()
+			elem, err := p.parsePipeExpr()
 			if err != nil {
 				return nil, err
 			}
@@ -876,7 +983,7 @@ func (p *parser) parseHeaderExpr() (ast.Expr, error) {
 	saved := p.noCompositeLit
 	p.noCompositeLit = true
 	defer func() { p.noCompositeLit = saved }()
-	return p.parseOrExpr()
+	return p.parsePipeExpr()
 }
 
 // parseIfExpr parses `if cond { ... } [elif cond { ... }]* [else { ... }]?`
@@ -959,10 +1066,16 @@ func (p *parser) parseWhileExpr() (ast.Expr, error) {
 	return &ast.WhileExpr{Cond: cond, Body: body, Line: kwTok.Line}, nil
 }
 
-// parseForExpr parses `for x in items { ... }` (amifl-spec.md section 7).
-// The `yield` form (a `map` pipeline sugar) is step 9's job — not
-// reachable here yet, so Items always goes through the same Unit-typed,
-// side-effect-only body every other `for` in step 7's scope does.
+// parseForExpr parses `for x in items { ... }` (amifl-spec.md section 7,
+// Unit-typed, side-effect-only) or, once `items` is immediately followed
+// by `yield` instead of `{`, step 9's `for x in items yield expr` form —
+// a single trailing expression (parsePipeExpr, not a `{ }` block: the spec
+// gives no block form for `yield`, and every case-body-shaped position in
+// this parser already keeps to a single expression the same way — see
+// e.g. parseBoolSwitchExpr/parseEnumSwitchExpr). Which form this is can't
+// be told apart until `items` has already been fully parsed, so both
+// share this one function rather than being split the way parseSwitchExpr
+// splits on `switch`'s very next token.
 func (p *parser) parseForExpr() (ast.Expr, error) {
 	kwTok, err := p.expect(lexer.KwFor)
 	if err != nil {
@@ -978,6 +1091,16 @@ func (p *parser) parseForExpr() (ast.Expr, error) {
 	items, err := p.parseHeaderExpr()
 	if err != nil {
 		return nil, err
+	}
+	if p.cur.Kind == lexer.KwYield {
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		yield, err := p.parsePipeExpr()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.ForExpr{Var: varTok.Value, Items: items, Yield: yield, Line: kwTok.Line}, nil
 	}
 	body, err := p.parseBlock()
 	if err != nil {
@@ -1042,14 +1165,14 @@ func (p *parser) parseBoolSwitchExpr(kwTok lexer.Token) (ast.Expr, error) {
 			if err := p.advance(); err != nil {
 				return nil, err
 			}
-			cond, err := p.parseOrExpr()
+			cond, err := p.parsePipeExpr()
 			if err != nil {
 				return nil, err
 			}
 			if _, err := p.expect(lexer.Colon); err != nil {
 				return nil, err
 			}
-			body, err := p.parseOrExpr()
+			body, err := p.parsePipeExpr()
 			if err != nil {
 				return nil, err
 			}
@@ -1065,7 +1188,7 @@ func (p *parser) parseBoolSwitchExpr(kwTok lexer.Token) (ast.Expr, error) {
 			if _, err := p.expect(lexer.Colon); err != nil {
 				return nil, err
 			}
-			body, err := p.parseOrExpr()
+			body, err := p.parsePipeExpr()
 			if err != nil {
 				return nil, err
 			}
@@ -1148,7 +1271,7 @@ func (p *parser) parseEnumSwitchExpr(kwTok lexer.Token, subject ast.Expr) (ast.E
 			if _, err := p.expect(lexer.Colon); err != nil {
 				return nil, err
 			}
-			body, err := p.parseOrExpr()
+			body, err := p.parsePipeExpr()
 			if err != nil {
 				return nil, err
 			}
@@ -1169,7 +1292,7 @@ func (p *parser) parseEnumSwitchExpr(kwTok lexer.Token, subject ast.Expr) (ast.E
 			if _, err := p.expect(lexer.Colon); err != nil {
 				return nil, err
 			}
-			body, err := p.parseOrExpr()
+			body, err := p.parsePipeExpr()
 			if err != nil {
 				return nil, err
 			}
@@ -1354,7 +1477,7 @@ func (p *parser) parseParenOrTupleExpr() (ast.Expr, error) {
 	p.noCompositeLit = false
 	defer func() { p.noCompositeLit = saved }()
 
-	first, err := p.parseOrExpr()
+	first, err := p.parsePipeExpr()
 	if err != nil {
 		return nil, err
 	}
@@ -1368,7 +1491,7 @@ func (p *parser) parseParenOrTupleExpr() (ast.Expr, error) {
 		if p.cur.Kind == lexer.RParen {
 			break
 		}
-		elem, err := p.parseOrExpr()
+		elem, err := p.parsePipeExpr()
 		if err != nil {
 			return nil, err
 		}
@@ -1403,7 +1526,7 @@ func (p *parser) parseStructLit(nameTok lexer.Token) (ast.Expr, error) {
 			if _, err := p.expect(lexer.Colon); err != nil {
 				return nil, err
 			}
-			val, err := p.parseOrExpr()
+			val, err := p.parsePipeExpr()
 			if err != nil {
 				return nil, err
 			}

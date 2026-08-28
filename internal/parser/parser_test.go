@@ -1079,6 +1079,129 @@ func TestParse_SwitchWithSubjectParsesSwitchExpr(t *testing.T) {
 	}
 }
 
+func TestParse_PipeBareNameDesugarsToSingleArgCall(t *testing.T) {
+	src := "fn main() -> Int {\n    let a = x |> f\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	call, ok := let.Value.(*ast.CallExpr)
+	if !ok || call.Callee != "f" || len(call.Args) != 1 {
+		t.Fatalf("got %#v, want CallExpr{Callee: \"f\", 1 arg}", let.Value)
+	}
+	arg, ok := call.Args[0].(*ast.IdentExpr)
+	if !ok || arg.Name != "x" {
+		t.Fatalf("got arg %#v, want IdentExpr{Name: \"x\"}", call.Args[0])
+	}
+}
+
+func TestParse_PipeNoUnderscorePrependsAsFirstArg(t *testing.T) {
+	src := "fn main() -> Int {\n    let a = x |> f(1, 2)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	call := let.Value.(*ast.CallExpr)
+	if call.Callee != "f" || len(call.Args) != 3 {
+		t.Fatalf("got %#v, want CallExpr{Callee: \"f\", 3 args}", call)
+	}
+	first, ok := call.Args[0].(*ast.IdentExpr)
+	if !ok || first.Name != "x" {
+		t.Fatalf("got Args[0] %#v, want IdentExpr{Name: \"x\"} (lhs prepended)", call.Args[0])
+	}
+}
+
+func TestParse_PipeUnderscoreInjectsAtItsPosition(t *testing.T) {
+	src := "fn main() -> Int {\n    let a = x |> f(1, _, 2)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	call := let.Value.(*ast.CallExpr)
+	if call.Callee != "f" || len(call.Args) != 3 {
+		t.Fatalf("got %#v, want CallExpr{Callee: \"f\", 3 args}", call)
+	}
+	mid, ok := call.Args[1].(*ast.IdentExpr)
+	if !ok || mid.Name != "x" {
+		t.Fatalf("got Args[1] %#v, want IdentExpr{Name: \"x\"} (lhs injected at '_')", call.Args[1])
+	}
+	if lit, ok := call.Args[0].(*ast.IntLit); !ok || lit.Value != 1 {
+		t.Fatalf("got Args[0] %#v, want IntLit{Value: 1}", call.Args[0])
+	}
+	if lit, ok := call.Args[2].(*ast.IntLit); !ok || lit.Value != 2 {
+		t.Fatalf("got Args[2] %#v, want IntLit{Value: 2}", call.Args[2])
+	}
+}
+
+func TestParse_PipeChainIsLeftAssociative(t *testing.T) {
+	src := "fn main() -> Int {\n    let a = x |> f |> g\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	outer, ok := let.Value.(*ast.CallExpr)
+	if !ok || outer.Callee != "g" || len(outer.Args) != 1 {
+		t.Fatalf("got %#v, want outer CallExpr{Callee: \"g\"}", let.Value)
+	}
+	inner, ok := outer.Args[0].(*ast.CallExpr)
+	if !ok || inner.Callee != "f" || len(inner.Args) != 1 {
+		t.Fatalf("got inner %#v, want CallExpr{Callee: \"f\"}", outer.Args[0])
+	}
+	ident, ok := inner.Args[0].(*ast.IdentExpr)
+	if !ok || ident.Name != "x" {
+		t.Fatalf("got innermost arg %#v, want IdentExpr{Name: \"x\"}", inner.Args[0])
+	}
+}
+
+func TestParse_PipeDuplicateUnderscoreIsAnError(t *testing.T) {
+	src := "fn main() -> Int {\n    let a = x |> f(_, _)\n    0\n}\n"
+	if _, err := Parse(src); err == nil {
+		t.Fatal("expected an error for a pipe call with two '_' placeholders")
+	}
+}
+
+func TestParse_ForYieldParsesYieldField(t *testing.T) {
+	src := "fn main() -> Int {\n    let ys = for x in xs yield x |> double\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	forExpr, ok := let.Value.(*ast.ForExpr)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.ForExpr", let.Value)
+	}
+	if forExpr.Body != nil {
+		t.Fatalf("got non-nil Body %#v, want nil for the yield form", forExpr.Body)
+	}
+	if forExpr.Yield == nil {
+		t.Fatal("got nil Yield, want the yielded expression")
+	}
+	call, ok := forExpr.Yield.(*ast.CallExpr)
+	if !ok || call.Callee != "double" {
+		t.Fatalf("got Yield %#v, want CallExpr{Callee: \"double\"} (from x |> double)", forExpr.Yield)
+	}
+}
+
+func TestParse_ForWithoutYieldStillHasBodyNotYield(t *testing.T) {
+	src := "fn main() -> Int {\n    for x in xs {\n        print(\"hi\")\n    }\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	forExpr := parseFuncMain(t, f).Body.Exprs[0].(*ast.ForExpr)
+	if forExpr.Yield != nil {
+		t.Fatalf("got non-nil Yield %#v, want nil for the block form", forExpr.Yield)
+	}
+	if forExpr.Body == nil {
+		t.Fatal("got nil Body, want the block")
+	}
+}
+
 func TestParse_SwitchWithoutSubjectStillDesugarsToIfExpr(t *testing.T) {
 	// The subject-less Bool-only form (step 4) must keep desugaring into
 	// an IfExpr, unaffected by step 8's new subject-carrying form.

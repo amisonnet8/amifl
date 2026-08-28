@@ -1197,3 +1197,82 @@ func TestGenerate_SwitchStmtWithDefaultEmitsFinalElse(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerate_ForYieldEmitsPreallocatedSlmakeAndAset(t *testing.T) {
+	listType := "List(Int64)"
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Token: "%xs_1", ResolvedType: listType, Value: &ast.ListLit{ResolvedType: listType, Elems: []ast.Expr{&ast.IntLit{Value: 1}}}},
+		&ast.LetExpr{Name: "ys", Token: "%ys_2", ResolvedType: listType, Value: &ast.ForExpr{
+			Items:        &ast.IdentExpr{Name: "xs", ResolvedType: listType, Token: "%xs_1"},
+			Yield:        &ast.BinaryExpr{Op: "*", Left: &ast.IdentExpr{Name: "x", ResolvedType: "Int64", Token: "%x_3"}, Right: &ast.IntLit{Value: 2}, ResolvedType: "Int64"},
+			ElemType:     "Int64",
+			VarToken:     "%x_3",
+			ResolvedType: listType,
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	// xs's own ListLit consumes amifl_tmp1; the yield-for's own temps start
+	// at amifl_tmp2 (len result).
+	if !strings.Contains(ir, "CALL\t%amifl_tmp2\t:\t?len\t%xs_1") {
+		t.Errorf("generated IR missing the length CALL; got:\n%s", ir)
+	}
+	if !strings.Contains(ir, "SLMAKE\t%amifl_tmp3\t^AmiflList1\t%amifl_tmp2") {
+		t.Errorf("generated IR missing a length-preallocated SLMAKE; got:\n%s", ir)
+	}
+	if !strings.Contains(ir, "AGET\t%x_3\t%xs_1\t%amifl_tmp4") {
+		t.Errorf("generated IR missing AGET into the loop variable; got:\n%s", ir)
+	}
+	if !strings.Contains(ir, "ASET\t%amifl_tmp3\t%amifl_tmp4\t%amifl_tmp6") {
+		t.Errorf("generated IR missing ASET writing the yielded value into the preallocated list; got:\n%s", ir)
+	}
+	// Increment-first, matching genForStmt's own precedent.
+	loopIdx := strings.Index(ir, "LOOP\n")
+	incIdx := strings.Index(ir, "ADD\t%amifl_tmp4\t%amifl_tmp4\t1")
+	gteIdx := strings.Index(ir, "GTE\t%amifl_tmp5")
+	if !(loopIdx >= 0 && loopIdx < incIdx && incIdx < gteIdx) {
+		t.Errorf("expected LOOP, then increment, then bounds check, in that order; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_ForYieldDiscardedInStatementPositionStillRuns(t *testing.T) {
+	// Yield must be Int64-typed here, not Unit (sema now rejects a
+	// Unit-typed `yield` value — see TestCheck_ForYieldUnitTypedIsAnError
+	// — since genValue has no Go value to collect for one); a call to a
+	// side-effecting, Int64-returning top-level fn is what demonstrates
+	// "still runs when the resulting list is discarded" instead.
+	listType := "List(Int64)"
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name: "main", ReturnType: nt("Int"), ResolvedReturnType: "Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "xs", Token: "%xs_1", ResolvedType: listType, Value: &ast.ListLit{ResolvedType: listType, Elems: []ast.Expr{&ast.IntLit{Value: 1}}}},
+				&ast.DiscardExpr{Value: &ast.ForExpr{
+					Items:        &ast.IdentExpr{Name: "xs", ResolvedType: listType, Token: "%xs_1"},
+					Yield:        &ast.CallExpr{Callee: "sideEffecting", ResolvedType: "Int64"},
+					ElemType:     "Int64",
+					VarToken:     "%x_2",
+					ResolvedType: listType,
+				}},
+				&ast.IntLit{Value: 0},
+			}},
+		},
+		&ast.FuncDecl{
+			Name: "sideEffecting", ReturnType: nt("Int"), ResolvedReturnType: "Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
+		},
+	}}
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "CALL\t%amifl_tmp6\t:\t!sideEffecting") {
+		t.Errorf("expected the yield expression's call to still run when discarded; got:\n%s", ir)
+	}
+	if !strings.Contains(ir, "SLMAKE") {
+		t.Errorf("expected SLMAKE even though the resulting list is discarded; got:\n%s", ir)
+	}
+}

@@ -75,7 +75,7 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 	case *ast.SliceExpr:
 		return fc.resolveSliceExpr(v)
 	case *ast.ForExpr:
-		return fc.resolveForExpr(v)
+		return fc.resolveForExpr(v, expected)
 	case *ast.SwitchExpr:
 		return fc.resolveSwitchExpr(v, expected)
 	case *ast.ClosureLit:
@@ -1249,13 +1249,21 @@ func (fc *funcChecker) resolveSliceExpr(v *ast.SliceExpr) (string, error) {
 }
 
 // resolveForExpr type-checks `for x in items { ... }` (amifl-spec.md
-// section 7) — always Unit-typed. Items must be a List or Array (the only
-// iterable collection types that exist yet — step 7 restricts `for` to
-// them, deferring String/Set/Map/Stream iteration to their own later
-// steps); Var is declared as a non-reassignable binding in its own child
-// scope, mirroring a function parameter rather than a `let`
+// section 7, always Unit-typed) or, since step 9, `for x in items yield
+// expr` (ast.ForExpr.Yield set instead of Body — always List(Yield's own
+// type)). Items must be a List or Array (the only iterable collection
+// types that exist yet — step 7 restricts `for` to them, deferring
+// String/Set/Map/Stream iteration to their own later steps); Var is
+// declared as a non-reassignable binding in its own child scope,
+// mirroring a function parameter rather than a `let`
 // (ast.ForExpr.VarToken's doc comment).
-func (fc *funcChecker) resolveForExpr(v *ast.ForExpr) (string, error) {
+//
+// expected propagates into the Yield form only, so `let xs: List[String] =
+// for x in nums yield toString(x)` can adapt an untyped-literal-producing
+// Yield expression to List[String]'s own element type (List[T]'s already-
+// established `expected`-threading precedent, resolveListLit) — the Body
+// form ignores it entirely (always Unit, exactly like WhileExpr).
+func (fc *funcChecker) resolveForExpr(v *ast.ForExpr, expected string) (string, error) {
 	itemsTyp, err := fc.checkExpr(v.Items, "")
 	if err != nil {
 		return "", err
@@ -1273,6 +1281,42 @@ func (fc *funcChecker) resolveForExpr(v *ast.ForExpr) (string, error) {
 	}
 	v.ElemType = elemTyp
 	v.VarToken = token
+
+	if v.Yield != nil {
+		// break/continue are legal only in the Body form (amifl-spec.md
+		// section 7, "break/continueはyield無し形のみで使用可") — suppressing
+		// loopDepth here, exactly like a closure body does (resolveClosureLit),
+		// makes one found inside Yield hit the ordinary "outside of a loop"
+		// rejection, regardless of whether this ForExpr itself happens to be
+		// lexically nested inside some other loop.
+		savedLoopDepth := fc.loopDepth
+		fc.loopDepth = 0
+		var yieldExpected string
+		if e, ok := listElemType(expected); ok {
+			yieldExpected = e
+		}
+		yieldTyp, yieldErr := fc.checkExpr(v.Yield, yieldExpected)
+		fc.loopDepth = savedLoopDepth
+		fc.popScope()
+		if yieldErr != nil {
+			return "", yieldErr
+		}
+		// Unlike an ordinary List[T] literal element (resolveListLit has no
+		// such restriction, since a struct-shaped Unit-adjacent element
+		// can't arise there), a Unit-typed Yield has no Go value to collect
+		// at all — Unit compiles to no runtime representation whatsoever
+		// (amifl-spec.md section 2.2), so genForYieldValue's genValue(Yield)
+		// would have nothing to ASET. Caught here, at sema, rather than
+		// surfacing as a codegen-internal error or (worse) a `go build`
+		// failure over a synthesized `^Unit` Go type that doesn't exist —
+		// CLAUDE.md's "意味検査の責任分担" principle.
+		if yieldTyp == unitType {
+			return "", fmt.Errorf("line %d: a `yield` value cannot be Unit-typed", v.Yield.Pos())
+		}
+		resultTyp := makeListType(yieldTyp)
+		v.ResolvedType = resultTyp
+		return resultTyp, nil
+	}
 
 	fc.loopDepth++
 	_, err = fc.checkBlock(v.Body, unitType)

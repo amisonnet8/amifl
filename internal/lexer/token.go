@@ -28,6 +28,7 @@ const (
 	KwEnum
 	KwFor
 	KwIn
+	KwYield
 	LParen
 	RParen
 	LBrace
@@ -42,27 +43,28 @@ const (
 	Assign
 
 	// Operators (amifl-spec.md section 6).
-	Plus     // +
-	Minus    // -
-	Star     // *
-	Slash    // /
-	Percent  // %
-	Amp      // &
-	Pipe     // |
-	Caret    // ^
-	AmpCaret // &^
-	Tilde    // ~
-	Shl      // <<
-	Shr      // >>
-	AndAnd   // &&
-	OrOr     // ||
-	Bang     // !
-	EqEq     // ==
-	NotEq    // !=
-	Lt       // <
-	Lte      // <=
-	Gt       // >
-	Gte      // >=
+	Plus      // +
+	Minus     // -
+	Star      // *
+	Slash     // /
+	Percent   // %
+	Amp       // &
+	Pipe      // |
+	Caret     // ^
+	AmpCaret  // &^
+	Tilde     // ~
+	Shl       // <<
+	Shr       // >>
+	AndAnd    // &&
+	OrOr      // ||
+	Bang      // !
+	EqEq      // ==
+	NotEq     // !=
+	Lt        // <
+	Lte       // <=
+	Gt        // >
+	Gte       // >=
+	PipeArrow // |>
 )
 
 func (k Kind) String() string {
@@ -115,6 +117,8 @@ func (k Kind) String() string {
 		return "'for'"
 	case KwIn:
 		return "'in'"
+	case KwYield:
+		return "'yield'"
 	case LParen:
 		return "'('"
 	case RParen:
@@ -181,6 +185,8 @@ func (k Kind) String() string {
 		return "'>'"
 	case Gte:
 		return "'>='"
+	case PipeArrow:
+		return "'|>'"
 	default:
 		return "unknown token"
 	}

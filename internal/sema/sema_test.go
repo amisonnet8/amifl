@@ -1989,3 +1989,114 @@ func TestCheck_SwitchBindingScopedToCaseBody(t *testing.T) {
 		t.Fatal("expected an error referencing a case binding outside its own case body")
 	}
 }
+
+func TestCheck_ForYieldResolvesToListOfYieldType(t *testing.T) {
+	forExpr := &ast.ForExpr{
+		Var:   "x",
+		Items: &ast.IdentExpr{Name: "xs"},
+		Yield: &ast.BinaryExpr{Op: "*", Left: &ast.IdentExpr{Name: "x"}, Right: &ast.IntLit{Value: 2}},
+	}
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.LetExpr{Name: "ys", Value: forExpr},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if forExpr.ResolvedType != "List(Int64)" {
+		t.Fatalf("got ResolvedType %q, want List(Int64)", forExpr.ResolvedType)
+	}
+}
+
+func TestCheck_ForYieldAdaptsToExpectedListElemType(t *testing.T) {
+	// Yield's own bare literal (Int8-incompatible-by-default Int64) must
+	// adapt to the `let`'s List[Int8] annotation, the same expected-type
+	// threading resolveListLit already gets for a plain list literal.
+	forExpr := &ast.ForExpr{
+		Var:   "x",
+		Items: &ast.IdentExpr{Name: "xs"},
+		Yield: &ast.IntLit{Value: 5},
+	}
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.LetExpr{Name: "ys", Type: lt(nt("Int8")), Value: forExpr},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if forExpr.ResolvedType != "List(Int8)" {
+		t.Fatalf("got ResolvedType %q, want List(Int8)", forExpr.ResolvedType)
+	}
+}
+
+func TestCheck_ForYieldBreakIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.LetExpr{Name: "ys", Value: &ast.ForExpr{
+			Var:   "x",
+			Items: &ast.IdentExpr{Name: "xs"},
+			Yield: &ast.BreakExpr{},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for `break` used inside a `yield` expression")
+	}
+}
+
+func TestCheck_ForYieldBreakInsideOuterLoopIsStillAnError(t *testing.T) {
+	// break/continue must be rejected inside `yield` even when the
+	// yield-for is lexically nested inside an unrelated enclosing loop —
+	// loopDepth is suppressed (not just absent), mirroring a closure body.
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.WhileExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.DiscardExpr{Value: &ast.ForExpr{
+					Var:   "x",
+					Items: &ast.IdentExpr{Name: "xs"},
+					Yield: &ast.BreakExpr{},
+				}},
+				&ast.BreakExpr{},
+			}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for `break` inside a `yield` expression nested in an outer while loop")
+	}
+}
+
+func TestCheck_ForYieldUnitTypedIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.DiscardExpr{Value: &ast.ForExpr{
+			Var:   "x",
+			Items: &ast.IdentExpr{Name: "xs"},
+			Yield: printStr("side effect"),
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a Unit-typed `yield` value")
+	}
+}
+
+func TestCheck_ForYieldVarNotVisibleOutsideYield(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.DiscardExpr{Value: &ast.ForExpr{
+			Var:   "x",
+			Items: &ast.IdentExpr{Name: "xs"},
+			Yield: &ast.IdentExpr{Name: "x"},
+		}},
+		&ast.DiscardExpr{Value: &ast.IdentExpr{Name: "x"}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error referencing the for-yield variable outside its own scope")
+	}
+}

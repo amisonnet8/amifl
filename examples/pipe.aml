@@ -1,0 +1,30 @@
+fn double(x: Int) -> Int {
+    x * 2
+}
+
+fn addN(x: Int, n: Int) -> Int {
+    x + n
+}
+
+fn sum(xs: List[Int]) -> Int {
+    let total = 0
+    for x in xs {
+        total = total + x
+    }
+    total
+}
+
+fn main() -> Int {
+    let a = 5 |> double
+    let b = 5 |> addN(_, 3)
+    let c = 5 |> addN(3, _)
+
+    let nums: List[Int] = [1, 2, 3, 4]
+    let doubled = for x in nums yield x |> double
+    let s1 = sum(doubled)
+
+    let bumped = for x in nums yield addN(x, 10)
+    let s2 = sum(bumped)
+
+    a + b + c + s1 + s2
+}
