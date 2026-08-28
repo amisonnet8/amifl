@@ -1,4 +1,4 @@
-fn add(a: Int, b: Int) -> Int {
+fn addNums(a: Int, b: Int) -> Int {
     a + b
 }
 
@@ -31,7 +31,7 @@ fn logMsg(msg: String) -> Unit {
 }
 
 fn main() -> Int {
-    let sum = add(3, 4)
+    let sum = addNums(3, 4)
     print(if isEven(10) { "even" } else { "odd" })
     let fact4 = factorial(4)
     logMsg("logged")

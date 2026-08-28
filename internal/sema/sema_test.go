@@ -837,10 +837,10 @@ func TestCheck_LoopDepthRestoredAfterWhileExits(t *testing.T) {
 
 func TestCheck_FuncWithParamsIsCallable(t *testing.T) {
 	f := mainFile(
-		&ast.CallExpr{Callee: "add", Args: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}}},
+		&ast.CallExpr{Callee: "addNums", Args: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}}},
 	)
 	f.Decls = append(f.Decls, &ast.FuncDecl{
-		Name:       "add",
+		Name:       "addNums",
 		Params:     []ast.Param{{Name: "a", Type: nt("Int")}, {Name: "b", Type: nt("Int")}},
 		ReturnType: nt("Int"),
 		Body: &ast.Block{Exprs: []ast.Expr{
@@ -853,28 +853,28 @@ func TestCheck_FuncWithParamsIsCallable(t *testing.T) {
 }
 
 func TestCheck_CallWrongArgCountIsAnError(t *testing.T) {
-	f := mainFile(&ast.CallExpr{Callee: "add", Args: []ast.Expr{&ast.IntLit{Value: 1}}})
+	f := mainFile(&ast.CallExpr{Callee: "addNums", Args: []ast.Expr{&ast.IntLit{Value: 1}}})
 	f.Decls = append(f.Decls, &ast.FuncDecl{
-		Name:       "add",
+		Name:       "addNums",
 		Params:     []ast.Param{{Name: "a", Type: nt("Int")}, {Name: "b", Type: nt("Int")}},
 		ReturnType: nt("Int"),
 		Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 	})
 	if err := Check(f); err == nil {
-		t.Fatal("expected an error for calling add with the wrong number of arguments")
+		t.Fatal("expected an error for calling addNums with the wrong number of arguments")
 	}
 }
 
 func TestCheck_CallWrongArgTypeIsAnError(t *testing.T) {
-	f := mainFile(&ast.CallExpr{Callee: "add", Args: []ast.Expr{&ast.StringLit{Value: "x"}, &ast.IntLit{Value: 2}}})
+	f := mainFile(&ast.CallExpr{Callee: "addNums", Args: []ast.Expr{&ast.StringLit{Value: "x"}, &ast.IntLit{Value: 2}}})
 	f.Decls = append(f.Decls, &ast.FuncDecl{
-		Name:       "add",
+		Name:       "addNums",
 		Params:     []ast.Param{{Name: "a", Type: nt("Int")}, {Name: "b", Type: nt("Int")}},
 		ReturnType: nt("Int"),
 		Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 	})
 	if err := Check(f); err == nil {
-		t.Fatal("expected an error for calling add with a String where an Int is expected")
+		t.Fatal("expected an error for calling addNums with a String where an Int is expected")
 	}
 }
 
@@ -2622,5 +2622,148 @@ func TestCheck_ContainsRejectsNonComparableElement(t *testing.T) {
 	f := mainFile(nested, &ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
 	if err := Check(f); err == nil {
 		t.Fatal("expected an error: List[List[Int]]'s element type (List[Int]) isn't comparable")
+	}
+}
+
+// Phase 11c (amifl-spec.md sections 13.5/13.6) — Set/Map built-ins.
+
+func TestCheck_SetAddDiscardAreUnitTyped(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: intSetLit(1, 2, 3)},
+		&ast.CallExpr{Callee: "add", Args: []ast.Expr{&ast.IdentExpr{Name: "s"}, &ast.IntLit{Value: 4}}},
+		&ast.CallExpr{Callee: "discard", Args: []ast.Expr{&ast.IdentExpr{Name: "s"}, &ast.IntLit{Value: 1}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_SetUnionRequiresMatchingSetTypes(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "a", Value: intSetLit(1, 2)},
+		&ast.LetExpr{Name: "b", Value: &ast.SetOrMapLit{Elems: []ast.Expr{&ast.StringLit{Value: "x"}}}},
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "union", Args: []ast.Expr{&ast.IdentExpr{Name: "a"}, &ast.IdentExpr{Name: "b"}}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: union(Set[Int], Set[String]) — mismatched element types")
+	}
+}
+
+func TestCheck_SetIntersectDifferenceReturnSetType(t *testing.T) {
+	for _, name := range []string{"intersect", "difference"} {
+		t.Run(name, func(t *testing.T) {
+			call := &ast.CallExpr{Callee: name, Args: []ast.Expr{&ast.IdentExpr{Name: "a"}, &ast.IdentExpr{Name: "b"}}}
+			f := mainFile(
+				&ast.LetExpr{Name: "a", Value: intSetLit(1, 2)},
+				&ast.LetExpr{Name: "b", Value: intSetLit(2, 3)},
+				&ast.LetExpr{Name: "r", Value: call},
+				&ast.IntLit{Value: 0},
+			)
+			if err := Check(f); err != nil {
+				t.Fatalf("Check() error: %v", err)
+			}
+			if call.ResolvedType != "Set(Int64)" {
+				t.Fatalf("got ResolvedType %q, want Set(Int64)", call.ResolvedType)
+			}
+		})
+	}
+}
+
+func TestCheck_SetToListReturnsListOfElemType(t *testing.T) {
+	call := &ast.CallExpr{Callee: "toList", Args: []ast.Expr{&ast.IdentExpr{Name: "s"}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: intSetLit(1, 2, 3)},
+		&ast.LetExpr{Name: "xs", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "List(Int64)" {
+		t.Fatalf("got ResolvedType %q, want List(Int64)", call.ResolvedType)
+	}
+}
+
+func mapOfStringInt() *ast.SetOrMapLit {
+	return &ast.SetOrMapLit{Entries: []ast.MapLitEntry{
+		{Key: &ast.StringLit{Value: "a"}, Value: &ast.IntLit{Value: 1}},
+	}}
+}
+
+func TestCheck_MapKeysValuesEntriesTypes(t *testing.T) {
+	keysCall := &ast.CallExpr{Callee: "keys", Args: []ast.Expr{&ast.IdentExpr{Name: "m"}}}
+	valuesCall := &ast.CallExpr{Callee: "values", Args: []ast.Expr{&ast.IdentExpr{Name: "m"}}}
+	entriesCall := &ast.CallExpr{Callee: "entries", Args: []ast.Expr{&ast.IdentExpr{Name: "m"}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Value: mapOfStringInt()},
+		&ast.LetExpr{Name: "ks", Value: keysCall},
+		&ast.LetExpr{Name: "vs", Value: valuesCall},
+		&ast.LetExpr{Name: "es", Value: entriesCall},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if keysCall.ResolvedType != "List(String)" {
+		t.Fatalf("got keys() ResolvedType %q, want List(String)", keysCall.ResolvedType)
+	}
+	if valuesCall.ResolvedType != "List(Int64)" {
+		t.Fatalf("got values() ResolvedType %q, want List(Int64)", valuesCall.ResolvedType)
+	}
+	if entriesCall.ResolvedType != "List(Tuple(String,Int64))" {
+		t.Fatalf("got entries() ResolvedType %q, want List(Tuple(String,Int64))", entriesCall.ResolvedType)
+	}
+}
+
+func TestCheck_MapGetRequiresDefaultMatchingValueType(t *testing.T) {
+	call := &ast.CallExpr{Callee: "get", Args: []ast.Expr{&ast.IdentExpr{Name: "m"}, &ast.StringLit{Value: "a"}, &ast.StringLit{Value: "nope"}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Value: mapOfStringInt()},
+		&ast.DiscardExpr{Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: get(Map[String,Int], _, default: String) — default must be Int")
+	}
+}
+
+func TestCheck_MapGetReturnsValueType(t *testing.T) {
+	call := &ast.CallExpr{Callee: "get", Args: []ast.Expr{&ast.IdentExpr{Name: "m"}, &ast.StringLit{Value: "a"}, &ast.IntLit{Value: 0}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Value: mapOfStringInt()},
+		&ast.LetExpr{Name: "v", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Int64" {
+		t.Fatalf("got ResolvedType %q, want Int64", call.ResolvedType)
+	}
+}
+
+func TestCheck_MapSetDeleteAreUnitTyped(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Value: mapOfStringInt()},
+		&ast.CallExpr{Callee: "set", Args: []ast.Expr{&ast.IdentExpr{Name: "m"}, &ast.StringLit{Value: "b"}, &ast.IntLit{Value: 2}}},
+		&ast.CallExpr{Callee: "delete", Args: []ast.Expr{&ast.IdentExpr{Name: "m"}, &ast.StringLit{Value: "a"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_MapBuiltinsRejectNonMapArg(t *testing.T) {
+	for _, name := range []string{"keys", "values", "entries"} {
+		t.Run(name, func(t *testing.T) {
+			call := &ast.CallExpr{Callee: name, Args: []ast.Expr{&ast.IntLit{Value: 1}}}
+			f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+			if err := Check(f); err == nil {
+				t.Fatalf("expected an error: %s(Int) — Int isn't a Map", name)
+			}
+		})
 	}
 }

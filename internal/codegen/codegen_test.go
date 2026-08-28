@@ -1688,3 +1688,94 @@ func TestGenerate_ZipBuildsTuple2ViaFsetNotAmiflrt(t *testing.T) {
 		}
 	}
 }
+
+// Phase 11c (amifl-spec.md sections 13.5/13.6) codegen tests.
+
+func TestGenerate_SetAddEmitsMsetWithLiteralTrue(t *testing.T) {
+	setType := "Set(Int64)"
+	call := &ast.CallExpr{
+		Callee: "add", Builtin: "add", ResolvedType: "Unit",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "s", ResolvedType: setType, Token: "%s_1"}, &ast.IntLit{Value: 5}},
+		ArgTypes: []string{setType, "Int64"},
+	}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "MSET\t%s_1\t5\ttrue") {
+		t.Errorf("generated IR missing the MSET; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_SetDiscardEmitsDeleteBuiltin(t *testing.T) {
+	setType := "Set(Int64)"
+	call := &ast.CallExpr{
+		Callee: "discard", Builtin: "discard", ResolvedType: "Unit",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "s", ResolvedType: setType, Token: "%s_1"}, &ast.IntLit{Value: 5}},
+		ArgTypes: []string{setType, "Int64"},
+	}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "CALL\t:\t?delete\t%s_1\t5") {
+		t.Errorf("generated IR missing the ?delete CALL; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_MapGetUsesMgetOkFormThenIfElseForDefault(t *testing.T) {
+	mapType := "Map(String,Int64)"
+	call := &ast.CallExpr{
+		Callee: "get", Builtin: "get", ResolvedType: "Int64",
+		Args: []ast.Expr{
+			&ast.IdentExpr{Name: "m", ResolvedType: mapType, Token: "%m_1"},
+			&ast.StringLit{Value: "a"},
+			&ast.IntLit{Value: 0},
+		},
+		ArgTypes: []string{mapType, "String", "Int64"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "v", Token: "%v_1", ResolvedType: "Int64", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"MGET\t%amifl_tmp1\t%amifl_tmp2\t%m_1\t\"a\"",
+		"IF\t%amifl_tmp2",
+		"SET\t%amifl_tmp3\t%amifl_tmp1",
+		"ELSE",
+		"SET\t%amifl_tmp3\t0",
+		"ENDIF",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_MapEntriesBuildsTuple2ViaMpkeysAndMget(t *testing.T) {
+	mapType := "Map(String,Int64)"
+	pairType := "Tuple(String,Int64)"
+	call := &ast.CallExpr{
+		Callee: "entries", Builtin: "entries", ResolvedType: "List(" + pairType + ")",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "m", ResolvedType: mapType, Token: "%m_1"}},
+		ArgTypes: []string{mapType},
+	}
+	f := mainFile(&ast.LetExpr{Name: "es", Token: "%es_1", ResolvedType: "List(" + pairType + ")", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"MPKEYS\t%amifl_tmp1\t%m_1",
+		"MGET\t%amifl_tmp7\t%m_1\t%amifl_tmp6",
+		"FSET\t%amifl_tmp8\t>F0\t%amifl_tmp6",
+		"FSET\t%amifl_tmp8\t>F1\t%amifl_tmp7",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}

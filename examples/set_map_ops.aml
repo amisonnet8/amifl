@@ -1,0 +1,36 @@
+fn main() -> Int {
+    let s1: Set[Int] = {1, 2, 3}
+    let s2: Set[Int] = {3, 4, 5}
+
+    add(s1, 10)
+    discard(s1, 1)
+
+    let u = union(s1, s2)
+    let i = intersect(s1, s2)
+    let d = difference(s1, s2)
+
+    let listFromSet = toList(s1)
+
+    let m: Map[String, Int] = {"a": 1, "b": 2, "c": 3}
+
+    let ks = keys(m)
+    let vs = values(m)
+    let es = entries(m)
+
+    let gotExisting = get(m, "a", -1)
+    let gotMissing = get(m, "z", -1)
+
+    set(m, "d", 4)
+    delete(m, "a")
+
+    let sizeAfter = len(m)
+
+    print("set/map ops ok")
+
+    let part1 = len(u) + len(i) + len(d) + len(listFromSet)
+    let part2 = len(ks) + len(vs) + len(es)
+    let part3 = gotExisting + gotMissing + sizeAfter
+    let total = part1 + part2 + part3
+
+    total
+}

@@ -77,21 +77,47 @@ func (g *gen) genBuiltinValue(c *ast.CallExpr) (string, error) {
 		return g.genRemoveAtValue(c)
 	case "concat":
 		return g.genConcatValue(c)
+	case "union":
+		return g.genSetBinaryOpValue(c, "?amiflrt.UnionSet")
+	case "intersect":
+		return g.genSetBinaryOpValue(c, "?amiflrt.IntersectSet")
+	case "difference":
+		return g.genSetBinaryOpValue(c, "?amiflrt.DifferenceSet")
+	case "toList":
+		return g.genSetToListValue(c)
+	case "keys":
+		return g.genMapKeysValue(c)
+	case "values":
+		return g.genMapValuesValue(c)
+	case "entries":
+		return g.genMapEntriesValue(c)
+	case "get":
+		return g.genMapGetValue(c)
 	default:
 		return "", fmt.Errorf("codegen: built-in %q has no value-position codegen yet", c.Builtin)
 	}
 }
 
 // genBuiltinStmt dispatches a built-in call used purely for effect — a
-// Unit-returning built-in (setAt is the only one so far — 13.5/13.6's Set/
-// Map mutators join it in phase 11c), or a non-Unit one reached through a
-// discard, which falls through to genBuiltinValue and discards the token
+// Unit-returning built-in (setAt, and, since phase 11c, Set's add/discard
+// and Map's set/delete — all mutate their first argument in place rather
+// than producing a value), or a non-Unit one reached through a discard,
+// which falls through to genBuiltinValue and discards the token
 // (mirroring genStmt's own established "generate as a value, discard the
 // result" pattern for every other non-Unit kind that can appear discarded
 // — codegen.go's genStmt, the TupleLit/StructLit/... bucket).
 func (g *gen) genBuiltinStmt(c *ast.CallExpr) error {
-	if c.Builtin == "setAt" {
+	switch c.Builtin {
+	case "setAt":
 		return g.genSetAtStmt(c)
+	case "add":
+		return g.genSetAddStmt(c)
+	case "discard":
+		return g.genSetDiscardStmt(c)
+	case "set":
+		return g.genMapSetStmt(c)
+	case "delete":
+		return g.genMapDeleteStmt(c)
 	}
 	_, err := g.genBuiltinValue(c)
 	return err

@@ -203,7 +203,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 8 ✅ | `enum`・`switch`拡張 | バリアント定義・値生成、`switch`での判定/フィールド取り出し、バリアント網羅性検査 | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` `IF` `ELSE` `ENDIF` `EQ`（新規命令ゼロ、Step 6/4の既存命令のみで実現） | 設計課題4（enum表現、下記「確定した設計判断」参照） |
 | 9 ✅ | パイプ演算子`|>` | `_`プレースホルダー、`for...yield`糖衣、`|>`の優先順位（最低） | （新規命令無し。糖衣構文） | 設計課題7（下記「確定した設計判断」参照） |
 | 10 ✅ | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5（下記「確定した設計判断」参照） |
-| 11 🚧 | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開。フェーズ分割で進行中：11a✅（`Error`型・`?`演算子・`cast[T]`/`parse[T]`ブラケット構文・`isError`・組み込み関数dispatch基盤）→11b✅（13.4節データ操作28関数）→11c（13.5/13.6節Set/Map専用）→11d（13.7節数値・`unwrap`/`okOr`） | （`amiflrt`+ネイティブ命令の混在） | **設計課題6（capability多相の実装方式）** |
+| 11 🚧 | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開。フェーズ分割で進行中：11a✅（`Error`型・`?`演算子・`cast[T]`/`parse[T]`ブラケット構文・`isError`・組み込み関数dispatch基盤）→11b✅（13.4節データ操作28関数）→11c✅（13.5/13.6節Set/Map専用）→11d（13.7節数値・`unwrap`/`okOr`） | （`amiflrt`+ネイティブ命令の混在） | **設計課題6（capability多相の実装方式）** |
 | 12 | ファイルI/O・`Stream[T]`・並列処理 | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣、`spawn`/`send`/`recv`/`parallel` | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` `SPAWN` `SEL` `CASESEND` `CASERECV` `DEFAULT` `ENDSEL` `DEFER` | — |
 | 13 | `extern`機構 | Go資産バインド（15.1〜15.4節）、`Any`型境界の実装方式確定 | `ASSERT`（要否は設計課題1による） | **設計課題1（先例無し・最大の山場の1つ）** |
 | 14 | モジュール | `import`/エイリアス/可視性/循環禁止（12節） | — | — |
@@ -579,6 +579,16 @@ Step 11着手時にユーザーと合意した設計方針（capability多相は
 **`map`/`filter`/`reduce`がArrayも受け付ける際は、事前にスライス化する**：amiflrtの各ジェネリクス関数は`[]T`（スライス）を要求するが、Arrayは固定長のGoネイティブ配列（`[N]T`）で別の型のため、`arr[:]`（`VAR`宣言済みの配列はアドレス取得可能なのでGoで合法）に相当する`SLICE ... _ _`を挟んでスライス化してから渡す（`arrayAwareSliceValue`ヘルパー）。
 
 **実地検証（`amivm`→`go build`→実行）で確認した項目**：`examples/data_ops.aml`——28関数すべてを最低1回は呼び出し、`len`/`slice`/`at`/`setAt`/`contains`/`index`/文字列8関数/`map`/`filter`/`reduce`/`sort`/`sortBy`/`reverse`（List・Array・String全形）/`unique`/`flatten`/`zip`/`push`/`pop`/`insert`/`removeAt`/`concat`（List・String両方）を1つの関数内で連鎖させた。トップレベル`fn`ではなく`let`束縛のローカルクロージャーを`map`/`filter`/`reduce`/`sortBy`へ渡す必要がある点（トップレベル`fn`を値として渡す構文は無い、Step5の既存制約）を実装中に再確認し、サンプルもそれに合わせて構成した。生成されたIRを目視確認し、`Flatten`の2型引数呼び出し・`reverse`のArray分岐が手書きループになっていること・`zip`がFSETでTuple2を組み立てていること・`contains`がMap/SetでMGETのokフォームを使っていることを確認。実行結果は終了コード46（POSIXの256モジュロ込みで手計算した558と一致：内訳は`8+4+5+10+3+99+4=133`＋`198+3+127+1+5=334`＋`6+40+3+4+11=64`＋`3+3+3+3+4+6=22`＋`boolSum=5`）を確認。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。
+
+### Step 11フェーズ11c：13.5節（`Set[T]`専用）・13.6節（`Map[K,V]`専用）
+
+**Set/Mapの「mutator」は破壊的（in-place）に統一した**：`add`/`discard`（Set）・`set`/`delete`（Map）は13.4節の`push`/`pop`/`insert`/`removeAt`（非破壊、新しいListを返す）とは対照的に、対象を直接書き換えてUnitを返す設計にした。理由はGoの実行時表現がどちらも既にmapという参照型であること——`MSET`/Goの`delete`組み込みはそもそも「その場で書き換える」以外の意味を持たない命令であり、非破壊版（新しいMap/Setを丸ごとコピーして返す）を無理に選ぶ理由が無い。ListのPush等が非破壊を選んだ理由（`append`がバッキング配列を再利用しうる、というGoスライス特有の危険）がSet/Mapには存在しない——「同じ設計思想を全関数に機械的に適用する」のではなく、各データ型の実行時表現が持つ自然な意味論に沿わせた。
+
+**Set用の集合演算3つ（`union`/`intersect`/`difference`）だけがamiflrtを必要とし、他は全て既存命令の使い回しで済んだ**：`add`/`discard`は`MSET`とGoの組み込み`delete`（`contains`のMap/Set分岐が11bで既に確立した「Goのネイティブ`delete`をCALLでそのまま呼ぶ」パターンの再利用）、`toList`/`keys`はどちらも`MPKEYS`そのもの（SetがMap[T,Bool]と同じGo表現であることの直接の恩恵——`toList(s)`と`keys(m)`は実装上完全に同一のコード生成になった、`genMapKeysValue`が`genSetToListValue`を素通しで再利用している）。`values`だけはMPKEYSに相当するネイティブ命令が無く、`amiflrt.MapValues[K,V]`を新設した。`get`は`MGET`のokフォーム＋`IF`/`ELSE`でデフォルト値を選ぶだけで実現でき、`entries`は11bの`zip`と全く同じ理由（amiflrtがAmiFL独自のTuple2 STTYPEを返せない）で手書きループ（`MPKEYS`でキー一覧を取得→ループ内で`MGET`k+`FSET`によるTuple2組み立て）にした。
+
+**予約した組み込み名が既存コードと衝突し、実地でテスト失敗として発覚した**：`add`という名前を13.5節どおりSetの組み込み関数として予約したところ、既存の`examples/functions.aml`（Step5から存在する`fn add(a,b) -> Int`という単純な足し算関数）と`internal/sema/sema_test.go`の3つのテストが、`add(3,4)`のような呼び出しを「Setを第1引数に取る組み込みadd」と誤解釈するようになり、型エラーで壊れた——`add`のような一般的な英単語を組み込み名として予約すると、そのステップ以前に書かれた「普通の変数・関数名としての`add`」を使うコードが後から静かに（あるいはこのケースのように派手に）壊れうる、という初めての実例。対策は該当箇所を`addNums`のような衝突しない名前へリネームすること（CLAUDE.md「開発の進め方」7番の「後方互換性は現時点では意識しなくてよい」原則どおり、リネームで解決してよいと判断した）。
+
+**実地検証（`amivm`→`go build`→実行）で確認した項目**：`examples/set_map_ops.aml`——`add`/`discard`でSetを書き換えた後の`union`/`intersect`/`difference`/`toList`、`Map`の`keys`/`values`/`entries`/`get`（存在キー・不在キー両方）/`set`/`delete`を1つの関数内で連鎖させた。生成されたIRを目視確認し、`toList`/`keys`がどちらも同一の`MPKEYS`直呼びへ下がっていること、`get`が`MGET`のokフォーム+`IF`/`ELSE`になっていること、`entries`が`MPKEYS`→ループ内`MGET`+`FSET`になっていることを確認。実行結果は終了コード23（`union長5+intersect長1+difference長2+toList長3=11`＋`keys長3+values長3+entries長3=9`＋`get(存在)1+get(不在)-1+len(m)3=3`の合計）を確認。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み（`add`のリネームを反映した`examples/functions.aml`の終了コード109も再確認済み）。
 
 ## 開発の進め方
 
