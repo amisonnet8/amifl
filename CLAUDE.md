@@ -193,7 +193,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | # | ステップ | 主な内容 | 実証する命令（想定） | 解決する設計課題（上記番号） |
 |---|---|---|---|---|
 | 1 ✅ | ブートストラップ | lexer/parser/ast/codegen最小構成。`fn main() -> Int { print("Hello, AmiFL!") 0 }`をamivm→go build→実行まで通す | `FUNC` `RET` `ENDFUNC` `CALL` | `main`のブリッジ方式確定（下記「確定した設計判断」参照） |
-| 2 | スカラー型・`let`/`const`・式指向の基礎 | `Int`系/`UInt`系/`Float`系/`Bool`/`String`、`let`（トップレベル禁止）・`const`（インライン展開）、ブロック値・`Unit`強制の検査 | `VAR` `SET` | — |
+| 2 ✅ | スカラー型・`let`/`const`・式指向の基礎 | `Int`系/`UInt`系/`Float`系/`Bool`/`String`、`let`（トップレベル禁止）・`const`（インライン展開）、ブロック値・`Unit`強制の検査 | `VAR` `SET` | — |
 | 3 | 演算子 | 算術・比較・論理・ビット・シフト・`Concatenable`の`+`、優先順位表の実地検証 | `ADD` `SUB` `MUL` `DIV` `MOD` `BAND` `BOR` `BXOR` `BCLEAR` `BNOT` `SHL` `SHR` `AND` `OR` `NOT` `EQ` `NEQ` `LT` `LTE` `GT` `GTE` `CONCAT` | — |
 | 4 | 制御構文（式指向） | `if`/`elif`/`else`、`while`、`for`（`Unit`版のみ）。`switch`は`Bool`式のみ（`is Type`/`in [...]`/enumは後続） | `IF` `ELIF` `ELSE` `ENDIF` `LOOP` `BREAK` `CONTINUE` `ENDLOOP` | — |
 | 5 | 関数・クロージャ | トップレベル`fn`（自己再帰可）、ローカルクロージャー（多引数直接・カリー化なし）、`Func`型 | `FNTYPE` `CLOS` `ENDCLOS` | — |
@@ -236,6 +236,26 @@ AmiFLの`fn main() -> Int { ... }`をamivmの`!main`へ直接対応させるこ�
 - 13.1/13.2節の`print`/`format`/`typeName`/`isError`等が使う`Any`：静的には各呼び出し箇所で具体型が確定している「無制約な多相引数」——`len`等のcapability多相（2.3節）が閉じた型集合に限定されるのに対し、`print`は文字通りどんな具体型でも受け付ける全称的な多相という違いはあるが、いずれにせよ**コンパイル時に呼び出し箇所ごとの具体型へモノモーフィックに解決される**という点はcapabilityと同じ設計思想の延長にある。Goの`fmt.Println(args ...any)`が任意の具体型を暗黙にboxingしてくれるため、AmiFL自身が動的型表現（reflect等）を持つ必要は無い見込み
 
 この整理はStep 11（capability多相の実装方式確定）で本格的に確定させる。**Step 1時点では`print`を`String`引数限定でハードコード実装している**（`internal/sema/sema.go`・`internal/codegen/codegen.go`とも`print`専用の分岐で、一般的な組み込み関数解決の仕組みはまだ無い）。Step 11で一般化する際にこの制限を外すこと。
+
+### スカラー型システムの実装方式（Step 2で確定）
+
+`amifl-spec.md` 2.1節のスカラー型（`Int8`〜`UInt64`・`Float32`/`Float64`・`Bool`・`String`、および`Int`/`UInt`/`Float`/`Byte`/`Rune`のエイリアス）は、いずれもGoのネイティブ数値・真偽値・文字列型へ直接マッピングする（`internal/codegen`の`goTypeNames`）。エイリアスは`internal/sema`の`canonicalType`が正規名（例：`Int`→`Int64`、`Byte`→`UInt8`）へ解決してから以降の型検査・コード生成へ渡す——「`Int`と`Int64`は同じ型、`Int32`と`Int64`は別の型」という原則2（暗黙変換の排除）の判定基準がこれで一意に定まる。
+
+**リテラルは「無型」として扱い、文脈の期待型へ適応させる**：整数リテラルは期待型が整数系ならその型として妥当性（オーバーフロー）を検査し、期待型が浮動小数点系ならそのまま採用（Step2では精度落ちの検査はしない）、期待型が無ければ`Int64`をデフォルトとする。浮動小数点リテラルは整数系型へは決して適応しない（小数点情報の欠落を静かに許さないため）。この適応ロジックは`internal/sema/expr.go`の`resolveType`が一手に引き受け、`checkExpr`が最後に「解決した型と期待型が一致するか」を一箇所でまとめて検査する——`let`/`const`/`print`呼び出し等、期待型を持つあらゆる文脈がこの1つの関数を経由するため、チェック漏れが起きにくい設計になっている。
+
+**`let`/`const`をUnit型の値へ束縛することは明示的に禁止した**：`let x = print("a")`のような、Unit型の式（`print`呼び出し自体・別の`let`/`const`/代入式）を変数の初期化式にすることは、`resolveLetExpr`/`resolveConstDecl`が`typ == unitType`を検査して拒否する。この検査を入れないと、`let x = (let y = 5)`のような入れ子が素通りしてしまい、codegenの`genValue`が「値として使えない式」という内部エラーで落ちる——**semaが本来防波堤として捕まえるべきミスを、codegenの内部エラーとして漏らさない**（CLAUDE.md「意味検証の責任分担」）ための対策。
+
+**`const`は完全にコンパイル時展開され、実行時のストレージを一切持たない。** sema（`internal/sema/expr.go`の`resolveIdentExpr`）が識別子を解決する際、対象が`const`であれば`ast.IdentExpr.ConstValue`にその（末端まで平坦化済みの）リテラルノードを直接埋め込む——Seed/Cascadeの「semaが計算した情報をAST自身にアノテーションし、codegenはそれを読むだけ」というパターンをそのまま踏襲した。`const B = A`（`A`は既存の別の`const`）のような`const`どうしの参照は、宣言時点で`A`のリテラル値をそのまま`B`のバインディングへコピーする（`literalValueOf`）ため、`codegen`側は「これは`const`か`let`か」を判定する必要が無く、`ConstValue`が非nilかどうかを見るだけで済む。**`const`の依存順序は宣言順のみをサポートする**（Cascadeのトップレベル`let`と同じ判断——後方参照は今のところ許可しない）。
+
+### スコープはStep 2時点でフラット（ネスト構造はStep 4で再検討）
+
+`if`/`while`等のブロック構造がまだ無いため、1つの関数につき1つのフラットな`map[string]*binding`（`internal/sema/scope.go`の`funcChecker.locals`）で足りる。同じ関数内で同名の`let`/`const`を再宣言するとエラーになる（シャドーイング未対応）。トップレベル`const`は別の`checker.globals`マップに保持し、関数ローカルの束縛がこれをシャドーできる（ローカルスコープ優先で検索）。この設計はStep 4（制御構文）で入れ子ブロックが実際に必要になった時点で、Weave方式（sema側だけがスコープの親子連鎖を持ち、codegen側は生成する変数名を一意化するだけ）かSeed/Cascade方式（codegen側でも一意な内部名を採番する）かを選定し直す。
+
+### `_ = expr`はGoの未使用変数対策ではなく、純粋に言語仕様上の型規律のための構文（Step 2で確定・実地検証済み）
+
+amivm自身が「生成したGoコードに未使用変数があれば`_ = 変数名`をVAR宣言の直後へ自動挿入する」という自己修復機構を内部に持っている（`ignored/amivm/CLAUDE.md`「命名規則と未使用変数対応」節）。これを実地検証で確認した：`let inferred = 42`と宣言した後に一度も使わなくても、amivmが生成したGoコードには`var ...inferred int64` の直後に`_ = ...inferred`が自動挿入されており、`go build`は問題なく通った。
+
+これはつまり、**AmiFLのcodegenは「宣言した`let`変数が後で使われるかどうか」を一切気にする必要が無い**ということ（Cascadeの`CLAUDE.md`が下した同じ結論——「amivmは生成コード中の未使用変数を自己修復する仕組みを内部に持っている。これはamivm側の責務であり、Cascadeのcodegenが一時変数の使用漏れを気にする必要は無い」——をAmiFLでも確認できた形）。したがって`internal/ast.DiscardExpr`（`_ = expr`）のcodegen（`internal/codegen`の`genDiscardStmt`）は、リテラル・変数読み取りのような副作用の無い値に対しては**何もIRを生成しない**（Goの未使用変数エラーを回避するための特別な処置は一切不要）。`_ = expr`が実際に担っているのは、原則1（式指向・文の排除）の「ブロック内の最後以外の式は`Unit`型必須」という**AmiFL自身の型規律**を、値を捨てたい場面で満たすための構文糖衣であり、Goのコンパイラ都合とは無関係。将来（Step 5以降）副作用を持つ非Unit型の呼び出し（例：戻り値のある一般関数呼び出し）を`_ = f()`で捨てる場合は、`genDiscardStmt`が`CallExpr`のケースで既にその呼び出し自体は必ず実行するよう作ってある（副作用だけは保持し、結果だけを捨てる）。
 
 ## 開発の進め方
 

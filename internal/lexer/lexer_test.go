@@ -94,3 +94,79 @@ func TestNext_LineNumbersAdvanceAcrossNewlines(t *testing.T) {
 		t.Errorf("main token: got line %d, want 3", toks[3].Line)
 	}
 }
+
+func TestNext_LetConstKeywordsAndPunctuation(t *testing.T) {
+	toks := tokenize(t, "let x: Int = 1\nconst Y = 2")
+	want := []Kind{
+		KwLet, Ident, Colon, Ident, Assign, Int, Newline,
+		KwConst, Ident, Assign, Int,
+		EOF,
+	}
+	if len(toks) != len(want) {
+		t.Fatalf("got %d tokens, want %d: %+v", len(toks), len(want), toks)
+	}
+	for i, k := range want {
+		if toks[i].Kind != k {
+			t.Errorf("token %d: got Kind %v, want %v", i, toks[i].Kind, k)
+		}
+	}
+}
+
+func TestNext_BoolKeywords(t *testing.T) {
+	toks := tokenize(t, "true false")
+	if len(toks) != 3 || toks[0].Kind != KwTrue || toks[1].Kind != KwFalse || toks[2].Kind != EOF {
+		t.Fatalf("unexpected tokens: %+v", toks)
+	}
+}
+
+func TestNext_FloatLiterals(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		want string
+	}{
+		{"3.14", "3.14"},
+		{"1.23e4", "1.23e4"},
+		{"1.5e-3", "1.5e-3"},
+		{"2E2", "2E2"},
+	} {
+		toks := tokenize(t, tc.src)
+		if len(toks) != 2 || toks[0].Kind != Float {
+			t.Fatalf("tokenize(%q): unexpected tokens: %+v", tc.src, toks)
+		}
+		if toks[0].Value != tc.want {
+			t.Errorf("tokenize(%q): got %q, want %q", tc.src, toks[0].Value, tc.want)
+		}
+	}
+}
+
+func TestNext_IntNotConfusedWithFloat(t *testing.T) {
+	// A '.' not followed by a digit must not start a fractional part
+	// (leaves room for a future tuple '.' field-access operator, step 6,
+	// to never be swallowed by a number literal).
+	toks := tokenize(t, "42")
+	if len(toks) != 2 || toks[0].Kind != Int || toks[0].Value != "42" {
+		t.Fatalf("unexpected tokens: %+v", toks)
+	}
+}
+
+func TestNext_ExponentWithoutDigitsIsNotConsumed(t *testing.T) {
+	// "1e" with no following digit: 'e' must be left for the next token
+	// (an identifier), not swallowed into a malformed float.
+	toks := tokenize(t, "1e")
+	want := []Kind{Int, Ident, EOF}
+	if len(toks) != len(want) {
+		t.Fatalf("got %d tokens, want %d: %+v", len(toks), len(want), toks)
+	}
+	for i, k := range want {
+		if toks[i].Kind != k {
+			t.Errorf("token %d: got Kind %v, want %v", i, toks[i].Kind, k)
+		}
+	}
+}
+
+func TestNext_Underscore(t *testing.T) {
+	toks := tokenize(t, "_")
+	if len(toks) != 2 || toks[0].Kind != Ident || toks[0].Value != "_" {
+		t.Fatalf("unexpected tokens: %+v", toks)
+	}
+}

@@ -1,0 +1,22 @@
+const Greeting: String = "Hello from a const!"
+
+fn main() -> Int {
+    print(Greeting)
+
+    let name: String = "AmiFL"
+    print(name)
+
+    let count: Int = 3
+    let total: Int = count
+    total = 6
+
+    let inferred = 42
+    _ = inferred
+
+    let pi: Float = 3.14
+    let ready: Bool = true
+
+    _ = 1
+
+    total
+}

@@ -7,7 +7,11 @@ import (
 )
 
 var keywords = map[string]Kind{
-	"fn": KwFn,
+	"fn":    KwFn,
+	"let":   KwLet,
+	"const": KwConst,
+	"true":  KwTrue,
+	"false": KwFalse,
 }
 
 // Lexer tokenizes AmiFL source text one Token at a time via Next.
@@ -60,13 +64,19 @@ func (l *Lexer) Next() (Token, error) {
 	case c == ',':
 		l.pos++
 		return Token{Kind: Comma, Line: line}, nil
+	case c == ':':
+		l.pos++
+		return Token{Kind: Colon, Line: line}, nil
+	case c == '=':
+		l.pos++
+		return Token{Kind: Assign, Line: line}, nil
 	case c == '-' && l.byteAt(1) == '>':
 		l.pos += 2
 		return Token{Kind: Arrow, Line: line}, nil
 	case c == '"':
 		return l.lexString(line)
 	case isDigit(c):
-		return l.lexInt(line), nil
+		return l.lexNumber(line), nil
 	case isIdentStart(c):
 		return l.lexIdent(line), nil
 	default:
@@ -123,12 +133,54 @@ func (l *Lexer) lexIdent(line int) Token {
 	return Token{Kind: Ident, Value: text, Line: line}
 }
 
-func (l *Lexer) lexInt(line int) Token {
+// lexNumber reads an integer or floating-point literal (amifl-spec.md
+// section 3.1: "42 ... 3.14 1.23e4"). A '.' only starts a fractional part
+// when followed by a digit — this both rejects a bare trailing '.' and
+// leaves room for a future '.' field-access operator (tuples, step 6) to
+// never be swallowed by a number literal.
+func (l *Lexer) lexNumber(line int) Token {
 	start := l.pos
 	for l.pos < len(l.src) && isDigit(l.src[l.pos]) {
 		l.pos++
 	}
-	return Token{Kind: Int, Value: l.src[start:l.pos], Line: line}
+
+	isFloat := false
+	if l.pos < len(l.src) && l.src[l.pos] == '.' && isDigit(l.byteAt(1)) {
+		isFloat = true
+		l.pos++
+		for l.pos < len(l.src) && isDigit(l.src[l.pos]) {
+			l.pos++
+		}
+	}
+
+	if l.pos < len(l.src) && (l.src[l.pos] == 'e' || l.src[l.pos] == 'E') {
+		if end, ok := l.exponentEnd(l.pos + 1); ok {
+			isFloat = true
+			l.pos = end
+		}
+	}
+
+	text := l.src[start:l.pos]
+	if isFloat {
+		return Token{Kind: Float, Value: text, Line: line}
+	}
+	return Token{Kind: Int, Value: text, Line: line}
+}
+
+// exponentEnd checks for a well-formed exponent suffix ([+-]?digit+)
+// starting at pos (just past the 'e'/'E') and, if found, returns the
+// offset just past its last digit.
+func (l *Lexer) exponentEnd(pos int) (int, bool) {
+	if pos < len(l.src) && (l.src[pos] == '+' || l.src[pos] == '-') {
+		pos++
+	}
+	if pos >= len(l.src) || !isDigit(l.src[pos]) {
+		return 0, false
+	}
+	for pos < len(l.src) && isDigit(l.src[pos]) {
+		pos++
+	}
+	return pos, true
 }
 
 // lexString reads a "..." literal, decoding the small set of escapes step

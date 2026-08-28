@@ -6,32 +6,47 @@ import (
 	"github.com/amisonnet8/amifl/internal/ast"
 )
 
-// Check performs step 1's minimal semantic validation.
-//
-// This is intentionally narrow: AmiFL has no type checker yet (that lands
-// in step 2), so Check only validates the handful of shapes step 1's
-// bootstrap pipeline actually needs — a single parameter-less `fn main`
-// returning Int, whose body is zero or more print(String literal) calls
-// followed by an Int literal. Every rejection below is a step-1-specific
-// placeholder standing in for the real type checker, not a permanent
-// language rule; replace it as the real checks land (see CLAUDE.md's
-// implementation step plan).
+// Check performs step 2's semantic validation: scalar type checking,
+// let/const scope resolution (with const inlining), and the
+// expression-oriented "every non-final expression in a block must be
+// Unit-typed" rule (amifl-spec.md principle 1). AmiFL's full type system
+// (structs, enums, collections, capability resolution, general function
+// calls, ...) grows across later steps — see CLAUDE.md's implementation
+// step plan. Step 2 still only supports a single `fn main`; declaring and
+// calling other functions arrives in step 5.
 func Check(f *ast.File) error {
-	main, err := findMain(f)
+	c := &checker{globals: map[string]*binding{}}
+
+	var funcs []*ast.FuncDecl
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.ConstDecl:
+			if err := c.checkTopLevelConst(d); err != nil {
+				return err
+			}
+		case *ast.FuncDecl:
+			funcs = append(funcs, d)
+		default:
+			return fmt.Errorf("sema: unknown top-level declaration %T", decl)
+		}
+	}
+
+	// Consts are resolved (in file order, so a const may only reference
+	// an *earlier* const — CLAUDE.md's "確定した設計判断") in the loop
+	// above before any function is checked here, so every function sees
+	// every top-level const regardless of where in the file it sits.
+	main, err := findAndValidateMain(funcs)
 	if err != nil {
 		return err
 	}
-	if main.ReturnType != "Int" {
-		return fmt.Errorf("line %d: fn main must return Int, got %s", main.Line, main.ReturnType)
-	}
-	return checkMainBody(main)
+	return c.checkFunc(main)
 }
 
-func findMain(f *ast.File) (*ast.FuncDecl, error) {
+func findAndValidateMain(funcs []*ast.FuncDecl) (*ast.FuncDecl, error) {
 	var main *ast.FuncDecl
-	for _, fn := range f.Funcs {
+	for _, fn := range funcs {
 		if fn.Name != "main" {
-			continue
+			return nil, fmt.Errorf("line %d: step 2 only supports a single `fn main`; general function declarations arrive in step 5", fn.Line)
 		}
 		if main != nil {
 			return nil, fmt.Errorf("line %d: duplicate `fn main` (first declared at line %d)", fn.Line, main.Line)
@@ -41,41 +56,65 @@ func findMain(f *ast.File) (*ast.FuncDecl, error) {
 	if main == nil {
 		return nil, fmt.Errorf("missing entry point: no `fn main` declared (amifl-spec.md section 14)")
 	}
+	retType, ok := canonicalType(main.ReturnType)
+	if !ok {
+		return nil, fmt.Errorf("line %d: unknown type %q", main.Line, main.ReturnType)
+	}
+	if retType != "Int64" {
+		return nil, fmt.Errorf("line %d: fn main must return Int, got %s", main.Line, main.ReturnType)
+	}
 	return main, nil
 }
 
-func checkMainBody(main *ast.FuncDecl) error {
-	exprs := main.Body.Exprs
-	if len(exprs) == 0 {
-		return fmt.Errorf("line %d: fn main's body must not be empty", main.Line)
+func (c *checker) checkTopLevelConst(d *ast.ConstDecl) error {
+	if _, exists := c.globals[d.Name]; exists {
+		return fmt.Errorf("line %d: %q is already declared", d.Line, d.Name)
 	}
-	for i, e := range exprs {
-		if i == len(exprs)-1 {
-			if _, ok := e.(*ast.IntLit); !ok {
-				return fmt.Errorf("fn main's last expression must be an Int literal (step 1 limitation)")
-			}
-			continue
-		}
-		if err := checkPrintCall(e); err != nil {
-			return err
-		}
+	fc := newFuncChecker(c)
+	typ, lit, err := resolveConstDecl(fc, d)
+	if err != nil {
+		return err
 	}
+	d.ResolvedType = typ
+	c.globals[d.Name] = &binding{isConst: true, typ: typ, value: lit}
 	return nil
 }
 
-func checkPrintCall(e ast.Expr) error {
-	call, ok := e.(*ast.CallExpr)
+func (c *checker) checkFunc(fn *ast.FuncDecl) error {
+	retType, ok := canonicalType(fn.ReturnType)
 	if !ok {
-		return fmt.Errorf("non-final expressions in fn main must be Unit-typed calls (step 1 limitation: only print(...) exists so far)")
+		return fmt.Errorf("line %d: unknown type %q", fn.Line, fn.ReturnType)
 	}
-	if call.Callee != "print" {
-		return fmt.Errorf("line %d: step 1 only supports calling the built-in `print`, got %q", call.Line, call.Callee)
+	fc := newFuncChecker(c)
+	_, err := fc.checkBlock(fn.Body, retType)
+	return err
+}
+
+// checkBlock type-checks a block's expressions against the
+// expression-oriented rule that every non-final expression must be
+// Unit-typed (amifl-spec.md principle 1), and returns the block's own
+// type: the last expression's type, checked against expected ("" for no
+// context). Written to be reusable once nested blocks (if/while bodies)
+// arrive in step 4.
+func (fc *funcChecker) checkBlock(b *ast.Block, expected string) (string, error) {
+	if len(b.Exprs) == 0 {
+		if expected != "" && expected != unitType {
+			return "", fmt.Errorf("empty block has type Unit, expected %s", expected)
+		}
+		return unitType, nil
 	}
-	if len(call.Args) != 1 {
-		return fmt.Errorf("line %d: print expects exactly 1 argument, got %d", call.Line, len(call.Args))
+	for i, e := range b.Exprs {
+		if i < len(b.Exprs)-1 {
+			t, err := fc.checkExpr(e, "")
+			if err != nil {
+				return "", err
+			}
+			if t != unitType {
+				return "", fmt.Errorf("line %d: non-final expression in a block must be Unit-typed, got %s (discard it explicitly with `_ = ...` if this is intentional)", e.Pos(), t)
+			}
+			continue
+		}
+		return fc.checkExpr(e, expected)
 	}
-	if _, ok := call.Args[0].(*ast.StringLit); !ok {
-		return fmt.Errorf("line %d: step 1 only supports print(String literal)", call.Line)
-	}
-	return nil
+	panic("unreachable")
 }
