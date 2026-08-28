@@ -131,13 +131,13 @@ func genFuncDecl(prog *program, out *strings.Builder, fn *ast.FuncDecl) error {
 		name = entryFunc
 	}
 
-	out.WriteString("FUNC\t!" + name)
+	fmt.Fprintf(out, "FUNC\t!%s", name)
 	for _, p := range fn.Params {
-		out.WriteString("\t^" + prog.resolveGoType(p.ResolvedType))
+		fmt.Fprintf(out, "\t^%s", prog.resolveGoType(p.ResolvedType))
 	}
 	out.WriteString("\t:")
 	if fn.ResolvedReturnType != unitType {
-		out.WriteString("\t^" + prog.resolveGoType(fn.ResolvedReturnType))
+		fmt.Fprintf(out, "\t^%s", prog.resolveGoType(fn.ResolvedReturnType))
 	}
 	out.WriteString("\n")
 

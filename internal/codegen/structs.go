@@ -86,7 +86,7 @@ func (p *program) tupleGoTypeName(canonical string) string {
 	}
 	p.tupleTypes[canonical] = name
 
-	p.typeHeader.WriteString("STTYPE\t^" + name + "\n")
+	fmt.Fprintf(&p.typeHeader, "STTYPE\t^%s\n", name)
 	for i, e := range elems {
 		goType := p.resolveGoType(e)
 		fmt.Fprintf(&p.typeHeader, "\tFIELD\t>F%d\t^%s\n", i, goType)
@@ -104,7 +104,7 @@ func (p *program) tupleGoTypeName(canonical string) string {
 // guarantees amivm's own IR parsing doesn't — see Generate's existing
 // comment on the identical concern for FNTYPE).
 func genStructDecl(prog *program, d *ast.StructDecl) {
-	prog.typeHeader.WriteString("STTYPE\t^" + d.Name + "\n")
+	fmt.Fprintf(&prog.typeHeader, "STTYPE\t^%s\n", d.Name)
 	for _, f := range d.Fields {
 		goType := prog.resolveGoType(f.ResolvedType)
 		fmt.Fprintf(&prog.typeHeader, "\tFIELD\t>%s\t^%s\n", f.Name, goType)

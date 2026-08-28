@@ -30,7 +30,7 @@ import (
 // has already matched, so which variant is "really" live is always known
 // by construction, not by inspecting the otherwise-unused fields.
 func genEnumDecl(prog *program, d *ast.EnumDecl) {
-	prog.typeHeader.WriteString("STTYPE\t^" + d.Name + "\n")
+	fmt.Fprintf(&prog.typeHeader, "STTYPE\t^%s\n", d.Name)
 	prog.typeHeader.WriteString("\tFIELD\t>Tag\t^int\n")
 	for _, variant := range d.Variants {
 		for _, f := range variant.Fields {

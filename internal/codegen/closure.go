@@ -68,13 +68,13 @@ type program struct {
 func (p *program) newFuncTypeDecl(paramGoTypes []string, retGoType string) string {
 	p.closureSeq++
 	name := fmt.Sprintf("AmiflFunc%d", p.closureSeq)
-	p.typeHeader.WriteString("FNTYPE\t^" + name)
+	fmt.Fprintf(&p.typeHeader, "FNTYPE\t^%s", name)
 	for _, t := range paramGoTypes {
-		p.typeHeader.WriteString("\t^" + t)
+		fmt.Fprintf(&p.typeHeader, "\t^%s", t)
 	}
 	p.typeHeader.WriteString("\t:")
 	if retGoType != "" {
-		p.typeHeader.WriteString("\t^" + retGoType)
+		fmt.Fprintf(&p.typeHeader, "\t^%s", retGoType)
 	}
 	p.typeHeader.WriteString("\n")
 	return name
@@ -121,13 +121,13 @@ func (g *gen) genClosureLitInto(token string, lit *ast.ClosureLit) error {
 	typeName := g.prog.newFuncTypeDecl(paramGoTypes, retGoType)
 	fmt.Fprintf(g.b, "\tVAR\t%s\t^%s\n", token, typeName)
 
-	g.b.WriteString("\tCLOS\t" + token)
+	fmt.Fprintf(g.b, "\tCLOS\t%s", token)
 	for _, t := range paramGoTypes {
-		g.b.WriteString("\t^" + t)
+		fmt.Fprintf(g.b, "\t^%s", t)
 	}
 	g.b.WriteString("\t:")
 	if retGoType != "" {
-		g.b.WriteString("\t^" + retGoType)
+		fmt.Fprintf(g.b, "\t^%s", retGoType)
 	}
 	g.b.WriteString("\n")
 
