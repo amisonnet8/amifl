@@ -6,6 +6,66 @@ type File struct {
 	Decls []TopLevelDecl
 }
 
+// TypeExpr is a parsed type annotation — every position that used to hold
+// a bare type-name string (amifl-spec.md sections 2.1/8.1/8.3) now holds
+// one of these instead, as of step 7's List[T]/Array[T;N] (amifl-spec.md
+// section 2.2), which need genuine recursive bracket syntax (`List[T]`,
+// `Array[T;N]`, and their nesting — `List[List[Int]]`, `Array[Array[Int;
+// N];M]`) that a single Ident token can no longer represent. NamedType
+// alone covers every type-annotation step 1-6 ever wrote (a scalar or a
+// struct name); ListType/ArrayType are new. This is parsed, unresolved
+// syntax — sema's resolveTypeExpr (types.go) is what turns one into a
+// canonical type string (the same kind of string every other part of sema
+// already deals in), exactly the same division of labor Step 6 established
+// between a struct/tuple literal's raw AST and its resolved type.
+type TypeExpr interface {
+	typeExprNode()
+	Pos() int
+}
+
+// NamedType is a plain identifier used as a type: a scalar (amifl-spec.md
+// section 2.1) or a struct name (section 2.2), or "Unit" in a return-type
+// position (section 8.3) — everything step 1-6 supported, now wrapped in
+// this node instead of a bare string.
+type NamedType struct {
+	Name string
+	Line int
+}
+
+// ListType is `List[Elem]` (amifl-spec.md section 2.2) — always variable-
+// length; Elem may itself be any TypeExpr (List[List[Int]] nests the same
+// way tuples/structs already do).
+type ListType struct {
+	Elem TypeExpr
+	Line int
+}
+
+// ArrayType is `Array[Elem;N]`, a single fixed dimension of compile-time
+// size N. The parser is what desugars amifl-spec.md section 2.2's
+// multi-dimension sugar (`Array[T;N1,N2,...]` ≡ `Array[Array[...
+// Array[T;Nk]...];N2];N1]`) into nested ArrayType values at parse time —
+// every later phase (sema, codegen) only ever sees a single Size per node,
+// never a size list, the same "desugar once, early, so nobody downstream
+// has to special-case the sugared form" approach step 4 used for `elif`
+// and `switch`. Size is an Expr, not a bare integer, because it may
+// reference a `const` (amifl-spec.md's compile-time-size requirement is
+// exactly what AmiFL's `const` already models) — sema's resolveTypeExpr
+// reduces it to a concrete value, since AMIVM's ARTYPE instruction takes
+// a literal immediate, never an identifier or expression.
+type ArrayType struct {
+	Elem TypeExpr
+	Size Expr
+	Line int
+}
+
+func (*NamedType) typeExprNode() {}
+func (*ListType) typeExprNode()  {}
+func (*ArrayType) typeExprNode() {}
+
+func (n *NamedType) Pos() int { return n.Line }
+func (n *ListType) Pos() int  { return n.Line }
+func (n *ArrayType) Pos() int { return n.Line }
+
 // TopLevelDecl is a top-level declaration: *FuncDecl or *ConstDecl.
 // AmiFL forbids top-level `let` (amifl-spec.md section 4, principle 5) —
 // there is deliberately no *LetExpr case here, so the restriction is
@@ -27,7 +87,7 @@ type TopLevelDecl interface {
 type FuncDecl struct {
 	Name       string
 	Params     []Param
-	ReturnType string
+	ReturnType TypeExpr
 	Body       *Block
 	Line       int
 
@@ -47,7 +107,7 @@ type FuncDecl struct {
 // annotation at all; see ClosureLit).
 type Param struct {
 	Name string
-	Type string
+	Type TypeExpr
 	Line int
 
 	ResolvedType string // filled in by sema
@@ -74,7 +134,7 @@ type StructDecl struct {
 // positions share identical rules, so one node type serves both.
 type ConstDecl struct {
 	Name string
-	Type string // type annotation identifier, or "" if omitted (inferred)
+	Type TypeExpr // type annotation, or nil if omitted (inferred)
 	// Value must resolve to a literal, directly or (recursively) through
 	// references to earlier consts — step 2's only means of combining
 	// values; full constant folding of const-to-const arithmetic
@@ -108,7 +168,7 @@ type Expr interface {
 // structurally (see TopLevelDecl) rather than by a sema check.
 type LetExpr struct {
 	Name  string
-	Type  string // type annotation identifier, or "" if omitted (inferred)
+	Type  TypeExpr // type annotation, or nil if omitted (inferred)
 	Value Expr
 	Line  int
 
@@ -219,7 +279,7 @@ type CallExpr struct {
 // write one in even if it wanted to).
 type ClosureLit struct {
 	Params     []Param
-	ReturnType string
+	ReturnType TypeExpr
 	Body       *Block
 	Line       int
 
@@ -296,6 +356,95 @@ type FieldExpr struct {
 
 	ResolvedType string // filled by sema
 	AmivmField   string // filled by sema
+}
+
+// ListLit is `[v1, v2, ...]` (amifl-spec.md sections 2.2/3.1) — the one
+// literal syntax shared by both List[T] and Array[T;N] ("既定のリテラル
+// `[1,2,3]`はList[T]。型注釈で明示したときのみArray[T;N]になる"): which one
+// it resolves to is decided purely by the surrounding type context
+// (sema's resolveListLit), the same untyped-literal-adapts-to-`expected`
+// pattern step 2 established for IntLit/FloatLit — no separate ArrayLit
+// node exists. An empty `[]` needs an `expected` type to resolve at all
+// (nothing else could tell it its element type).
+type ListLit struct {
+	Elems []Expr
+	Line  int
+
+	ResolvedType string // filled by sema: makeListType(elem) or makeArrayType(elem, n)
+}
+
+// IndexExpr is `target[index]` (amifl-spec.md section 3.2, "x[i]" — the
+// spec describes this as sugar for a builtin `at(x,i)` call, but step 7
+// compiles it directly to AGET rather than routing through a named
+// function: the general capability-dispatched builtin-function machinery
+// `at`/`setAt`/`slice` would eventually live behind (2.3/13.4節) doesn't
+// exist until step 11, and step 7's Target is always statically known to
+// be a List or an Array, so there is nothing left for a generic dispatch
+// to resolve. Only List[T]/Array[T;N] are supported as Target in step 7
+// (String/Map indexing arrive with their own types, later steps).
+type IndexExpr struct {
+	Target Expr
+	Index  Expr
+	Line   int
+
+	ResolvedType string // filled by sema: Target's element type
+}
+
+// IndexAssignExpr is `target[index] = value` (amifl-spec.md section 3.2,
+// "x[i] = v"). Always Unit-typed. Compiles directly to ASET, for the same
+// reason IndexExpr compiles directly to AGET rather than a named `setAt`
+// call — see IndexExpr's doc comment.
+type IndexAssignExpr struct {
+	Target Expr
+	Index  Expr
+	Value  Expr
+	Line   int
+}
+
+// SliceExpr is `target[from:to]` / `target[from:]` / `target[:to]` /
+// `target[:]` (amifl-spec.md section 3.2) — From/To are nil when omitted
+// (never a literal placeholder token; the spec's own "省略時は`_`を渡す"
+// description of the equivalent `slice(x, from, to)` call is about that
+// named function's own signature, not AmiFL surface syntax the parser
+// needs to produce — codegen is what turns a nil bound into AMIVM's `_`
+// placeholder, once, right where SLICE is emitted). Always resolves to a
+// List[T] of Target's own element type, regardless of whether Target
+// itself was a List or an Array (slicing a fixed-size array can't
+// preserve a fixed size in the general case, since from/to may be runtime
+// values — matching Go's own array-slicing semantics exactly, see
+// CLAUDE.md's "確定した設計判断" for step 7).
+type SliceExpr struct {
+	Target Expr
+	From   Expr // nil if omitted
+	To     Expr // nil if omitted
+	Line   int
+
+	ResolvedType string // filled by sema: always makeListType(elemType)
+}
+
+// ForExpr is `for x in items { ... }` (amifl-spec.md section 7): always
+// Unit-typed, side-effect-only. The `yield` form (a `map` pipeline sugar,
+// amifl-spec.md section 7) is step 9's job — this node has no field for
+// it, since step 7 never produces one. Items must be a List[T] or
+// Array[T;N] (the only iterable collection types that exist yet); break/
+// continue inside Body act on this loop exactly like WhileExpr's (same
+// loopDepth bookkeeping, never crossing a closure boundary).
+type ForExpr struct {
+	Var   string
+	Items Expr
+	Body  *Block
+	Line  int
+
+	// filled by sema:
+	ElemType string // Items' element type — also Var's own type
+	// VarToken is Var's AMIVM value token (e.g. "%x_7"), minted once via
+	// freshInternalName exactly like LetExpr.Token — Var is a non-
+	// reassignable binding (binding.reassignable stays false), mirroring
+	// a function/closure parameter rather than a `let` (amifl-spec.md is
+	// silent on whether a for-loop variable may be reassigned; step 5's
+	// same silence about parameters was resolved the same conservative
+	// way, for the same "明示性 > 簡潔さ" reasoning).
+	VarToken string
 }
 
 // StringLit is a string literal.
@@ -406,44 +555,54 @@ func (*FuncDecl) topLevelDeclNode()   {}
 func (*ConstDecl) topLevelDeclNode()  {}
 func (*StructDecl) topLevelDeclNode() {}
 
-func (*ConstDecl) exprNode()    {}
-func (*LetExpr) exprNode()      {}
-func (*AssignExpr) exprNode()   {}
-func (*DiscardExpr) exprNode()  {}
-func (*IdentExpr) exprNode()    {}
-func (*CallExpr) exprNode()     {}
-func (*StringLit) exprNode()    {}
-func (*IntLit) exprNode()       {}
-func (*FloatLit) exprNode()     {}
-func (*BoolLit) exprNode()      {}
-func (*BinaryExpr) exprNode()   {}
-func (*UnaryExpr) exprNode()    {}
-func (*IfExpr) exprNode()       {}
-func (*WhileExpr) exprNode()    {}
-func (*BreakExpr) exprNode()    {}
-func (*ContinueExpr) exprNode() {}
-func (*ClosureLit) exprNode()   {}
-func (*TupleLit) exprNode()     {}
-func (*StructLit) exprNode()    {}
-func (*FieldExpr) exprNode()    {}
+func (*ConstDecl) exprNode()       {}
+func (*LetExpr) exprNode()         {}
+func (*AssignExpr) exprNode()      {}
+func (*DiscardExpr) exprNode()     {}
+func (*IdentExpr) exprNode()       {}
+func (*CallExpr) exprNode()        {}
+func (*StringLit) exprNode()       {}
+func (*IntLit) exprNode()          {}
+func (*FloatLit) exprNode()        {}
+func (*BoolLit) exprNode()         {}
+func (*BinaryExpr) exprNode()      {}
+func (*UnaryExpr) exprNode()       {}
+func (*IfExpr) exprNode()          {}
+func (*WhileExpr) exprNode()       {}
+func (*BreakExpr) exprNode()       {}
+func (*ContinueExpr) exprNode()    {}
+func (*ClosureLit) exprNode()      {}
+func (*TupleLit) exprNode()        {}
+func (*StructLit) exprNode()       {}
+func (*FieldExpr) exprNode()       {}
+func (*ListLit) exprNode()         {}
+func (*IndexExpr) exprNode()       {}
+func (*IndexAssignExpr) exprNode() {}
+func (*SliceExpr) exprNode()       {}
+func (*ForExpr) exprNode()         {}
 
-func (n *ConstDecl) Pos() int    { return n.Line }
-func (n *LetExpr) Pos() int      { return n.Line }
-func (n *AssignExpr) Pos() int   { return n.Line }
-func (n *DiscardExpr) Pos() int  { return n.Line }
-func (n *IdentExpr) Pos() int    { return n.Line }
-func (n *CallExpr) Pos() int     { return n.Line }
-func (n *StringLit) Pos() int    { return n.Line }
-func (n *IntLit) Pos() int       { return n.Line }
-func (n *FloatLit) Pos() int     { return n.Line }
-func (n *BoolLit) Pos() int      { return n.Line }
-func (n *BinaryExpr) Pos() int   { return n.Line }
-func (n *UnaryExpr) Pos() int    { return n.Line }
-func (n *IfExpr) Pos() int       { return n.Line }
-func (n *WhileExpr) Pos() int    { return n.Line }
-func (n *BreakExpr) Pos() int    { return n.Line }
-func (n *ContinueExpr) Pos() int { return n.Line }
-func (n *ClosureLit) Pos() int   { return n.Line }
-func (n *TupleLit) Pos() int     { return n.Line }
-func (n *StructLit) Pos() int    { return n.Line }
-func (n *FieldExpr) Pos() int    { return n.Line }
+func (n *ConstDecl) Pos() int       { return n.Line }
+func (n *LetExpr) Pos() int         { return n.Line }
+func (n *AssignExpr) Pos() int      { return n.Line }
+func (n *DiscardExpr) Pos() int     { return n.Line }
+func (n *IdentExpr) Pos() int       { return n.Line }
+func (n *CallExpr) Pos() int        { return n.Line }
+func (n *StringLit) Pos() int       { return n.Line }
+func (n *IntLit) Pos() int          { return n.Line }
+func (n *FloatLit) Pos() int        { return n.Line }
+func (n *BoolLit) Pos() int         { return n.Line }
+func (n *BinaryExpr) Pos() int      { return n.Line }
+func (n *UnaryExpr) Pos() int       { return n.Line }
+func (n *IfExpr) Pos() int          { return n.Line }
+func (n *WhileExpr) Pos() int       { return n.Line }
+func (n *BreakExpr) Pos() int       { return n.Line }
+func (n *ContinueExpr) Pos() int    { return n.Line }
+func (n *ClosureLit) Pos() int      { return n.Line }
+func (n *TupleLit) Pos() int        { return n.Line }
+func (n *StructLit) Pos() int       { return n.Line }
+func (n *FieldExpr) Pos() int       { return n.Line }
+func (n *ListLit) Pos() int         { return n.Line }
+func (n *IndexExpr) Pos() int       { return n.Line }
+func (n *IndexAssignExpr) Pos() int { return n.Line }
+func (n *SliceExpr) Pos() int       { return n.Line }
+func (n *ForExpr) Pos() int         { return n.Line }

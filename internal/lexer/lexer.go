@@ -22,6 +22,8 @@ var keywords = map[string]Kind{
 	"case":     KwCase,
 	"default":  KwDefault,
 	"struct":   KwStruct,
+	"for":      KwFor,
+	"in":       KwIn,
 }
 
 // Lexer tokenizes AmiFL source text one Token at a time via Next.
@@ -71,9 +73,18 @@ func (l *Lexer) Next() (Token, error) {
 	case c == '}':
 		l.pos++
 		return Token{Kind: RBrace, Line: line}, nil
+	case c == '[':
+		l.pos++
+		return Token{Kind: LBracket, Line: line}, nil
+	case c == ']':
+		l.pos++
+		return Token{Kind: RBracket, Line: line}, nil
 	case c == ',':
 		l.pos++
 		return Token{Kind: Comma, Line: line}, nil
+	case c == ';':
+		l.pos++
+		return Token{Kind: Semicolon, Line: line}, nil
 	case c == ':':
 		l.pos++
 		return Token{Kind: Colon, Line: line}, nil

@@ -159,8 +159,13 @@ func (c *checker) registerStructName(d *ast.StructDecl) error {
 // registerStructFields resolves d's field types (Check's pass 0b) — every
 // struct name in the file, including d's own, is already registered by
 // registerStructName by the time this runs, so a field naming any struct
-// (declared earlier or later in the file) resolves via c.canonicalType.
+// (declared earlier or later in the file) resolves fine. A throwaway
+// funcChecker (mirroring checkTopLevelConst's identical need) is what lets
+// a field's Array[T;N] size reference a top-level const — resolveTypeExpr
+// is a funcChecker method because of that same possibility, even though a
+// struct field itself never has runtime scope of its own.
 func (c *checker) registerStructFields(d *ast.StructDecl) error {
+	fc := newFuncChecker(c)
 	seen := map[string]bool{}
 	var fields []fieldInfo
 	for i := range d.Fields {
@@ -169,9 +174,9 @@ func (c *checker) registerStructFields(d *ast.StructDecl) error {
 			return fmt.Errorf("line %d: duplicate field %q in struct %q", f.Line, f.Name, d.Name)
 		}
 		seen[f.Name] = true
-		ft, ok := c.canonicalType(f.Type)
-		if !ok {
-			return fmt.Errorf("line %d: unknown type %q", f.Line, f.Type)
+		ft, err := fc.resolveTypeExpr(f.Type)
+		if err != nil {
+			return err
 		}
 		f.ResolvedType = ft
 		fields = append(fields, fieldInfo{Name: f.Name, Typ: ft})
@@ -195,6 +200,7 @@ func (c *checker) registerFuncSig(fn *ast.FuncDecl) error {
 		return fmt.Errorf("line %d: %q is already declared as a const", fn.Line, fn.Name)
 	}
 
+	fc := newFuncChecker(c)
 	seen := map[string]bool{}
 	var params []string
 	for i := range fn.Params {
@@ -203,17 +209,17 @@ func (c *checker) registerFuncSig(fn *ast.FuncDecl) error {
 			return fmt.Errorf("line %d: duplicate parameter %q", p.Line, p.Name)
 		}
 		seen[p.Name] = true
-		pt, ok := c.canonicalType(p.Type)
-		if !ok {
-			return fmt.Errorf("line %d: unknown type %q", p.Line, p.Type)
+		pt, err := fc.resolveTypeExpr(p.Type)
+		if err != nil {
+			return err
 		}
 		p.ResolvedType = pt
 		params = append(params, pt)
 	}
 
-	retType, ok := c.canonicalReturnType(fn.ReturnType)
-	if !ok {
-		return fmt.Errorf("line %d: unknown type %q", fn.Line, fn.ReturnType)
+	retType, err := fc.resolveReturnTypeExpr(fn.ReturnType)
+	if err != nil {
+		return err
 	}
 	fn.ResolvedReturnType = retType
 	c.funcs[fn.Name] = funcSig{params: params, ret: retType}

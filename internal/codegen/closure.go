@@ -34,6 +34,18 @@ type program struct {
 	// doc comment for why).
 	tupleTypes map[string]string
 	tupleSeq   int
+
+	// listTypes/listSeq and arrayTypes/arraySeq back collections.go's
+	// listGoTypeName/arrayGoTypeName — step 7's List[T]/Array[T;N], minted
+	// and reused the same deduplicated-per-shape way tuples are (and for
+	// the same reason: a List[T]/Array[T;N] can recur as a struct field,
+	// a function parameter/return type, or another List/Array's own
+	// element type, and all of those should agree on one Go type per
+	// shape).
+	listTypes  map[string]string
+	listSeq    int
+	arrayTypes map[string]string
+	arraySeq   int
 }
 
 // newFuncTypeDecl emits one FNTYPE line for a closure shaped by

@@ -7,12 +7,21 @@ import (
 	"github.com/amisonnet8/amifl/internal/ast"
 )
 
+// nt builds a plain named-type annotation (ast.NamedType) — step 7
+// introduced ast.TypeExpr in place of a bare string for every Type/
+// ReturnType field; every test in this file that only ever needs a
+// scalar/struct name (never List[...]/Array[...;...]) uses this rather
+// than constructing *ast.NamedType by hand everywhere.
+func nt(name string) ast.TypeExpr {
+	return &ast.NamedType{Name: name}
+}
+
 func mainFile(exprs ...ast.Expr) *ast.File {
 	return &ast.File{
 		Decls: []ast.TopLevelDecl{
 			&ast.FuncDecl{
 				Name:               "main",
-				ReturnType:         "Int",
+				ReturnType:         nt("Int"),
 				ResolvedReturnType: "Int64",
 				Body:               &ast.Block{Exprs: exprs},
 			},
@@ -511,14 +520,14 @@ func TestGenerate_TopLevelFuncWithParamsUsesDollarTokens(t *testing.T) {
 	f := &ast.File{Decls: []ast.TopLevelDecl{
 		&ast.FuncDecl{
 			Name:               "main",
-			ReturnType:         "Int",
+			ReturnType:         nt("Int"),
 			ResolvedReturnType: "Int64",
 			Body:               &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 		},
 		&ast.FuncDecl{
 			Name:               "add",
-			Params:             []ast.Param{{Name: "a", Type: "Int", ResolvedType: "Int64"}, {Name: "b", Type: "Int", ResolvedType: "Int64"}},
-			ReturnType:         "Int",
+			Params:             []ast.Param{{Name: "a", Type: nt("Int"), ResolvedType: "Int64"}, {Name: "b", Type: nt("Int"), ResolvedType: "Int64"}},
+			ReturnType:         nt("Int"),
 			ResolvedReturnType: "Int64",
 			Body: &ast.Block{Exprs: []ast.Expr{
 				&ast.BinaryExpr{Op: "+", ResolvedType: "Int64",
@@ -553,7 +562,7 @@ func TestGenerate_CallToTopLevelFuncEmitsBangToken(t *testing.T) {
 	f := &ast.File{Decls: []ast.TopLevelDecl{
 		&ast.FuncDecl{
 			Name:               "main",
-			ReturnType:         "Int",
+			ReturnType:         nt("Int"),
 			ResolvedReturnType: "Int64",
 			Body: &ast.Block{Exprs: []ast.Expr{
 				&ast.CallExpr{Callee: "helper", ResolvedType: "Int64"},
@@ -561,7 +570,7 @@ func TestGenerate_CallToTopLevelFuncEmitsBangToken(t *testing.T) {
 		},
 		&ast.FuncDecl{
 			Name:               "helper",
-			ReturnType:         "Int",
+			ReturnType:         nt("Int"),
 			ResolvedReturnType: "Int64",
 			Body:               &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 7}}},
 		},
@@ -579,14 +588,14 @@ func TestGenerate_UnitReturningFuncHasNoResultTypeAndBareRet(t *testing.T) {
 	f := &ast.File{Decls: []ast.TopLevelDecl{
 		&ast.FuncDecl{
 			Name:               "main",
-			ReturnType:         "Int",
+			ReturnType:         nt("Int"),
 			ResolvedReturnType: "Int64",
 			Body:               &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 		},
 		&ast.FuncDecl{
 			Name:               "log",
-			Params:             []ast.Param{{Name: "msg", Type: "String", ResolvedType: "String"}},
-			ReturnType:         "Unit",
+			Params:             []ast.Param{{Name: "msg", Type: nt("String"), ResolvedType: "String"}},
+			ReturnType:         nt("Unit"),
 			ResolvedReturnType: unitType,
 			Body: &ast.Block{Exprs: []ast.Expr{
 				&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.IdentExpr{Name: "msg", ResolvedType: "String", Token: "$1"}}},
@@ -608,8 +617,8 @@ func TestGenerate_UnitReturningFuncHasNoResultTypeAndBareRet(t *testing.T) {
 func TestGenerate_ClosureLitEmitsFntypeVarClos(t *testing.T) {
 	f := mainFile(
 		&ast.LetExpr{Name: "square", Token: "%square_1", Value: &ast.ClosureLit{
-			Params:             []ast.Param{{Name: "x", Type: "Int", ResolvedType: "Int64"}},
-			ReturnType:         "Int",
+			Params:             []ast.Param{{Name: "x", Type: nt("Int"), ResolvedType: "Int64"}},
+			ReturnType:         nt("Int"),
 			ResolvedReturnType: "Int64",
 			ResolvedType:       "fn(Int64)->Int64",
 			Body: &ast.Block{Exprs: []ast.Expr{
@@ -644,8 +653,8 @@ func TestGenerate_ClosureCapturesOuterLetTokenDirectly(t *testing.T) {
 	f := mainFile(
 		&ast.LetExpr{Name: "base", Token: "%base_1", ResolvedType: "Int64", Value: &ast.IntLit{Value: 10}},
 		&ast.LetExpr{Name: "addBase", Token: "%addBase_2", Value: &ast.ClosureLit{
-			Params:             []ast.Param{{Name: "x", Type: "Int", ResolvedType: "Int64"}},
-			ReturnType:         "Int",
+			Params:             []ast.Param{{Name: "x", Type: nt("Int"), ResolvedType: "Int64"}},
+			ReturnType:         nt("Int"),
 			ResolvedReturnType: "Int64",
 			ResolvedType:       "fn(Int64)->Int64",
 			Body: &ast.Block{Exprs: []ast.Expr{
@@ -671,8 +680,8 @@ func TestGenerate_StructDeclEmitsSttype(t *testing.T) {
 	f.Decls = append(f.Decls, &ast.StructDecl{
 		Name: "Point",
 		Fields: []ast.Param{
-			{Name: "x", Type: "Int", ResolvedType: "Int64"},
-			{Name: "y", Type: "Int", ResolvedType: "Int64"},
+			{Name: "x", Type: nt("Int"), ResolvedType: "Int64"},
+			{Name: "y", Type: nt("Int"), ResolvedType: "Int64"},
 		},
 	})
 	ir, err := Generate(f)
@@ -710,8 +719,8 @@ func TestGenerate_StructLitEmitsVarAndFset(t *testing.T) {
 	f.Decls = append(f.Decls, &ast.StructDecl{
 		Name: "Point",
 		Fields: []ast.Param{
-			{Name: "x", Type: "Int", ResolvedType: "Int64"},
-			{Name: "y", Type: "Int", ResolvedType: "Int64"},
+			{Name: "x", Type: nt("Int"), ResolvedType: "Int64"},
+			{Name: "y", Type: nt("Int"), ResolvedType: "Int64"},
 		},
 	})
 	ir, err := Generate(f)
@@ -739,8 +748,8 @@ func TestGenerate_StructFieldAccessEmitsFget(t *testing.T) {
 	f.Decls = append(f.Decls, &ast.StructDecl{
 		Name: "Point",
 		Fields: []ast.Param{
-			{Name: "x", Type: "Int", ResolvedType: "Int64"},
-			{Name: "y", Type: "Int", ResolvedType: "Int64"},
+			{Name: "x", Type: nt("Int"), ResolvedType: "Int64"},
+			{Name: "y", Type: nt("Int"), ResolvedType: "Int64"},
 		},
 	})
 	ir, err := Generate(f)
@@ -825,5 +834,222 @@ func TestGenerate_TupleFieldAccessEmitsFgetWithSynthesizedFieldName(t *testing.T
 	}
 	if !strings.Contains(ir, "FGET\t%amifl_tmp2\t%t_1\t>F1") {
 		t.Errorf("expected FGET reading field F1 from %%t_1; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_ListLitEmitsSltypeSlmakeAset(t *testing.T) {
+	listType := "List(Int64)"
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Token: "%xs_1", ResolvedType: listType, Value: &ast.ListLit{
+			ResolvedType: listType,
+			Elems:        []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}, &ast.IntLit{Value: 3}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"SLTYPE\t^AmiflList1\t^int64",
+		"VAR\t%amifl_tmp1\t^AmiflList1",
+		"SLMAKE\t%amifl_tmp1\t^AmiflList1\t3",
+		"ASET\t%amifl_tmp1\t0\t1",
+		"ASET\t%amifl_tmp1\t1\t2",
+		"ASET\t%amifl_tmp1\t2\t3",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_ArrayLitEmitsArtypeVarAsetNoSlmake(t *testing.T) {
+	arrType := "Array(Int64;3)"
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Token: "%xs_1", ResolvedType: arrType, Value: &ast.ListLit{
+			ResolvedType: arrType,
+			Elems:        []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}, &ast.IntLit{Value: 3}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"ARTYPE\t^AmiflArray1\t^int64\t3",
+		"VAR\t%amifl_tmp1\t^AmiflArray1",
+		"ASET\t%amifl_tmp1\t0\t1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+	if strings.Contains(ir, "SLMAKE") {
+		t.Errorf("an Array literal must not emit SLMAKE; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_NestedArrayEmitsNestedArtype(t *testing.T) {
+	innerType := "Array(Int64;3)"
+	outerType := "Array(" + innerType + ";2)"
+	f := mainFile(
+		&ast.LetExpr{Name: "grid", Token: "%grid_1", ResolvedType: outerType, Value: &ast.ListLit{
+			ResolvedType: outerType,
+			Elems: []ast.Expr{
+				&ast.ListLit{ResolvedType: innerType, Elems: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}, &ast.IntLit{Value: 3}}},
+				&ast.ListLit{ResolvedType: innerType, Elems: []ast.Expr{&ast.IntLit{Value: 4}, &ast.IntLit{Value: 5}, &ast.IntLit{Value: 6}}},
+			},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"ARTYPE\t^AmiflArray1\t^int64\t3",
+		"ARTYPE\t^AmiflArray2\t^AmiflArray1\t2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_IndexExprEmitsAget(t *testing.T) {
+	listType := "List(Int64)"
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Token: "%xs_1", ResolvedType: listType, Value: &ast.ListLit{ResolvedType: listType, Elems: []ast.Expr{&ast.IntLit{Value: 1}}}},
+		&ast.IndexExpr{
+			Target:       &ast.IdentExpr{Name: "xs", ResolvedType: listType, Token: "%xs_1"},
+			Index:        &ast.IntLit{Value: 0},
+			ResolvedType: "Int64",
+		},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "AGET\t%amifl_tmp2\t%xs_1\t0") {
+		t.Errorf("expected AGET reading xs[0]; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_IndexAssignEmitsAset(t *testing.T) {
+	listType := "List(Int64)"
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Token: "%xs_1", ResolvedType: listType, Value: &ast.ListLit{ResolvedType: listType, Elems: []ast.Expr{&ast.IntLit{Value: 1}}}},
+		&ast.IndexAssignExpr{
+			Target: &ast.IdentExpr{Name: "xs", ResolvedType: listType, Token: "%xs_1"},
+			Index:  &ast.IntLit{Value: 0},
+			Value:  &ast.IntLit{Value: 9},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "ASET\t%xs_1\t0\t9") {
+		t.Errorf("expected ASET writing xs[0]=9 directly into %%xs_1 (no copy for a plain identifier target); got:\n%s", ir)
+	}
+}
+
+func TestGenerate_ChainedIndexAssignEmitsReadModifyWriteBack(t *testing.T) {
+	innerType := "List(Int64)"
+	outerType := "List(" + innerType + ")"
+	f := mainFile(
+		&ast.LetExpr{Name: "matrix", Token: "%matrix_1", ResolvedType: outerType, Value: &ast.ListLit{ResolvedType: outerType}},
+		&ast.IndexAssignExpr{
+			Target: &ast.IndexExpr{
+				Target:       &ast.IdentExpr{Name: "matrix", ResolvedType: outerType, Token: "%matrix_1"},
+				Index:        &ast.IntLit{Value: 0},
+				ResolvedType: innerType,
+			},
+			Index: &ast.IntLit{Value: 0},
+			Value: &ast.IntLit{Value: 9},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	// Reads matrix[0] into a temp, ASETs 9 into that temp, then writes the
+	// mutated temp back into matrix[0] — see collections.go's
+	// genIndexAssignStmt doc comment for why a single direct ASET into
+	// matrix[0] isn't always correct (it happens to work for a List, but
+	// this must generalize to an Array intermediate too).
+	for _, want := range []string{
+		"AGET\t%amifl_tmp2\t%matrix_1\t0",
+		"ASET\t%amifl_tmp2\t0\t9",
+		"ASET\t%matrix_1\t0\t%amifl_tmp2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_SliceExprOmittedBoundsEmitUnderscore(t *testing.T) {
+	listType := "List(Int64)"
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Token: "%xs_1", ResolvedType: listType, Value: &ast.ListLit{ResolvedType: listType, Elems: []ast.Expr{&ast.IntLit{Value: 1}}}},
+		&ast.DiscardExpr{Value: &ast.SliceExpr{
+			Target:       &ast.IdentExpr{Name: "xs", ResolvedType: listType, Token: "%xs_1"},
+			ResolvedType: listType,
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "SLICE\t%amifl_tmp2\t%xs_1\t_\t_") {
+		t.Errorf("expected SLICE with both bounds omitted as '_'; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_ForStmtEmitsIncrementFirstLoop(t *testing.T) {
+	listType := "List(Int64)"
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Token: "%xs_1", ResolvedType: listType, Value: &ast.ListLit{ResolvedType: listType, Elems: []ast.Expr{&ast.IntLit{Value: 1}}}},
+		&ast.ForExpr{
+			Items:    &ast.IdentExpr{Name: "xs", ResolvedType: listType, Token: "%xs_1"},
+			Body:     &ast.Block{Exprs: []ast.Expr{&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "hi"}}}}},
+			ElemType: "Int64",
+			VarToken: "%x_2",
+		},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	// xs's own ListLit already consumed amifl_tmp1, so the for-loop's own
+	// temps start at amifl_tmp2 (len result), amifl_tmp3 (idx), amifl_tmp4
+	// (bounds-check bool).
+	for _, want := range []string{
+		"CALL\t%amifl_tmp2\t:\t?len\t%xs_1",
+		"SET\t%amifl_tmp3\t-1",
+		"LOOP",
+		"ADD\t%amifl_tmp3\t%amifl_tmp3\t1",
+		"GTE\t%amifl_tmp4\t%amifl_tmp3\t%amifl_tmp2",
+		"AGET\t%x_2\t%xs_1\t%amifl_tmp3",
+		"ENDLOOP",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+	// The increment must come before the length/bounds check inside the
+	// loop, not after the body — CLAUDE.md's "過去に踏まれた地雷" #3.
+	loopIdx := strings.Index(ir, "LOOP\n")
+	incIdx := strings.Index(ir, "ADD\t%amifl_tmp3\t%amifl_tmp3\t1")
+	gteIdx := strings.Index(ir, "GTE\t%amifl_tmp4")
+	if !(loopIdx < incIdx && incIdx < gteIdx) {
+		t.Errorf("expected LOOP, then increment, then bounds check, in that order; got:\n%s", ir)
 	}
 }

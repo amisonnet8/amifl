@@ -6,6 +6,18 @@ import (
 	"github.com/amisonnet8/amifl/internal/ast"
 )
 
+// namedTypeName returns te's name if it's a plain *ast.NamedType, or ""
+// otherwise — a test-only convenience so assertions can keep comparing
+// against a bare string the way they did before step 7 introduced
+// ast.TypeExpr, for every test here that only ever parses a scalar/struct
+// name (never List[...]/Array[...;...]).
+func namedTypeName(te ast.TypeExpr) string {
+	if n, ok := te.(*ast.NamedType); ok {
+		return n.Name
+	}
+	return ""
+}
+
 func parseFuncMain(t *testing.T, f *ast.File) *ast.FuncDecl {
 	t.Helper()
 	for _, decl := range f.Decls {
@@ -31,8 +43,8 @@ func TestParse_HelloWorld(t *testing.T) {
 		t.Fatalf("got %d decls, want 1", len(f.Decls))
 	}
 	fn := parseFuncMain(t, f)
-	if fn.Name != "main" || fn.ReturnType != "Int" {
-		t.Fatalf("got FuncDecl{Name: %q, ReturnType: %q}", fn.Name, fn.ReturnType)
+	if fn.Name != "main" || namedTypeName(fn.ReturnType) != "Int" {
+		t.Fatalf("got FuncDecl{Name: %q, ReturnType: %v}", fn.Name, fn.ReturnType)
 	}
 	if len(fn.Body.Exprs) != 2 {
 		t.Fatalf("got %d body exprs, want 2", len(fn.Body.Exprs))
@@ -102,8 +114,8 @@ func TestParse_LetExprWithTypeAnnotation(t *testing.T) {
 	if !ok {
 		t.Fatalf("body[0]: got %T, want *ast.LetExpr", parseFuncMain(t, f).Body.Exprs[0])
 	}
-	if let.Name != "x" || let.Type != "Int" {
-		t.Fatalf("got LetExpr{Name: %q, Type: %q}", let.Name, let.Type)
+	if let.Name != "x" || namedTypeName(let.Type) != "Int" {
+		t.Fatalf("got LetExpr{Name: %q, Type: %v}", let.Name, let.Type)
 	}
 	lit, ok := let.Value.(*ast.IntLit)
 	if !ok || lit.Value != 42 {
@@ -123,8 +135,8 @@ func TestParse_LetExprWithoutTypeAnnotation(t *testing.T) {
 		t.Fatalf("Parse() error: %v", err)
 	}
 	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
-	if let.Type != "" {
-		t.Fatalf("got Type %q, want empty (inferred)", let.Type)
+	if let.Type != nil {
+		t.Fatalf("got Type %v, want nil (inferred)", let.Type)
 	}
 }
 
@@ -141,8 +153,8 @@ func TestParse_ConstDeclAtTopLevel(t *testing.T) {
 	if !ok {
 		t.Fatalf("decl[0]: got %T, want *ast.ConstDecl", f.Decls[0])
 	}
-	if cd.Name != "Pi" || cd.Type != "Float" {
-		t.Fatalf("got ConstDecl{Name: %q, Type: %q}", cd.Name, cd.Type)
+	if cd.Name != "Pi" || namedTypeName(cd.Type) != "Float" {
+		t.Fatalf("got ConstDecl{Name: %q, Type: %v}", cd.Name, cd.Type)
 	}
 }
 
@@ -551,14 +563,14 @@ func TestParse_FuncDeclWithParams(t *testing.T) {
 	if len(add.Params) != 2 {
 		t.Fatalf("got %d params, want 2", len(add.Params))
 	}
-	if add.Params[0].Name != "a" || add.Params[0].Type != "Int" {
+	if add.Params[0].Name != "a" || namedTypeName(add.Params[0].Type) != "Int" {
 		t.Errorf("param 0: got %+v", add.Params[0])
 	}
-	if add.Params[1].Name != "b" || add.Params[1].Type != "Int" {
+	if add.Params[1].Name != "b" || namedTypeName(add.Params[1].Type) != "Int" {
 		t.Errorf("param 1: got %+v", add.Params[1])
 	}
-	if add.ReturnType != "Int" {
-		t.Errorf("got ReturnType %q, want Int", add.ReturnType)
+	if namedTypeName(add.ReturnType) != "Int" {
+		t.Errorf("got ReturnType %v, want Int", add.ReturnType)
 	}
 }
 
@@ -594,11 +606,11 @@ func TestParse_ClosureLitAsLetValue(t *testing.T) {
 	if !ok {
 		t.Fatalf("got %T, want *ast.ClosureLit", let.Value)
 	}
-	if len(clos.Params) != 1 || clos.Params[0].Name != "x" || clos.Params[0].Type != "Int" {
+	if len(clos.Params) != 1 || clos.Params[0].Name != "x" || namedTypeName(clos.Params[0].Type) != "Int" {
 		t.Fatalf("got params %+v", clos.Params)
 	}
-	if clos.ReturnType != "Int" {
-		t.Fatalf("got ReturnType %q, want Int", clos.ReturnType)
+	if namedTypeName(clos.ReturnType) != "Int" {
+		t.Fatalf("got ReturnType %v, want Int", clos.ReturnType)
 	}
 	if len(clos.Body.Exprs) != 1 {
 		t.Fatalf("got %d body exprs, want 1", len(clos.Body.Exprs))
@@ -616,8 +628,8 @@ func TestParse_ClosureLitWithNoParamsAndUnitReturn(t *testing.T) {
 	if len(clos.Params) != 0 {
 		t.Fatalf("got %d params, want 0", len(clos.Params))
 	}
-	if clos.ReturnType != "Unit" {
-		t.Fatalf("got ReturnType %q, want Unit", clos.ReturnType)
+	if namedTypeName(clos.ReturnType) != "Unit" {
+		t.Fatalf("got ReturnType %v, want Unit", clos.ReturnType)
 	}
 }
 
@@ -709,10 +721,10 @@ func TestParse_StructDecl(t *testing.T) {
 	if st.Name != "Point" || len(st.Fields) != 2 {
 		t.Fatalf("got StructDecl{Name: %q, len(Fields): %d}", st.Name, len(st.Fields))
 	}
-	if st.Fields[0].Name != "x" || st.Fields[0].Type != "Float" {
+	if st.Fields[0].Name != "x" || namedTypeName(st.Fields[0].Type) != "Float" {
 		t.Errorf("field 0: got %+v", st.Fields[0])
 	}
-	if st.Fields[1].Name != "y" || st.Fields[1].Type != "Float" {
+	if st.Fields[1].Name != "y" || namedTypeName(st.Fields[1].Type) != "Float" {
 		t.Errorf("field 1: got %+v", st.Fields[1])
 	}
 }
@@ -746,5 +758,196 @@ func TestParse_StructLitAllowedInParenthesizedCond(t *testing.T) {
 	}
 	if _, ok := bin.Left.(*ast.StructLit); !ok {
 		t.Fatalf("got Cond.Left %T, want *ast.StructLit", bin.Left)
+	}
+}
+
+func TestParse_ListTypeAnnotation(t *testing.T) {
+	src := "fn main() -> Int {\n    let xs: List[Int] = [1, 2, 3]\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	lt, ok := let.Type.(*ast.ListType)
+	if !ok {
+		t.Fatalf("got Type %T, want *ast.ListType", let.Type)
+	}
+	if namedTypeName(lt.Elem) != "Int" {
+		t.Fatalf("got Elem %v, want Int", lt.Elem)
+	}
+}
+
+func TestParse_ArrayTypeAnnotationSingleDimension(t *testing.T) {
+	src := "fn main() -> Int {\n    let xs: Array[Int;5] = [1, 2, 3, 4, 5]\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	at, ok := let.Type.(*ast.ArrayType)
+	if !ok {
+		t.Fatalf("got Type %T, want *ast.ArrayType", let.Type)
+	}
+	if namedTypeName(at.Elem) != "Int" {
+		t.Fatalf("got Elem %v, want Int", at.Elem)
+	}
+	size, ok := at.Size.(*ast.IntLit)
+	if !ok || size.Value != 5 {
+		t.Fatalf("got Size %#v, want IntLit{Value: 5}", at.Size)
+	}
+}
+
+func TestParse_ArrayTypeMultiDimensionDesugarsToNestedArrayType(t *testing.T) {
+	// Array[Int;2,3] ≡ Array[Array[Int;3];2] — outer Size is the first
+	// (2), Elem is the inner ArrayType carrying the second (3).
+	src := "fn main() -> Int {\n    let m: Array[Int;2,3] = [[1,2,3],[4,5,6]]\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	outer, ok := let.Type.(*ast.ArrayType)
+	if !ok {
+		t.Fatalf("got Type %T, want *ast.ArrayType", let.Type)
+	}
+	outerSize, ok := outer.Size.(*ast.IntLit)
+	if !ok || outerSize.Value != 2 {
+		t.Fatalf("got outer Size %#v, want IntLit{Value: 2}", outer.Size)
+	}
+	inner, ok := outer.Elem.(*ast.ArrayType)
+	if !ok {
+		t.Fatalf("got outer Elem %T, want *ast.ArrayType", outer.Elem)
+	}
+	innerSize, ok := inner.Size.(*ast.IntLit)
+	if !ok || innerSize.Value != 3 {
+		t.Fatalf("got inner Size %#v, want IntLit{Value: 3}", inner.Size)
+	}
+	if namedTypeName(inner.Elem) != "Int" {
+		t.Fatalf("got inner Elem %v, want Int", inner.Elem)
+	}
+}
+
+func TestParse_ListLit(t *testing.T) {
+	lit := parseExprSrc(t, "[1, 2, 3]").(*ast.ListLit)
+	if len(lit.Elems) != 3 {
+		t.Fatalf("got %d elems, want 3", len(lit.Elems))
+	}
+}
+
+func TestParse_EmptyListLit(t *testing.T) {
+	lit := parseExprSrc(t, "[]").(*ast.ListLit)
+	if len(lit.Elems) != 0 {
+		t.Fatalf("got %d elems, want 0", len(lit.Elems))
+	}
+}
+
+func TestParse_IndexExpr(t *testing.T) {
+	idx := parseExprSrc(t, "xs[0]").(*ast.IndexExpr)
+	target, ok := idx.Target.(*ast.IdentExpr)
+	if !ok || target.Name != "xs" {
+		t.Fatalf("got Target %#v, want IdentExpr{Name: \"xs\"}", idx.Target)
+	}
+	index, ok := idx.Index.(*ast.IntLit)
+	if !ok || index.Value != 0 {
+		t.Fatalf("got Index %#v, want IntLit{Value: 0}", idx.Index)
+	}
+}
+
+func TestParse_ChainedIndexExpr(t *testing.T) {
+	// matrix[i][j]: outer IndexExpr's Target is itself an IndexExpr.
+	outer := parseExprSrc(t, "matrix[i][j]").(*ast.IndexExpr)
+	inner, ok := outer.Target.(*ast.IndexExpr)
+	if !ok {
+		t.Fatalf("got outer Target %T, want *ast.IndexExpr", outer.Target)
+	}
+	innerTarget, ok := inner.Target.(*ast.IdentExpr)
+	if !ok || innerTarget.Name != "matrix" {
+		t.Fatalf("got inner Target %#v, want IdentExpr{Name: \"matrix\"}", inner.Target)
+	}
+}
+
+func TestParse_IndexAssignExpr(t *testing.T) {
+	assign := parseStmtExpr(t, "xs[0] = 5").(*ast.IndexAssignExpr)
+	target, ok := assign.Target.(*ast.IdentExpr)
+	if !ok || target.Name != "xs" {
+		t.Fatalf("got Target %#v, want IdentExpr{Name: \"xs\"}", assign.Target)
+	}
+	val, ok := assign.Value.(*ast.IntLit)
+	if !ok || val.Value != 5 {
+		t.Fatalf("got Value %#v, want IntLit{Value: 5}", assign.Value)
+	}
+}
+
+func TestParse_InvalidAssignmentTargetIsAnError(t *testing.T) {
+	if _, err := Parse("fn main() -> Int {\n    f() = 1\n    0\n}\n"); err == nil {
+		t.Fatal("expected an error assigning to a call result")
+	}
+}
+
+func TestParse_SliceExprBothBounds(t *testing.T) {
+	sl := parseExprSrc(t, "xs[1:3]").(*ast.SliceExpr)
+	from, ok := sl.From.(*ast.IntLit)
+	if !ok || from.Value != 1 {
+		t.Fatalf("got From %#v, want IntLit{Value: 1}", sl.From)
+	}
+	to, ok := sl.To.(*ast.IntLit)
+	if !ok || to.Value != 3 {
+		t.Fatalf("got To %#v, want IntLit{Value: 3}", sl.To)
+	}
+}
+
+func TestParse_SliceExprOmittedBounds(t *testing.T) {
+	cases := []struct {
+		src      string
+		wantFrom bool
+		wantTo   bool
+	}{
+		{"xs[1:]", true, false},
+		{"xs[:3]", false, true},
+		{"xs[:]", false, false},
+	}
+	for _, c := range cases {
+		sl := parseExprSrc(t, c.src).(*ast.SliceExpr)
+		if (sl.From != nil) != c.wantFrom {
+			t.Errorf("%s: got From %v, want present=%v", c.src, sl.From, c.wantFrom)
+		}
+		if (sl.To != nil) != c.wantTo {
+			t.Errorf("%s: got To %v, want present=%v", c.src, sl.To, c.wantTo)
+		}
+	}
+}
+
+func TestParse_ForExpr(t *testing.T) {
+	src := "fn main() -> Int {\n    for x in xs {\n        print(\"hi\")\n    }\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	forExpr := parseFuncMain(t, f).Body.Exprs[0].(*ast.ForExpr)
+	if forExpr.Var != "x" {
+		t.Fatalf("got Var %q, want \"x\"", forExpr.Var)
+	}
+	items, ok := forExpr.Items.(*ast.IdentExpr)
+	if !ok || items.Name != "xs" {
+		t.Fatalf("got Items %#v, want IdentExpr{Name: \"xs\"}", forExpr.Items)
+	}
+	if len(forExpr.Body.Exprs) != 1 {
+		t.Fatalf("got %d body exprs, want 1", len(forExpr.Body.Exprs))
+	}
+}
+
+func TestParse_ForItemsBareIdentNotSwallowedAsStructLit(t *testing.T) {
+	// `for x in items { ... }` must parse `items` as a plain condition,
+	// not attempt to read `{ ... }` as a struct literal — the same
+	// noCompositeLit ambiguity if/while conditions already guard against.
+	src := "fn main() -> Int {\n    for x in items {\n        0\n    }\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	forExpr := parseFuncMain(t, f).Body.Exprs[0].(*ast.ForExpr)
+	items, ok := forExpr.Items.(*ast.IdentExpr)
+	if !ok || items.Name != "items" {
+		t.Fatalf("got Items %#v, want IdentExpr{Name: \"items\"}", forExpr.Items)
 	}
 }

@@ -66,6 +66,16 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 		return fc.resolveStructLit(v)
 	case *ast.FieldExpr:
 		return fc.resolveFieldExpr(v)
+	case *ast.ListLit:
+		return fc.resolveListLit(v, expected)
+	case *ast.IndexExpr:
+		return fc.resolveIndexExpr(v)
+	case *ast.IndexAssignExpr:
+		return fc.resolveIndexAssignExpr(v)
+	case *ast.SliceExpr:
+		return fc.resolveSliceExpr(v)
+	case *ast.ForExpr:
+		return fc.resolveForExpr(v)
 	case *ast.ClosureLit:
 		// A ClosureLit only ever reaches resolveType from somewhere other
 		// than resolveLetExpr's own dedicated check (which intercepts it
@@ -193,7 +203,7 @@ func (fc *funcChecker) checkCallArgs(v *ast.CallExpr, params []string) error {
 // resolveType's *ast.ClosureLit case) expected-type machinery.
 func (fc *funcChecker) resolveLetExpr(v *ast.LetExpr) (string, error) {
 	if clos, ok := v.Value.(*ast.ClosureLit); ok {
-		if v.Type != "" {
+		if v.Type != nil {
 			return "", fmt.Errorf("line %d: a closure literal's type is always inferred from its own signature; remove the type annotation on %q", v.Line, v.Name)
 		}
 		typ, err := fc.resolveClosureLit(clos)
@@ -204,10 +214,10 @@ func (fc *funcChecker) resolveLetExpr(v *ast.LetExpr) (string, error) {
 	}
 
 	var expected string
-	if v.Type != "" {
-		t, ok := fc.canonicalType(v.Type)
-		if !ok {
-			return "", fmt.Errorf("line %d: unknown type %q", v.Line, v.Type)
+	if v.Type != nil {
+		t, err := fc.resolveTypeExpr(v.Type)
+		if err != nil {
+			return "", err
 		}
 		expected = t
 	}
@@ -727,9 +737,9 @@ func (fc *funcChecker) checkClosureBody(v *ast.ClosureLit, depth int) (string, e
 			return "", fmt.Errorf("line %d: duplicate parameter %q", p.Line, p.Name)
 		}
 		seen[p.Name] = true
-		pt, ok := fc.canonicalType(p.Type)
-		if !ok {
-			return "", fmt.Errorf("line %d: unknown type %q", p.Line, p.Type)
+		pt, err := fc.resolveTypeExpr(p.Type)
+		if err != nil {
+			return "", err
 		}
 		p.ResolvedType = pt
 		token := fmt.Sprintf("&%d-%d", depth, i+1)
@@ -739,9 +749,9 @@ func (fc *funcChecker) checkClosureBody(v *ast.ClosureLit, depth int) (string, e
 		paramTypes = append(paramTypes, pt)
 	}
 
-	retType, ok := fc.canonicalReturnType(v.ReturnType)
-	if !ok {
-		return "", fmt.Errorf("line %d: unknown type %q", v.Line, v.ReturnType)
+	retType, err := fc.resolveReturnTypeExpr(v.ReturnType)
+	if err != nil {
+		return "", err
 	}
 	v.ResolvedReturnType = retType
 	if _, err := fc.checkBlock(v.Body, retType); err != nil {
@@ -859,6 +869,296 @@ func (fc *funcChecker) resolveFieldExpr(v *ast.FieldExpr) (string, error) {
 	return "", fmt.Errorf("line %d: type %s has no fields to access with '.'", v.Line, targetTyp)
 }
 
+// resolveListLit type-checks `[v1, v2, ...]` (amifl-spec.md sections
+// 2.2/3.1): a List[T] by default, or an Array[T;N] when expected says so
+// — the same untyped-literal-adapts-to-context pattern step 2 established
+// for IntLit/FloatLit, generalized to a collection literal's element type
+// (and, for Array, its declared size). expected values other than a List/
+// Array type (including "") fall through to the List-and-infer path,
+// exactly like every other resolveXxx here — checkExpr's own generic
+// post-check is what reports a genuine mismatch (e.g. `let x: Int =
+// [1,2]`), not a special case in here. Nested list literals (multi-
+// dimensional data) get the outer collection's own element type as their
+// own expected, recursively, purely as a byproduct of checkExpr already
+// threading expected down to each element — amifl-spec.md section 2.2's
+// "コレクションリテラルの型注釈は...ネストの各階層へ再帰的に伝播する"; with
+// no expected at all, every level independently defaults to List ("無注釈
+// 時は各階層独立に既定（List）が適用される").
+func (fc *funcChecker) resolveListLit(v *ast.ListLit, expected string) (string, error) {
+	if isArrayType(expected) {
+		elemTyp, size, _ := arrayParts(expected)
+		if uint64(len(v.Elems)) != size {
+			return "", fmt.Errorf("line %d: array literal has %d element(s), expected %d", v.Line, len(v.Elems), size)
+		}
+		for _, e := range v.Elems {
+			if _, err := fc.checkExpr(e, elemTyp); err != nil {
+				return "", err
+			}
+		}
+		v.ResolvedType = expected
+		return expected, nil
+	}
+	if isListType(expected) {
+		elemTyp, _ := listElemType(expected)
+		for _, e := range v.Elems {
+			if _, err := fc.checkExpr(e, elemTyp); err != nil {
+				return "", err
+			}
+		}
+		v.ResolvedType = expected
+		return expected, nil
+	}
+
+	if len(v.Elems) == 0 {
+		return "", fmt.Errorf("line %d: cannot infer the element type of an empty list literal without a type annotation", v.Line)
+	}
+	elemTyp, err := fc.resolveListElemTypes(v.Elems)
+	if err != nil {
+		return "", err
+	}
+	typ := makeListType(elemTyp)
+	v.ResolvedType = typ
+	return typ, nil
+}
+
+// resolveListElemTypes resolves every element of an un-annotated list
+// literal to one shared type, returning it — the same "resolve whichever
+// element isn't an untyped literal first" order-independence trick step 3
+// introduced for binary operators (resolveOperandTypes) and step 4
+// generalized to N if/elif/else branches (resolveBranches), applied here
+// to N list elements so `[x, 1]` and `[1, x]` behave symmetrically.
+func (fc *funcChecker) resolveListElemTypes(elems []ast.Expr) (string, error) {
+	anchor := 0
+	for i, e := range elems {
+		if !isAdaptableLiteral(e) {
+			anchor = i
+			break
+		}
+	}
+	target, err := fc.checkExpr(elems[anchor], "")
+	if err != nil {
+		return "", err
+	}
+	for i, e := range elems {
+		if i == anchor {
+			continue
+		}
+		if _, err := fc.checkExpr(e, target); err != nil {
+			return "", err
+		}
+	}
+	return target, nil
+}
+
+// resolveIndexExpr type-checks `target[index]` (amifl-spec.md section
+// 3.2, step 7 — see ast.IndexExpr's doc comment for why this compiles
+// directly to AGET rather than through a named `at` function).
+func (fc *funcChecker) resolveIndexExpr(v *ast.IndexExpr) (string, error) {
+	targetTyp, err := fc.checkExpr(v.Target, "")
+	if err != nil {
+		return "", err
+	}
+	elemTyp, ok := elementType(targetTyp)
+	if !ok {
+		return "", fmt.Errorf("line %d: cannot index into type %s (must be a List or Array)", v.Line, targetTyp)
+	}
+	if _, err := fc.checkExpr(v.Index, "Int64"); err != nil {
+		return "", err
+	}
+	v.ResolvedType = elemTyp
+	return elemTyp, nil
+}
+
+// resolveIndexAssignExpr type-checks `target[index] = value` (amifl-
+// spec.md section 3.2, "x[i] = v"). Target must be a plain identifier or
+// a chain of IndexExprs bottoming out in one — never a struct field or
+// other compound expression — a deliberate scope cut mirroring step 6's
+// "no field assignment" one, for the identical underlying reason:
+// codegen's write-back (collections.go's emitIndexAssign) only has to
+// unwind through IndexExpr layers, never worry about whether an
+// intermediate FGET-read copy aliases its original storage (a struct
+// field holding an Array would silently not, exactly the hazard step 6
+// sidestepped altogether by not letting `p.x = v` exist at all). Note
+// Target's own binding doesn't need to be *reassignable* (unlike
+// AssignExpr) — mutating an element never rebinds the variable itself,
+// so even a non-reassignable List/Array-typed parameter can have its
+// elements written through this, exactly as Go itself allows.
+func (fc *funcChecker) resolveIndexAssignExpr(v *ast.IndexAssignExpr) (string, error) {
+	if !isAssignableIndexTarget(v.Target) {
+		return "", fmt.Errorf("line %d: assignment target must be a plain variable or a chain of index expressions over one (not a struct field or other compound expression)", v.Line)
+	}
+	targetTyp, err := fc.checkExpr(v.Target, "")
+	if err != nil {
+		return "", err
+	}
+	elemTyp, ok := elementType(targetTyp)
+	if !ok {
+		return "", fmt.Errorf("line %d: cannot index-assign into type %s (must be a List or Array)", v.Line, targetTyp)
+	}
+	if _, err := fc.checkExpr(v.Index, "Int64"); err != nil {
+		return "", err
+	}
+	if _, err := fc.checkExpr(v.Value, elemTyp); err != nil {
+		return "", err
+	}
+	return unitType, nil
+}
+
+func isAssignableIndexTarget(e ast.Expr) bool {
+	switch v := e.(type) {
+	case *ast.IdentExpr:
+		return true
+	case *ast.IndexExpr:
+		return isAssignableIndexTarget(v.Target)
+	default:
+		return false
+	}
+}
+
+// resolveSliceExpr type-checks `target[from:to]`/`target[from:]`/
+// `target[:to]`/`target[:]` (amifl-spec.md section 3.2) — always resolves
+// to a List[T] of Target's own element type, regardless of whether Target
+// itself was a List or an Array (see ast.SliceExpr's doc comment for why).
+func (fc *funcChecker) resolveSliceExpr(v *ast.SliceExpr) (string, error) {
+	targetTyp, err := fc.checkExpr(v.Target, "")
+	if err != nil {
+		return "", err
+	}
+	elemTyp, ok := elementType(targetTyp)
+	if !ok {
+		return "", fmt.Errorf("line %d: cannot slice type %s (must be a List or Array)", v.Line, targetTyp)
+	}
+	if v.From != nil {
+		if _, err := fc.checkExpr(v.From, "Int64"); err != nil {
+			return "", err
+		}
+	}
+	if v.To != nil {
+		if _, err := fc.checkExpr(v.To, "Int64"); err != nil {
+			return "", err
+		}
+	}
+	typ := makeListType(elemTyp)
+	v.ResolvedType = typ
+	return typ, nil
+}
+
+// resolveForExpr type-checks `for x in items { ... }` (amifl-spec.md
+// section 7) — always Unit-typed. Items must be a List or Array (the only
+// iterable collection types that exist yet — step 7 restricts `for` to
+// them, deferring String/Set/Map/Stream iteration to their own later
+// steps); Var is declared as a non-reassignable binding in its own child
+// scope, mirroring a function parameter rather than a `let`
+// (ast.ForExpr.VarToken's doc comment).
+func (fc *funcChecker) resolveForExpr(v *ast.ForExpr) (string, error) {
+	itemsTyp, err := fc.checkExpr(v.Items, "")
+	if err != nil {
+		return "", err
+	}
+	elemTyp, ok := elementType(itemsTyp)
+	if !ok {
+		return "", fmt.Errorf("line %d: `for` requires a List or Array, got %s", v.Line, itemsTyp)
+	}
+
+	fc.pushScope()
+	token := "%" + fc.freshInternalName(v.Var)
+	if err := fc.declare(v.Var, &binding{typ: elemTyp, token: token}); err != nil {
+		fc.popScope()
+		return "", fmt.Errorf("line %d: %s", v.Line, err)
+	}
+	v.ElemType = elemTyp
+	v.VarToken = token
+
+	fc.loopDepth++
+	_, err = fc.checkBlock(v.Body, unitType)
+	fc.loopDepth--
+	fc.popScope()
+	if err != nil {
+		return "", err
+	}
+	return unitType, nil
+}
+
+// resolveTypeExpr turns a parsed type annotation (ast.TypeExpr) into its
+// canonical string form. NamedType defers to canonicalType (scalars/
+// structs, unchanged since step 2/6); ListType/ArrayType are new in step
+// 7, recursively resolving their own element type the same way and, for
+// ArrayType, reducing Size to a concrete literal (evalConstArraySize)
+// since AMIVM's ARTYPE instruction takes a literal immediate, never an
+// identifier or expression. This is a *funcChecker* method (not a
+// *checker* one, unlike canonicalType) because ArrayType's Size may
+// reference a function-local `const` — every caller either already has a
+// real funcChecker on hand (resolveLetExpr, checkClosureBody) or mints a
+// throwaway one just for this resolution (registerStructFields/
+// registerFuncSig in sema.go), the same pattern checkTopLevelConst already
+// uses to resolve a top-level const's own initializer.
+func (fc *funcChecker) resolveTypeExpr(te ast.TypeExpr) (string, error) {
+	switch t := te.(type) {
+	case *ast.NamedType:
+		canon, ok := fc.canonicalType(t.Name)
+		if !ok {
+			return "", fmt.Errorf("line %d: unknown type %q", t.Line, t.Name)
+		}
+		return canon, nil
+	case *ast.ListType:
+		elem, err := fc.resolveTypeExpr(t.Elem)
+		if err != nil {
+			return "", err
+		}
+		return makeListType(elem), nil
+	case *ast.ArrayType:
+		elem, err := fc.resolveTypeExpr(t.Elem)
+		if err != nil {
+			return "", err
+		}
+		if _, err := fc.checkExpr(t.Size, "Int64"); err != nil {
+			return "", err
+		}
+		n, err := evalConstArraySize(t.Size)
+		if err != nil {
+			return "", fmt.Errorf("line %d: array size %s", t.Size.Pos(), err)
+		}
+		return makeArrayType(elem, strconv.FormatUint(n, 10)), nil
+	default:
+		return "", fmt.Errorf("sema: unsupported type expression %T", te)
+	}
+}
+
+// resolveReturnTypeExpr is resolveTypeExpr plus one extra case usable
+// only in a function's own return-type position (amifl-spec.md section
+// 8.3, "戻り値無しはfn(T1, ...) -> Unit") — mirrors canonicalReturnType's
+// identical relationship to canonicalType.
+func (fc *funcChecker) resolveReturnTypeExpr(te ast.TypeExpr) (string, error) {
+	if n, ok := te.(*ast.NamedType); ok && n.Name == "Unit" {
+		return unitType, nil
+	}
+	return fc.resolveTypeExpr(te)
+}
+
+// evalConstArraySize reduces e to a concrete non-negative integer,
+// walking a plain IntLit or an IdentExpr's ConstValue chain. Deliberately
+// doesn't evaluate arithmetic (a `const N = 3 + 3` used as an array size)
+// — AMIVM's ARTYPE instruction requires a literal immediate, so something
+// has to fully reduce the expression at compile time, and doing that
+// generally would mean re-implementing Go's typed arithmetic semantics in
+// sema (exactly what step 3's design decision for `const` initializers
+// chose *not* to do — see CLAUDE.md's "確定した設計判断" for step 3's
+// ConstDecl handling, "この畳み込みをsema内に実装するとGoの算術演算の意味論
+// をAmiFL側で二重に持つことになる"). Scope-limited to what's actually
+// needed for an array size: a literal, or a chain of const references
+// down to one — a documented step 7 limitation, not an oversight.
+func evalConstArraySize(e ast.Expr) (uint64, error) {
+	switch v := e.(type) {
+	case *ast.IntLit:
+		return v.Value, nil
+	case *ast.IdentExpr:
+		if v.ConstValue != nil {
+			return evalConstArraySize(v.ConstValue)
+		}
+	}
+	return 0, fmt.Errorf("must be a literal integer or a reference to a const holding one (arithmetic array-size expressions aren't supported yet)")
+}
+
 // resolveConstDecl type-checks a const declaration's initializer and
 // returns its canonical type together with the expression to inline at
 // its use sites (amifl-spec.md section 4: "初期化式はリテラルまたは const
@@ -876,10 +1176,10 @@ func (fc *funcChecker) resolveFieldExpr(v *ast.FieldExpr) (string, error) {
 // requires here.
 func resolveConstDecl(fc *funcChecker, d *ast.ConstDecl) (string, ast.Expr, error) {
 	var expected string
-	if d.Type != "" {
-		t, ok := fc.canonicalType(d.Type)
-		if !ok {
-			return "", nil, fmt.Errorf("line %d: unknown type %q", d.Line, d.Type)
+	if d.Type != nil {
+		t, err := fc.resolveTypeExpr(d.Type)
+		if err != nil {
+			return "", nil, err
 		}
 		expected = t
 	}

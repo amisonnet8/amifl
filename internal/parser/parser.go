@@ -18,15 +18,14 @@ func Parse(src string) (*ast.File, error) {
 }
 
 // parser is a hand-written recursive-descent parser using precedence
-// climbing for amifl-spec.md section 6's binary/unary operators. It keeps
-// one token of lookahead beyond cur (in ahead) so that, at statement
-// position, an identifier can be told apart from a reassignment
-// (`name = expr`) without having to commit to either parse before seeing
-// the token after the name.
+// climbing for amifl-spec.md section 6's binary/unary operators. Single-
+// token lookahead (cur only) suffices everywhere, including reassignment
+// (`name = expr`, `x[i] = v`) — see parseExpr's doc comment for why that
+// no longer needs a peek-ahead buffer (step 7 removed the one earlier
+// steps used).
 type parser struct {
-	lx    *lexer.Lexer
-	cur   lexer.Token
-	ahead *lexer.Token
+	lx  *lexer.Lexer
+	cur lexer.Token
 	// noCompositeLit suppresses treating `Ident '{'` as the start of a
 	// struct literal (ast.StructLit) — set only while parsing an if/elif/
 	// while condition, the one position a bare `{` is genuinely ambiguous
@@ -45,30 +44,12 @@ type parser struct {
 }
 
 func (p *parser) advance() error {
-	if p.ahead != nil {
-		p.cur = *p.ahead
-		p.ahead = nil
-		return nil
-	}
 	tok, err := p.lx.Next()
 	if err != nil {
 		return err
 	}
 	p.cur = tok
 	return nil
-}
-
-// peek returns the token after cur without consuming cur, caching it in
-// ahead so the next advance() is free.
-func (p *parser) peek() (lexer.Token, error) {
-	if p.ahead == nil {
-		tok, err := p.lx.Next()
-		if err != nil {
-			return lexer.Token{}, err
-		}
-		p.ahead = &tok
-	}
-	return *p.ahead, nil
 }
 
 func (p *parser) errorf(format string, args ...any) error {
@@ -174,7 +155,7 @@ func (p *parser) parseFuncDecl() (*ast.FuncDecl, error) {
 	if _, err := p.expect(lexer.Arrow); err != nil {
 		return nil, err
 	}
-	retTok, err := p.expect(lexer.Ident)
+	retType, err := p.parseTypeExpr()
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +163,89 @@ func (p *parser) parseFuncDecl() (*ast.FuncDecl, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.FuncDecl{Name: nameTok.Value, Params: params, ReturnType: retTok.Value, Body: body, Line: nameTok.Line}, nil
+	return &ast.FuncDecl{Name: nameTok.Value, Params: params, ReturnType: retType, Body: body, Line: nameTok.Line}, nil
+}
+
+// parseTypeExpr parses a type annotation: a plain name (a scalar or
+// struct type, amifl-spec.md sections 2.1/2.2), or one of step 7's two
+// bracket-generic collection types, `List[Elem]` and `Array[Elem;N1,N2,
+// ...]` (section 2.2). "List" and "Array" are recognized structurally
+// here, by comparing the leading identifier's text, rather than being
+// reserved keywords — exactly like "Unit" is only special in a return-type
+// position (sema's canonicalReturnType) without being a keyword anywhere
+// else. A variable can still be named "List" or "Array" without conflict,
+// since this function is only ever reached from a type-annotation
+// position.
+func (p *parser) parseTypeExpr() (ast.TypeExpr, error) {
+	nameTok, err := p.expect(lexer.Ident)
+	if err != nil {
+		return nil, err
+	}
+	switch nameTok.Value {
+	case "List":
+		return p.parseListType(nameTok)
+	case "Array":
+		return p.parseArrayType(nameTok)
+	default:
+		return &ast.NamedType{Name: nameTok.Value, Line: nameTok.Line}, nil
+	}
+}
+
+func (p *parser) parseListType(nameTok lexer.Token) (ast.TypeExpr, error) {
+	if _, err := p.expect(lexer.LBracket); err != nil {
+		return nil, err
+	}
+	elem, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RBracket); err != nil {
+		return nil, err
+	}
+	return &ast.ListType{Elem: elem, Line: nameTok.Line}, nil
+}
+
+// parseArrayType parses `Array[Elem;N1,N2,...]`, desugaring the
+// multi-dimension size list into nested ast.ArrayType values at parse
+// time (amifl-spec.md section 2.2's own stated equivalence) — see
+// ast.ArrayType's doc comment for why every later phase only ever
+// handles a single dimension.
+func (p *parser) parseArrayType(nameTok lexer.Token) (ast.TypeExpr, error) {
+	if _, err := p.expect(lexer.LBracket); err != nil {
+		return nil, err
+	}
+	elem, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.Semicolon); err != nil {
+		return nil, err
+	}
+	var sizes []ast.Expr
+	for {
+		size, err := p.parseOrExpr()
+		if err != nil {
+			return nil, err
+		}
+		sizes = append(sizes, size)
+		if p.cur.Kind != lexer.Comma {
+			break
+		}
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RBracket); err != nil {
+		return nil, err
+	}
+	// Array[T;N1,N2,...] ≡ Array[Array[...Array[T;Nk]...];N2];N1] — build
+	// from the innermost (last) size outward so the outermost dimension
+	// (N1) ends up as the returned node's own Size.
+	result := elem
+	for i := len(sizes) - 1; i >= 0; i-- {
+		result = &ast.ArrayType{Elem: result, Size: sizes[i], Line: nameTok.Line}
+	}
+	return result, nil
 }
 
 // parseParamList parses a `fn`/closure-literal parameter list's contents
@@ -228,11 +291,11 @@ func (p *parser) parseFieldTypeList(end lexer.Kind) ([]ast.Param, error) {
 			if _, err := p.expect(lexer.Colon); err != nil {
 				return nil, err
 			}
-			typeTok, err := p.expect(lexer.Ident)
+			typ, err := p.parseTypeExpr()
 			if err != nil {
 				return nil, err
 			}
-			fields = append(fields, ast.Param{Name: nameTok.Value, Type: typeTok.Value, Line: nameTok.Line})
+			fields = append(fields, ast.Param{Name: nameTok.Value, Type: typ, Line: nameTok.Line})
 			if p.cur.Kind != lexer.Comma {
 				break
 			}
@@ -269,7 +332,7 @@ func (p *parser) parseClosureLit() (ast.Expr, error) {
 	if _, err := p.expect(lexer.Arrow); err != nil {
 		return nil, err
 	}
-	retTok, err := p.expect(lexer.Ident)
+	retType, err := p.parseTypeExpr()
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +340,7 @@ func (p *parser) parseClosureLit() (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.ClosureLit{Params: params, ReturnType: retTok.Value, Body: body, Line: kwTok.Line}, nil
+	return &ast.ClosureLit{Params: params, ReturnType: retType, Body: body, Line: kwTok.Line}, nil
 }
 
 // parseConstDecl parses a `const name[: Type] = expr` declaration. The
@@ -306,20 +369,16 @@ func (p *parser) parseConstDecl() (*ast.ConstDecl, error) {
 	return &ast.ConstDecl{Name: nameTok.Value, Type: typeName, Value: value, Line: kwTok.Line}, nil
 }
 
-// parseOptionalTypeAnnotation parses a leading `: TypeName`, or returns ""
-// if there is none.
-func (p *parser) parseOptionalTypeAnnotation() (string, error) {
+// parseOptionalTypeAnnotation parses a leading `: Type`, or returns nil if
+// there is none.
+func (p *parser) parseOptionalTypeAnnotation() (ast.TypeExpr, error) {
 	if p.cur.Kind != lexer.Colon {
-		return "", nil
+		return nil, nil
 	}
 	if err := p.advance(); err != nil {
-		return "", err
+		return nil, err
 	}
-	tok, err := p.expect(lexer.Ident)
-	if err != nil {
-		return "", err
-	}
-	return tok.Value, nil
+	return p.parseTypeExpr()
 }
 
 func (p *parser) parseBlock() (*ast.Block, error) {
@@ -357,49 +416,61 @@ func (p *parser) parseBlock() (*ast.Block, error) {
 
 // parseExpr parses one expression in statement position: a block's
 // top-level `let`/`const`/`_ = ...`/reassignment/value-expression entries
-// (amifl-spec.md section 5). Reassignment (`name = expr`) is deliberately
-// not reachable from within parseOrExpr's operator chain — it isn't listed
-// among amifl-spec.md section 6's operators, and (like let/const/discard)
-// it's Unit-typed, so nesting it inside a larger expression would only
-// ever be legal in a position that itself has to be Unit-typed.
+// (amifl-spec.md section 5). Reassignment (`name = expr`, `x[i] = v`) is
+// deliberately not reachable from within parseOrExpr's operator chain —
+// it isn't listed among amifl-spec.md section 6's operators, and (like
+// let/const/discard) it's Unit-typed, so nesting it inside a larger
+// expression would only ever be legal in a position that itself has to be
+// Unit-typed. Detecting it no longer needs a peek past the target (step
+// 2's original approach, sufficient when the only assignable target was a
+// bare name): step 7 adds `x[i] = v`, a target that isn't just one token,
+// so this instead parses the target as an ordinary expression first and
+// reclassifies it if `=` follows — the same technique Go itself uses for
+// its own assignment statements.
 func (p *parser) parseExpr() (ast.Expr, error) {
 	switch p.cur.Kind {
 	case lexer.KwLet:
 		return p.parseLetExpr()
 	case lexer.KwConst:
-		cd, err := p.parseConstDecl()
-		if err != nil {
-			return nil, err
-		}
-		return cd, nil
+		return p.parseConstDecl()
 	case lexer.Ident:
 		if p.cur.Value == "_" {
 			return p.parseDiscardExpr()
 		}
-		nxt, err := p.peek()
-		if err != nil {
-			return nil, err
-		}
-		if nxt.Kind == lexer.Assign {
-			return p.parseAssignExpr()
-		}
 	}
-	return p.parseOrExpr()
-}
-
-func (p *parser) parseAssignExpr() (ast.Expr, error) {
-	nameTok, err := p.expect(lexer.Ident)
+	expr, err := p.parseOrExpr()
 	if err != nil {
 		return nil, err
 	}
-	if _, err := p.expect(lexer.Assign); err != nil {
+	if p.cur.Kind != lexer.Assign {
+		return expr, nil
+	}
+	return p.finishAssignExpr(expr)
+}
+
+// finishAssignExpr consumes the `=` parseExpr just found after target and
+// builds the appropriate assignment node. Only a bare identifier
+// (ast.AssignExpr) or an index expression (ast.IndexAssignExpr) are valid
+// targets — a field (`t.x = v`) remains unsupported (step 6's deliberate
+// scope cut, ast.FieldExpr's doc comment), and anything else (a call, a
+// literal, a binary expression, ...) is simply not assignable.
+func (p *parser) finishAssignExpr(target ast.Expr) (ast.Expr, error) {
+	eqLine := p.cur.Line
+	if err := p.advance(); err != nil { // consume '='
 		return nil, err
 	}
 	value, err := p.parseExpr()
 	if err != nil {
 		return nil, err
 	}
-	return &ast.AssignExpr{Name: nameTok.Value, Value: value, Line: nameTok.Line}, nil
+	switch t := target.(type) {
+	case *ast.IdentExpr:
+		return &ast.AssignExpr{Name: t.Name, Value: value, Line: t.Line}, nil
+	case *ast.IndexExpr:
+		return &ast.IndexAssignExpr{Target: t.Target, Index: t.Index, Value: value, Line: t.Line}, nil
+	default:
+		return nil, fmt.Errorf("line %d: invalid assignment target", eqLine)
+	}
 }
 
 // binaryLevel parses left-associative left (op right)* where op is any
@@ -489,34 +560,128 @@ func (p *parser) parseUnaryExpr() (ast.Expr, error) {
 // parsePostfixExpr parses a primary expression followed by zero or more
 // `.field` accesses (amifl-spec.md section 3.2: tuple index sugar `t.0`,
 // `t.1`, ... and ordinary struct field access, both the same ast.FieldExpr
-// node — see its doc comment) — the highest-precedence level in section
-// 6's table (`() . [] 関数呼び出し 後置?`), above unary. Call parsing
-// (`f(...)`) already happens one level down inside parsePrimaryExpr
-// (parseIdentOrCall), so a chain like `f(x).0.y` composes for free: each
-// `.field` simply wraps whatever parsePrimaryExpr already produced.
+// node — see its doc comment) and/or `[...]` index/slice accesses (section
+// 3.2's `x[i]`/`x[a:b]`, step 7 — see parseIndexOrSlice) — the highest-
+// precedence level in section 6's table (`() . [] 関数呼び出し 後置?`),
+// above unary. Call parsing (`f(...)`) already happens one level down
+// inside parsePrimaryExpr (parseIdentOrCall), so a chain like
+// `f(x).0[i].y` composes for free: each `.field`/`[...]` simply wraps
+// whatever came before it.
 func (p *parser) parsePostfixExpr() (ast.Expr, error) {
 	expr, err := p.parsePrimaryExpr()
 	if err != nil {
 		return nil, err
 	}
-	for p.cur.Kind == lexer.Dot {
-		dotLine := p.cur.Line
-		if err := p.advance(); err != nil {
-			return nil, err
-		}
-		var field string
+	for {
 		switch p.cur.Kind {
-		case lexer.Int, lexer.Ident:
-			field = p.cur.Value
+		case lexer.Dot:
+			dotLine := p.cur.Line
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			var field string
+			switch p.cur.Kind {
+			case lexer.Int, lexer.Ident:
+				field = p.cur.Value
+			default:
+				return nil, p.errorf("expected a field name or tuple index after '.', got %s", p.cur.Kind)
+			}
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			expr = &ast.FieldExpr{Target: expr, Field: field, Line: dotLine}
+		case lexer.LBracket:
+			expr, err = p.parseIndexOrSlice(expr)
+			if err != nil {
+				return nil, err
+			}
 		default:
-			return nil, p.errorf("expected a field name or tuple index after '.', got %s", p.cur.Kind)
+			return expr, nil
 		}
+	}
+}
+
+// parseIndexOrSlice parses `[...]` following an already-parsed target
+// (amifl-spec.md section 3.2): `target[i]` (ast.IndexExpr), or
+// `target[a:b]` / `target[a:]` / `target[:b]` / `target[:]`
+// (ast.SliceExpr, From/To nil when omitted) — told apart by whether a `:`
+// shows up before the closing `]`.
+func (p *parser) parseIndexOrSlice(target ast.Expr) (ast.Expr, error) {
+	openTok, err := p.expect(lexer.LBracket)
+	if err != nil {
+		return nil, err
+	}
+	saved := p.noCompositeLit
+	p.noCompositeLit = false
+	defer func() { p.noCompositeLit = saved }()
+
+	var from ast.Expr
+	if p.cur.Kind != lexer.Colon {
+		from, err = p.parseOrExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if p.cur.Kind == lexer.Colon {
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
-		expr = &ast.FieldExpr{Target: expr, Field: field, Line: dotLine}
+		to, err := p.parseOptionalSliceBound()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.RBracket); err != nil {
+			return nil, err
+		}
+		return &ast.SliceExpr{Target: target, From: from, To: to, Line: openTok.Line}, nil
 	}
-	return expr, nil
+	if _, err := p.expect(lexer.RBracket); err != nil {
+		return nil, err
+	}
+	return &ast.IndexExpr{Target: target, Index: from, Line: openTok.Line}, nil
+}
+
+// parseOptionalSliceBound parses the (possibly absent) expression right
+// before a slice's closing `]` — absent exactly when `]` comes next.
+func (p *parser) parseOptionalSliceBound() (ast.Expr, error) {
+	if p.cur.Kind == lexer.RBracket {
+		return nil, nil
+	}
+	return p.parseOrExpr()
+}
+
+// parseListLit parses `[v1, v2, ...]` (amifl-spec.md sections 2.2/3.1) —
+// the literal syntax shared by both List[T] and Array[T;N]; which one it
+// resolves to is entirely sema's job (see ast.ListLit's doc comment).
+func (p *parser) parseListLit() (ast.Expr, error) {
+	openTok, err := p.expect(lexer.LBracket)
+	if err != nil {
+		return nil, err
+	}
+	saved := p.noCompositeLit
+	p.noCompositeLit = false
+	defer func() { p.noCompositeLit = saved }()
+
+	var elems []ast.Expr
+	if p.cur.Kind != lexer.RBracket {
+		for {
+			elem, err := p.parseOrExpr()
+			if err != nil {
+				return nil, err
+			}
+			elems = append(elems, elem)
+			if p.cur.Kind != lexer.Comma {
+				break
+			}
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RBracket); err != nil {
+		return nil, err
+	}
+	return &ast.ListLit{Elems: elems, Line: openTok.Line}, nil
 }
 
 func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
@@ -557,12 +722,16 @@ func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
 		return p.parseIdentOrCall()
 	case lexer.LParen:
 		return p.parseParenOrTupleExpr()
+	case lexer.LBracket:
+		return p.parseListLit()
 	case lexer.KwIf:
 		return p.parseIfExpr()
 	case lexer.KwSwitch:
 		return p.parseSwitchExpr()
 	case lexer.KwWhile:
 		return p.parseWhileExpr()
+	case lexer.KwFor:
+		return p.parseForExpr()
 	case lexer.KwBreak:
 		tok := p.cur
 		if err := p.advance(); err != nil {
@@ -582,16 +751,18 @@ func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
 	}
 }
 
-// parseCondExpr parses an if/elif/while condition: parseOrExpr (never
-// parseExpr — conditions deliberately stay at "any operator expression"
-// and never reach statement-only forms: let/const/assign/discard), with
-// noCompositeLit set so a bare `Ident '{'` right at the end of the
-// condition is left for the following block to consume rather than being
-// swallowed as a struct literal — see noCompositeLit's doc comment on the
-// parser struct for the ambiguity this resolves (identical to Go's own
-// "no composite literal in an if/for header" rule, and for the same
-// reason).
-func (p *parser) parseCondExpr() (ast.Expr, error) {
+// parseHeaderExpr parses the "header expression" of an if/elif/while
+// condition or a `for`'s `items` (amifl-spec.md section 7): parseOrExpr
+// (never parseExpr — a header deliberately stays at "any operator
+// expression" and never reaches statement-only forms: let/const/assign/
+// discard), with noCompositeLit set so a bare `Ident '{'` right at the end
+// is left for the following block to consume rather than being swallowed
+// as a struct literal — see noCompositeLit's doc comment on the parser
+// struct for the ambiguity this resolves (identical to Go's own "no
+// composite literal in an if/for header" rule, and for the same reason —
+// `for x in items { ... }` has the exact same "bare identifier directly
+// followed by the body's `{`" shape an if/while condition does).
+func (p *parser) parseHeaderExpr() (ast.Expr, error) {
 	saved := p.noCompositeLit
 	p.noCompositeLit = true
 	defer func() { p.noCompositeLit = saved }()
@@ -613,7 +784,7 @@ func (p *parser) parseIfExpr() (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-	cond, err := p.parseCondExpr()
+	cond, err := p.parseHeaderExpr()
 	if err != nil {
 		return nil, err
 	}
@@ -635,7 +806,7 @@ func (p *parser) parseOptionalElse() (ast.ElseBody, error) {
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
-		cond, err := p.parseCondExpr()
+		cond, err := p.parseHeaderExpr()
 		if err != nil {
 			return nil, err
 		}
@@ -667,7 +838,7 @@ func (p *parser) parseWhileExpr() (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-	cond, err := p.parseCondExpr()
+	cond, err := p.parseHeaderExpr()
 	if err != nil {
 		return nil, err
 	}
@@ -676,6 +847,33 @@ func (p *parser) parseWhileExpr() (ast.Expr, error) {
 		return nil, err
 	}
 	return &ast.WhileExpr{Cond: cond, Body: body, Line: kwTok.Line}, nil
+}
+
+// parseForExpr parses `for x in items { ... }` (amifl-spec.md section 7).
+// The `yield` form (a `map` pipeline sugar) is step 9's job — not
+// reachable here yet, so Items always goes through the same Unit-typed,
+// side-effect-only body every other `for` in step 7's scope does.
+func (p *parser) parseForExpr() (ast.Expr, error) {
+	kwTok, err := p.expect(lexer.KwFor)
+	if err != nil {
+		return nil, err
+	}
+	varTok, err := p.expect(lexer.Ident)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.KwIn); err != nil {
+		return nil, err
+	}
+	items, err := p.parseHeaderExpr()
+	if err != nil {
+		return nil, err
+	}
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.ForExpr{Var: varTok.Value, Items: items, Body: body, Line: kwTok.Line}, nil
 }
 
 // switchCase is one `case <bool-expr>: <value-expr>` or

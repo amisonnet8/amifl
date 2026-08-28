@@ -2,6 +2,7 @@ package sema
 
 import (
 	"math"
+	"strconv"
 	"strings"
 )
 
@@ -129,6 +130,83 @@ func tupleTypeParts(t string) (elems []string, ok bool) {
 		return nil, true
 	}
 	return strings.Split(inner, ","), true
+}
+
+// makeListType/listElemType/isListType encode List[T] (amifl-spec.md
+// section 2.2) as "List(T)" — T already-canonical, mirroring Tuple/Func's
+// internal string-encoding convention. Unlike Tuple/Func, this string
+// *is* parsed from real user-written surface syntax (`List[T]`) — but
+// only by the parser, into ast.ListType; sema's resolveTypeExpr is what
+// turns that into this canonical string, and nothing downstream ever goes
+// back the other way (codegen only ever decodes a string makeListType
+// itself built, exactly like every other type-encoding here).
+func makeListType(elem string) string {
+	return "List(" + elem + ")"
+}
+
+func isListType(t string) bool {
+	return strings.HasPrefix(t, "List(") && strings.HasSuffix(t, ")")
+}
+
+func listElemType(t string) (string, bool) {
+	if !isListType(t) {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(t, "List("), ")"), true
+}
+
+// makeArrayType/arrayParts/isArrayType encode one dimension of Array[T;N]
+// (amifl-spec.md section 2.2) as "Array(T;N)" — T already-canonical, N a
+// decimal literal sema has already reduced Array[T;N]'s size expression
+// to (evalConstArraySize). A multi-dimensional Array[T;N1,N2,...] is
+// nested ArrayType values by the time sema ever sees one (the parser
+// desugars it — ast.ArrayType's doc comment), so this string encoding
+// never has to represent more than a single dimension either.
+//
+// arrayParts finds the *last* ";" to split elem from size, not the
+// first: elem may itself be another "Array(...;...)" string (nested
+// arrays), which has its own inner ";" earlier in the string — but
+// makeArrayType always appends the outer ";size" last, so the rightmost
+// ";" in the full string is always the outer one, regardless of nesting
+// depth. (Tuple/struct/scalar element types can never contain ";" at
+// all, so this is unambiguous for every element kind step 7 allows.)
+func makeArrayType(elem, size string) string {
+	return "Array(" + elem + ";" + size + ")"
+}
+
+func isArrayType(t string) bool {
+	return strings.HasPrefix(t, "Array(") && strings.HasSuffix(t, ")")
+}
+
+func arrayParts(t string) (elem string, size uint64, ok bool) {
+	if !isArrayType(t) {
+		return "", 0, false
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(t, "Array("), ")")
+	sep := strings.LastIndex(inner, ";")
+	if sep < 0 {
+		return "", 0, false
+	}
+	elem = inner[:sep]
+	n, err := strconv.ParseUint(inner[sep+1:], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return elem, n, true
+}
+
+// elementType returns t's element type if t is a List or an Array —
+// shared by every consumer that only cares "does this hold a T, and what
+// T" regardless of which of the two container kinds it is (indexing,
+// `for`, slicing).
+func elementType(t string) (string, bool) {
+	if e, ok := listElemType(t); ok {
+		return e, true
+	}
+	if e, _, ok := arrayParts(t); ok {
+		return e, true
+	}
+	return "", false
 }
 
 func isIntType(name string) bool {

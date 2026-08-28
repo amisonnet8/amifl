@@ -6,12 +6,21 @@ import (
 	"github.com/amisonnet8/amifl/internal/ast"
 )
 
+// nt builds a plain named-type annotation (ast.NamedType) — step 7
+// introduced ast.TypeExpr in place of a bare string for every Type/
+// ReturnType field; every test in this file that only ever needs a
+// scalar/struct name (never List[...]/Array[...;...]) uses this rather
+// than constructing *ast.NamedType by hand everywhere.
+func nt(name string) ast.TypeExpr {
+	return &ast.NamedType{Name: name}
+}
+
 func mainFile(exprs ...ast.Expr) *ast.File {
 	return &ast.File{
 		Decls: []ast.TopLevelDecl{
 			&ast.FuncDecl{
 				Name:       "main",
-				ReturnType: "Int",
+				ReturnType: nt("Int"),
 				Body:       &ast.Block{Exprs: exprs},
 			},
 		},
@@ -52,7 +61,7 @@ func TestCheck_MultipleTopLevelFuncsAreAllowed(t *testing.T) {
 	)
 	f.Decls = append(f.Decls, &ast.FuncDecl{
 		Name:       "helper",
-		ReturnType: "Int",
+		ReturnType: nt("Int"),
 		Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 	})
 	if err := Check(f); err != nil {
@@ -62,7 +71,7 @@ func TestCheck_MultipleTopLevelFuncsAreAllowed(t *testing.T) {
 
 func TestCheck_WrongReturnTypeIsAnError(t *testing.T) {
 	f := mainFile(&ast.IntLit{Value: 0})
-	f.Decls[0].(*ast.FuncDecl).ReturnType = "String"
+	f.Decls[0].(*ast.FuncDecl).ReturnType = nt("String")
 	if err := Check(f); err == nil {
 		t.Fatal("expected an error for a non-Int return type")
 	}
@@ -70,7 +79,7 @@ func TestCheck_WrongReturnTypeIsAnError(t *testing.T) {
 
 func TestCheck_UnknownReturnTypeIsAnError(t *testing.T) {
 	f := mainFile(&ast.IntLit{Value: 0})
-	f.Decls[0].(*ast.FuncDecl).ReturnType = "Nope"
+	f.Decls[0].(*ast.FuncDecl).ReturnType = nt("Nope")
 	if err := Check(f); err == nil {
 		t.Fatal("expected an error for an unknown return type")
 	}
@@ -118,7 +127,7 @@ func TestCheck_DiscardSilencesNonUnitNonFinalExpr(t *testing.T) {
 
 func TestCheck_LetWithTypeAnnotationAndUse(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int", Value: &ast.IntLit{Value: 42}},
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.IntLit{Value: 42}},
 		&ast.IdentExpr{Name: "x"},
 	)
 	if err := Check(f); err != nil {
@@ -142,7 +151,7 @@ func TestCheck_LetInfersTypeFromLiteral(t *testing.T) {
 
 func TestCheck_LetTypeMismatchIsAnError(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Bool", Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "x", Type: nt("Bool"), Value: &ast.IntLit{Value: 5}},
 		&ast.IntLit{Value: 0},
 	)
 	if err := Check(f); err == nil {
@@ -152,7 +161,7 @@ func TestCheck_LetTypeMismatchIsAnError(t *testing.T) {
 
 func TestCheck_FloatLiteralCannotNarrowToIntType(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int", Value: &ast.FloatLit{Value: 1.5}},
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.FloatLit{Value: 1.5}},
 		&ast.IntLit{Value: 0},
 	)
 	if err := Check(f); err == nil {
@@ -162,7 +171,7 @@ func TestCheck_FloatLiteralCannotNarrowToIntType(t *testing.T) {
 
 func TestCheck_IntLiteralFitsFloatType(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Float", Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "x", Type: nt("Float"), Value: &ast.IntLit{Value: 5}},
 		&ast.IntLit{Value: 0},
 	)
 	if err := Check(f); err != nil {
@@ -172,7 +181,7 @@ func TestCheck_IntLiteralFitsFloatType(t *testing.T) {
 
 func TestCheck_IntLiteralOverflowIsAnError(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.IntLit{Value: 200}},
+		&ast.LetExpr{Name: "x", Type: nt("Int8"), Value: &ast.IntLit{Value: 200}},
 		&ast.IntLit{Value: 0},
 	)
 	if err := Check(f); err == nil {
@@ -182,7 +191,7 @@ func TestCheck_IntLiteralOverflowIsAnError(t *testing.T) {
 
 func TestCheck_UnknownTypeAnnotationIsAnError(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Nope", Value: &ast.IntLit{Value: 1}},
+		&ast.LetExpr{Name: "x", Type: nt("Nope"), Value: &ast.IntLit{Value: 1}},
 		&ast.IntLit{Value: 0},
 	)
 	if err := Check(f); err == nil {
@@ -219,7 +228,7 @@ func TestCheck_AssignToUndeclaredIsAnError(t *testing.T) {
 
 func TestCheck_AssignTypeMismatchIsAnError(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int", Value: &ast.IntLit{Value: 1}},
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.IntLit{Value: 1}},
 		&ast.AssignExpr{Name: "x", Value: &ast.StringLit{Value: "nope"}},
 		&ast.IntLit{Value: 0},
 	)
@@ -230,7 +239,7 @@ func TestCheck_AssignTypeMismatchIsAnError(t *testing.T) {
 
 func TestCheck_ReassigningLetIsValid(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int", Value: &ast.IntLit{Value: 1}},
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.IntLit{Value: 1}},
 		&ast.AssignExpr{Name: "x", Value: &ast.IntLit{Value: 2}},
 		&ast.IdentExpr{Name: "x"},
 	)
@@ -291,10 +300,10 @@ func TestCheck_ConstInitializerMustBeLiteralOrConstRef(t *testing.T) {
 func TestCheck_TopLevelConstVisibleInMain(t *testing.T) {
 	f := &ast.File{
 		Decls: []ast.TopLevelDecl{
-			&ast.ConstDecl{Name: "Greeting", Type: "String", Value: &ast.StringLit{Value: "hi"}},
+			&ast.ConstDecl{Name: "Greeting", Type: nt("String"), Value: &ast.StringLit{Value: "hi"}},
 			&ast.FuncDecl{
 				Name:       "main",
-				ReturnType: "Int",
+				ReturnType: nt("Int"),
 				Body: &ast.Block{Exprs: []ast.Expr{
 					&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.IdentExpr{Name: "Greeting"}}},
 					&ast.IntLit{Value: 0},
@@ -321,7 +330,7 @@ func TestCheck_DuplicateTopLevelConstIsAnError(t *testing.T) {
 
 func TestCheck_ArithmeticBetweenSameTypesIsValid(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "x", Type: nt("Int8"), Value: &ast.IntLit{Value: 5}},
 		&ast.LetExpr{Name: "y", Value: &ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "x"}, Right: &ast.IntLit{Value: 1}}},
 		&ast.IntLit{Value: 0},
 	)
@@ -339,7 +348,7 @@ func TestCheck_LiteralAdaptsRegardlessOfOperandOrder(t *testing.T) {
 	// to whichever side is concretely typed, not just the left side
 	// (CLAUDE.md's "確定した設計判断" for step 3).
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "x", Type: nt("Int8"), Value: &ast.IntLit{Value: 5}},
 		&ast.LetExpr{Name: "y", Value: &ast.BinaryExpr{Op: "+", Left: &ast.IntLit{Value: 1}, Right: &ast.IdentExpr{Name: "x"}}},
 		&ast.IntLit{Value: 0},
 	)
@@ -350,8 +359,8 @@ func TestCheck_LiteralAdaptsRegardlessOfOperandOrder(t *testing.T) {
 
 func TestCheck_ArithmeticBetweenDifferentTypesIsAnError(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.IntLit{Value: 5}},
-		&ast.LetExpr{Name: "y", Type: "Int16", Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "x", Type: nt("Int8"), Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "y", Type: nt("Int16"), Value: &ast.IntLit{Value: 5}},
 		&ast.LetExpr{Name: "z", Value: &ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "x"}, Right: &ast.IdentExpr{Name: "y"}}},
 		&ast.IntLit{Value: 0},
 	)
@@ -419,7 +428,7 @@ func TestCheck_ShiftCountMustBeUInt(t *testing.T) {
 
 func TestCheck_ComparisonProducesBool(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "ok", Type: "Bool", Value: &ast.BinaryExpr{Op: "<", Left: &ast.IntLit{Value: 1}, Right: &ast.IntLit{Value: 2}}},
+		&ast.LetExpr{Name: "ok", Type: nt("Bool"), Value: &ast.BinaryExpr{Op: "<", Left: &ast.IntLit{Value: 1}, Right: &ast.IntLit{Value: 2}}},
 		&ast.IntLit{Value: 0},
 	)
 	if err := Check(f); err != nil {
@@ -471,7 +480,7 @@ func TestCheck_UnaryNotRequiresBool(t *testing.T) {
 
 func TestCheck_UnaryMinusOnLetVariable(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int", Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.IntLit{Value: 5}},
 		&ast.LetExpr{Name: "y", Value: &ast.UnaryExpr{Op: "-", Operand: &ast.IdentExpr{Name: "x"}}},
 		&ast.IntLit{Value: 0},
 	)
@@ -485,7 +494,7 @@ func TestCheck_NegatedInt8MinBoundaryIsValid(t *testing.T) {
 	// overflows Int8's positive range (max 127) — resolveNegatedIntLit's
 	// whole reason to exist.
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.UnaryExpr{Op: "-", Operand: &ast.IntLit{Value: 128}}},
+		&ast.LetExpr{Name: "x", Type: nt("Int8"), Value: &ast.UnaryExpr{Op: "-", Operand: &ast.IntLit{Value: 128}}},
 		&ast.IntLit{Value: 0},
 	)
 	if err := Check(f); err != nil {
@@ -495,7 +504,7 @@ func TestCheck_NegatedInt8MinBoundaryIsValid(t *testing.T) {
 
 func TestCheck_NegatedInt8PastMinBoundaryIsAnError(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.UnaryExpr{Op: "-", Operand: &ast.IntLit{Value: 129}}},
+		&ast.LetExpr{Name: "x", Type: nt("Int8"), Value: &ast.UnaryExpr{Op: "-", Operand: &ast.IntLit{Value: 129}}},
 		&ast.IntLit{Value: 0},
 	)
 	if err := Check(f); err == nil {
@@ -551,7 +560,7 @@ func boolIdent(name string) *ast.IdentExpr { return &ast.IdentExpr{Name: name} }
 
 func TestCheck_IfWithElseUnifiesBranchTypes(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "cond", Type: "Bool", Value: &ast.BoolLit{Value: true}},
+		&ast.LetExpr{Name: "cond", Type: nt("Bool"), Value: &ast.BoolLit{Value: true}},
 		&ast.LetExpr{Name: "x", Value: &ast.IfExpr{
 			Cond: boolIdent("cond"),
 			Then: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
@@ -582,8 +591,8 @@ func TestCheck_IfBranchLiteralAdaptsToSiblingsConcreteType(t *testing.T) {
 			then, elseBlk = concrete, lit
 		}
 		f := mainFile(
-			&ast.LetExpr{Name: "x", Type: "Int8", Value: &ast.IntLit{Value: 5}},
-			&ast.LetExpr{Name: "cond", Type: "Bool", Value: &ast.BoolLit{Value: true}},
+			&ast.LetExpr{Name: "x", Type: nt("Int8"), Value: &ast.IntLit{Value: 5}},
+			&ast.LetExpr{Name: "cond", Type: nt("Bool"), Value: &ast.BoolLit{Value: true}},
 			&ast.LetExpr{Name: "y", Value: &ast.IfExpr{Cond: boolIdent("cond"), Then: then, Else: elseBlk}},
 			&ast.IntLit{Value: 0},
 		)
@@ -595,7 +604,7 @@ func TestCheck_IfBranchLiteralAdaptsToSiblingsConcreteType(t *testing.T) {
 
 func TestCheck_IfWithoutElseMustBeUnit(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "cond", Type: "Bool", Value: &ast.BoolLit{Value: true}},
+		&ast.LetExpr{Name: "cond", Type: nt("Bool"), Value: &ast.BoolLit{Value: true}},
 		&ast.LetExpr{Name: "x", Value: &ast.IfExpr{
 			Cond: boolIdent("cond"),
 			Then: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
@@ -609,7 +618,7 @@ func TestCheck_IfWithoutElseMustBeUnit(t *testing.T) {
 
 func TestCheck_IfWithoutElseUsedAsAStatementIsValid(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "cond", Type: "Bool", Value: &ast.BoolLit{Value: true}},
+		&ast.LetExpr{Name: "cond", Type: nt("Bool"), Value: &ast.BoolLit{Value: true}},
 		&ast.IfExpr{
 			Cond: boolIdent("cond"),
 			Then: &ast.Block{Exprs: []ast.Expr{printStr("a")}},
@@ -623,7 +632,7 @@ func TestCheck_IfWithoutElseUsedAsAStatementIsValid(t *testing.T) {
 
 func TestCheck_IfBranchTypeMismatchIsAnError(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "cond", Type: "Bool", Value: &ast.BoolLit{Value: true}},
+		&ast.LetExpr{Name: "cond", Type: nt("Bool"), Value: &ast.BoolLit{Value: true}},
 		&ast.LetExpr{Name: "x", Value: &ast.IfExpr{
 			Cond: boolIdent("cond"),
 			Then: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
@@ -640,8 +649,8 @@ func TestCheck_ElifChainIsCheckedThroughTheDesugaredElse(t *testing.T) {
 	// if a {1} elif b {2} else {3} — an IfExpr nested in Else, exactly as
 	// the parser desugars elif (CLAUDE.md's "過去に踏まれた地雷" #2).
 	f := mainFile(
-		&ast.LetExpr{Name: "a", Type: "Bool", Value: &ast.BoolLit{Value: true}},
-		&ast.LetExpr{Name: "b", Type: "Bool", Value: &ast.BoolLit{Value: false}},
+		&ast.LetExpr{Name: "a", Type: nt("Bool"), Value: &ast.BoolLit{Value: true}},
+		&ast.LetExpr{Name: "b", Type: nt("Bool"), Value: &ast.BoolLit{Value: false}},
 		&ast.LetExpr{Name: "x", Value: &ast.IfExpr{
 			Cond: boolIdent("a"),
 			Then: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
@@ -676,11 +685,11 @@ func TestCheck_NestedLetShadowsOuterLet(t *testing.T) {
 	// requires a String argument) if the reference resolves to the inner
 	// shadow, not the outer Int `x`.
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int", Value: &ast.IntLit{Value: 1}},
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.IntLit{Value: 1}},
 		&ast.IfExpr{
 			Cond: &ast.BoolLit{Value: true},
 			Then: &ast.Block{Exprs: []ast.Expr{
-				&ast.LetExpr{Name: "x", Type: "String", Value: &ast.StringLit{Value: "inner"}},
+				&ast.LetExpr{Name: "x", Type: nt("String"), Value: &ast.StringLit{Value: "inner"}},
 				&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.IdentExpr{Name: "x"}}},
 			}},
 		},
@@ -832,8 +841,8 @@ func TestCheck_FuncWithParamsIsCallable(t *testing.T) {
 	)
 	f.Decls = append(f.Decls, &ast.FuncDecl{
 		Name:       "add",
-		Params:     []ast.Param{{Name: "a", Type: "Int"}, {Name: "b", Type: "Int"}},
-		ReturnType: "Int",
+		Params:     []ast.Param{{Name: "a", Type: nt("Int")}, {Name: "b", Type: nt("Int")}},
+		ReturnType: nt("Int"),
 		Body: &ast.Block{Exprs: []ast.Expr{
 			&ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}},
 		}},
@@ -847,8 +856,8 @@ func TestCheck_CallWrongArgCountIsAnError(t *testing.T) {
 	f := mainFile(&ast.CallExpr{Callee: "add", Args: []ast.Expr{&ast.IntLit{Value: 1}}})
 	f.Decls = append(f.Decls, &ast.FuncDecl{
 		Name:       "add",
-		Params:     []ast.Param{{Name: "a", Type: "Int"}, {Name: "b", Type: "Int"}},
-		ReturnType: "Int",
+		Params:     []ast.Param{{Name: "a", Type: nt("Int")}, {Name: "b", Type: nt("Int")}},
+		ReturnType: nt("Int"),
 		Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 	})
 	if err := Check(f); err == nil {
@@ -860,8 +869,8 @@ func TestCheck_CallWrongArgTypeIsAnError(t *testing.T) {
 	f := mainFile(&ast.CallExpr{Callee: "add", Args: []ast.Expr{&ast.StringLit{Value: "x"}, &ast.IntLit{Value: 2}}})
 	f.Decls = append(f.Decls, &ast.FuncDecl{
 		Name:       "add",
-		Params:     []ast.Param{{Name: "a", Type: "Int"}, {Name: "b", Type: "Int"}},
-		ReturnType: "Int",
+		Params:     []ast.Param{{Name: "a", Type: nt("Int")}, {Name: "b", Type: nt("Int")}},
+		ReturnType: nt("Int"),
 		Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 	})
 	if err := Check(f); err == nil {
@@ -873,8 +882,8 @@ func TestCheck_DuplicateParamNameIsAnError(t *testing.T) {
 	f := mainFile(&ast.IntLit{Value: 0})
 	f.Decls = append(f.Decls, &ast.FuncDecl{
 		Name:       "bad",
-		Params:     []ast.Param{{Name: "a", Type: "Int"}, {Name: "a", Type: "Int"}},
-		ReturnType: "Int",
+		Params:     []ast.Param{{Name: "a", Type: nt("Int")}, {Name: "a", Type: nt("Int")}},
+		ReturnType: nt("Int"),
 		Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 	})
 	if err := Check(f); err == nil {
@@ -886,8 +895,8 @@ func TestCheck_ParamIsNotReassignable(t *testing.T) {
 	f := mainFile(&ast.IntLit{Value: 0})
 	f.Decls = append(f.Decls, &ast.FuncDecl{
 		Name:       "bad",
-		Params:     []ast.Param{{Name: "a", Type: "Int"}},
-		ReturnType: "Int",
+		Params:     []ast.Param{{Name: "a", Type: nt("Int")}},
+		ReturnType: nt("Int"),
 		Body: &ast.Block{Exprs: []ast.Expr{
 			&ast.AssignExpr{Name: "a", Value: &ast.IntLit{Value: 5}},
 			&ast.IdentExpr{Name: "a"},
@@ -902,8 +911,8 @@ func TestCheck_SelfRecursionIsValid(t *testing.T) {
 	f := mainFile(&ast.IntLit{Value: 0})
 	f.Decls = append(f.Decls, &ast.FuncDecl{
 		Name:       "loop",
-		Params:     []ast.Param{{Name: "n", Type: "Int"}},
-		ReturnType: "Int",
+		Params:     []ast.Param{{Name: "n", Type: nt("Int")}},
+		ReturnType: nt("Int"),
 		Body: &ast.Block{Exprs: []ast.Expr{
 			&ast.CallExpr{Callee: "loop", Args: []ast.Expr{&ast.IdentExpr{Name: "n"}}},
 		}},
@@ -921,16 +930,16 @@ func TestCheck_ForwardReferenceAndMutualRecursionAreValid(t *testing.T) {
 	f.Decls = append(f.Decls,
 		&ast.FuncDecl{
 			Name:       "even",
-			Params:     []ast.Param{{Name: "n", Type: "Int"}},
-			ReturnType: "Bool",
+			Params:     []ast.Param{{Name: "n", Type: nt("Int")}},
+			ReturnType: nt("Bool"),
 			Body: &ast.Block{Exprs: []ast.Expr{
 				&ast.CallExpr{Callee: "odd", Args: []ast.Expr{&ast.IdentExpr{Name: "n"}}},
 			}},
 		},
 		&ast.FuncDecl{
 			Name:       "odd",
-			Params:     []ast.Param{{Name: "n", Type: "Int"}},
-			ReturnType: "Bool",
+			Params:     []ast.Param{{Name: "n", Type: nt("Int")}},
+			ReturnType: nt("Bool"),
 			Body: &ast.Block{Exprs: []ast.Expr{
 				&ast.CallExpr{Callee: "even", Args: []ast.Expr{&ast.IdentExpr{Name: "n"}}},
 			}},
@@ -943,7 +952,7 @@ func TestCheck_ForwardReferenceAndMutualRecursionAreValid(t *testing.T) {
 
 func TestCheck_DuplicateFuncNameIsAnError(t *testing.T) {
 	f := mainFile(&ast.IntLit{Value: 0})
-	dup := &ast.FuncDecl{Name: "helper", ReturnType: "Int", Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}}
+	dup := &ast.FuncDecl{Name: "helper", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}}
 	f.Decls = append(f.Decls, dup, dup)
 	if err := Check(f); err == nil {
 		t.Fatal("expected an error for a duplicate function name")
@@ -954,7 +963,7 @@ func TestCheck_FuncNameCollidingWithConstIsAnError(t *testing.T) {
 	f := mainFile(&ast.IntLit{Value: 0})
 	f.Decls = append(f.Decls,
 		&ast.ConstDecl{Name: "X", Value: &ast.IntLit{Value: 1}},
-		&ast.FuncDecl{Name: "X", ReturnType: "Int", Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}},
+		&ast.FuncDecl{Name: "X", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}},
 	)
 	if err := Check(f); err == nil {
 		t.Fatal("expected an error for a fn name colliding with a top-level const")
@@ -964,7 +973,7 @@ func TestCheck_FuncNameCollidingWithConstIsAnError(t *testing.T) {
 func TestCheck_ReservedMainNameIsAnError(t *testing.T) {
 	f := mainFile(&ast.IntLit{Value: 0})
 	f.Decls = append(f.Decls, &ast.FuncDecl{
-		Name: "amifl_main", ReturnType: "Int", Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		Name: "amifl_main", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 	})
 	if err := Check(f); err == nil {
 		t.Fatal("expected an error for declaring a fn named the reserved amifl_main")
@@ -975,8 +984,8 @@ func TestCheck_MainWithParamsIsAnError(t *testing.T) {
 	f := &ast.File{Decls: []ast.TopLevelDecl{
 		&ast.FuncDecl{
 			Name:       "main",
-			Params:     []ast.Param{{Name: "x", Type: "Int"}},
-			ReturnType: "Int",
+			Params:     []ast.Param{{Name: "x", Type: nt("Int")}},
+			ReturnType: nt("Int"),
 			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 		},
 	}}
@@ -989,8 +998,8 @@ func TestCheck_UnitReturnTypeIsValidOnlyForFunctions(t *testing.T) {
 	f := mainFile(&ast.CallExpr{Callee: "log", Args: []ast.Expr{&ast.StringLit{Value: "hi"}}}, &ast.IntLit{Value: 0})
 	f.Decls = append(f.Decls, &ast.FuncDecl{
 		Name:       "log",
-		Params:     []ast.Param{{Name: "msg", Type: "String"}},
-		ReturnType: "Unit",
+		Params:     []ast.Param{{Name: "msg", Type: nt("String")}},
+		ReturnType: nt("Unit"),
 		Body:       &ast.Block{Exprs: []ast.Expr{printStr("logged")}},
 	})
 	if err := Check(f); err != nil {
@@ -999,7 +1008,7 @@ func TestCheck_UnitReturnTypeIsValidOnlyForFunctions(t *testing.T) {
 }
 
 func TestCheck_LetTypeAnnotationCannotBeUnit(t *testing.T) {
-	f := mainFile(&ast.LetExpr{Name: "x", Type: "Unit", Value: &ast.IntLit{Value: 0}}, &ast.IntLit{Value: 0})
+	f := mainFile(&ast.LetExpr{Name: "x", Type: nt("Unit"), Value: &ast.IntLit{Value: 0}}, &ast.IntLit{Value: 0})
 	if err := Check(f); err == nil {
 		t.Fatal("expected an error for a `let` annotated Unit (only a function's own return type may be Unit)")
 	}
@@ -1008,8 +1017,8 @@ func TestCheck_LetTypeAnnotationCannotBeUnit(t *testing.T) {
 func TestCheck_ClosureLitBoundToLetIsCallable(t *testing.T) {
 	f := mainFile(
 		&ast.LetExpr{Name: "square", Value: &ast.ClosureLit{
-			Params:     []ast.Param{{Name: "x", Type: "Int"}},
-			ReturnType: "Int",
+			Params:     []ast.Param{{Name: "x", Type: nt("Int")}},
+			ReturnType: nt("Int"),
 			Body: &ast.Block{Exprs: []ast.Expr{
 				&ast.BinaryExpr{Op: "*", Left: &ast.IdentExpr{Name: "x"}, Right: &ast.IdentExpr{Name: "x"}},
 			}},
@@ -1023,10 +1032,10 @@ func TestCheck_ClosureLitBoundToLetIsCallable(t *testing.T) {
 
 func TestCheck_ClosureCapturesOuterLet(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "base", Type: "Int", Value: &ast.IntLit{Value: 10}},
+		&ast.LetExpr{Name: "base", Type: nt("Int"), Value: &ast.IntLit{Value: 10}},
 		&ast.LetExpr{Name: "addBase", Value: &ast.ClosureLit{
-			Params:     []ast.Param{{Name: "x", Type: "Int"}},
-			ReturnType: "Int",
+			Params:     []ast.Param{{Name: "x", Type: nt("Int")}},
+			ReturnType: nt("Int"),
 			Body: &ast.Block{Exprs: []ast.Expr{
 				&ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "x"}, Right: &ast.IdentExpr{Name: "base"}},
 			}},
@@ -1040,9 +1049,9 @@ func TestCheck_ClosureCapturesOuterLet(t *testing.T) {
 
 func TestCheck_ClosureLitWithTypeAnnotationIsAnError(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "square", Type: "Int", Value: &ast.ClosureLit{
-			Params:     []ast.Param{{Name: "x", Type: "Int"}},
-			ReturnType: "Int",
+		&ast.LetExpr{Name: "square", Type: nt("Int"), Value: &ast.ClosureLit{
+			Params:     []ast.Param{{Name: "x", Type: nt("Int")}},
+			ReturnType: nt("Int"),
 			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IdentExpr{Name: "x"}}},
 		}},
 		&ast.IntLit{Value: 0},
@@ -1057,7 +1066,7 @@ func TestCheck_ClosureLitAsCallArgumentIsAnError(t *testing.T) {
 	// a call argument (no higher-order functions yet).
 	f := mainFile(
 		&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.ClosureLit{
-			ReturnType: "Int",
+			ReturnType: nt("Int"),
 			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 		}}},
 	)
@@ -1068,7 +1077,7 @@ func TestCheck_ClosureLitAsCallArgumentIsAnError(t *testing.T) {
 
 func TestCheck_CallingNonFunctionIsAnError(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int", Value: &ast.IntLit{Value: 1}},
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.IntLit{Value: 1}},
 		&ast.CallExpr{Callee: "x", Args: nil},
 	)
 	if err := Check(f); err == nil {
@@ -1086,11 +1095,11 @@ func TestCheck_CallingUndefinedFunctionIsAnError(t *testing.T) {
 func TestCheck_FuncValuesCannotBeCompared(t *testing.T) {
 	f := mainFile(
 		&ast.LetExpr{Name: "a", Value: &ast.ClosureLit{
-			ReturnType: "Int",
+			ReturnType: nt("Int"),
 			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 		}},
 		&ast.LetExpr{Name: "b", Value: &ast.ClosureLit{
-			ReturnType: "Int",
+			ReturnType: nt("Int"),
 			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 		}},
 		&ast.BinaryExpr{Op: "==", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}},
@@ -1103,14 +1112,14 @@ func TestCheck_FuncValuesCannotBeCompared(t *testing.T) {
 func TestCheck_LocalClosureShadowsSameNamedTopLevelFunc(t *testing.T) {
 	f := mainFile(
 		&ast.LetExpr{Name: "helper", Value: &ast.ClosureLit{
-			ReturnType: "Int",
+			ReturnType: nt("Int"),
 			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 99}}},
 		}},
 		&ast.CallExpr{Callee: "helper", Args: nil},
 	)
 	f.Decls = append(f.Decls, &ast.FuncDecl{
 		Name:       "helper",
-		ReturnType: "String",
+		ReturnType: nt("String"),
 		Body:       &ast.Block{Exprs: []ast.Expr{&ast.StringLit{Value: "top-level"}}},
 	})
 	if err := Check(f); err != nil {
@@ -1122,8 +1131,8 @@ func pointStructDecl() *ast.StructDecl {
 	return &ast.StructDecl{
 		Name: "Point",
 		Fields: []ast.Param{
-			{Name: "x", Type: "Int"},
-			{Name: "y", Type: "Int"},
+			{Name: "x", Type: nt("Int")},
+			{Name: "y", Type: nt("Int")},
 		},
 	}
 }
@@ -1181,8 +1190,8 @@ func TestCheck_DuplicateStructFieldNameIsAnError(t *testing.T) {
 	f.Decls = append(f.Decls, &ast.StructDecl{
 		Name: "Bad",
 		Fields: []ast.Param{
-			{Name: "x", Type: "Int"},
-			{Name: "x", Type: "Int"},
+			{Name: "x", Type: nt("Int")},
+			{Name: "x", Type: nt("Int")},
 		},
 	})
 	if err := Check(f); err == nil {
@@ -1194,7 +1203,7 @@ func TestCheck_StructFieldWithUnknownTypeIsAnError(t *testing.T) {
 	f := mainFile(&ast.IntLit{Value: 0})
 	f.Decls = append(f.Decls, &ast.StructDecl{
 		Name:   "Bad",
-		Fields: []ast.Param{{Name: "x", Type: "Nope"}},
+		Fields: []ast.Param{{Name: "x", Type: nt("Nope")}},
 	})
 	if err := Check(f); err == nil {
 		t.Fatal("expected an error for a struct field with an unknown type")
@@ -1208,7 +1217,7 @@ func TestCheck_StructFieldsCanForwardReferenceAnotherStruct(t *testing.T) {
 	// on file order.
 	f := mainFile(&ast.IntLit{Value: 0})
 	f.Decls = append(f.Decls,
-		&ast.StructDecl{Name: "Line", Fields: []ast.Param{{Name: "to", Type: "Point"}}},
+		&ast.StructDecl{Name: "Line", Fields: []ast.Param{{Name: "to", Type: nt("Point")}}},
 		pointStructDecl(),
 	)
 	if err := Check(f); err != nil {
@@ -1293,7 +1302,7 @@ func TestCheck_UndefinedStructTypeIsAnError(t *testing.T) {
 
 func TestCheck_FieldAccessOnScalarIsAnError(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "x", Type: "Int", Value: &ast.IntLit{Value: 1}},
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.IntLit{Value: 1}},
 		&ast.DiscardExpr{Value: &ast.FieldExpr{Target: &ast.IdentExpr{Name: "x"}, Field: "0"}},
 		&ast.IntLit{Value: 0},
 	)
@@ -1396,7 +1405,7 @@ func TestCheck_NestedTupleElementIsAnError(t *testing.T) {
 func TestCheck_FuncTypedTupleElementIsAnError(t *testing.T) {
 	f := mainFile(
 		&ast.LetExpr{Name: "clos", Value: &ast.ClosureLit{
-			ReturnType: "Int",
+			ReturnType: nt("Int"),
 			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
 		}},
 		&ast.LetExpr{Name: "t", Value: tupleLit(&ast.IdentExpr{Name: "clos"}, &ast.IntLit{Value: 1})},
@@ -1445,7 +1454,7 @@ func TestCheck_ConstStructLitIsValid(t *testing.T) {
 
 func TestCheck_ConstStructLitReferencingNonConstIsAnError(t *testing.T) {
 	f := mainFile(
-		&ast.LetExpr{Name: "n", Type: "Int", Value: &ast.IntLit{Value: 1}},
+		&ast.LetExpr{Name: "n", Type: nt("Int"), Value: &ast.IntLit{Value: 1}},
 		&ast.IntLit{Value: 0},
 	)
 	f.Decls = append(f.Decls, pointStructDecl(), &ast.ConstDecl{
@@ -1460,5 +1469,281 @@ func TestCheck_ConstStructLitReferencingNonConstIsAnError(t *testing.T) {
 	})
 	if err := Check(f); err == nil {
 		t.Fatal("expected an error for a const struct literal referencing a non-const (a `let`)")
+	}
+}
+
+func lt(elem ast.TypeExpr) ast.TypeExpr {
+	return &ast.ListType{Elem: elem}
+}
+
+func at(elem ast.TypeExpr, size uint64) ast.TypeExpr {
+	return &ast.ArrayType{Elem: elem, Size: &ast.IntLit{Value: size}}
+}
+
+func intListLit(vals ...uint64) *ast.ListLit {
+	elems := make([]ast.Expr, len(vals))
+	for i, v := range vals {
+		elems[i] = &ast.IntLit{Value: v}
+	}
+	return &ast.ListLit{Elems: elems}
+}
+
+func TestCheck_ListLitInferredTypeIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_EmptyListLitWithoutAnnotationIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: &ast.ListLit{}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for an empty list literal with no type annotation")
+	}
+}
+
+func TestCheck_EmptyListLitWithAnnotationIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Type: lt(nt("Int")), Value: &ast.ListLit{}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ArrayLitFromListLiteralIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Type: at(nt("Int"), 3), Value: intListLit(1, 2, 3)},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ArrayLitWrongElementCountIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Type: at(nt("Int"), 3), Value: intListLit(1, 2)},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for an array literal with the wrong element count")
+	}
+}
+
+func TestCheck_ArraySizeCanReferenceATopLevelConst(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Type: at(nt("Int"), 0 /* placeholder, overwritten below */), Value: intListLit(1, 2, 3)},
+		&ast.IntLit{Value: 0},
+	)
+	// Swap the placeholder literal size for a reference to a const.
+	f.Decls[0].(*ast.FuncDecl).Body.Exprs[0].(*ast.LetExpr).Type.(*ast.ArrayType).Size = &ast.IdentExpr{Name: "N"}
+	f.Decls = append(f.Decls, &ast.ConstDecl{Name: "N", Value: &ast.IntLit{Value: 3}})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ArraySizeReferencingNonConstIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "n", Type: nt("Int"), Value: &ast.IntLit{Value: 3}},
+		&ast.LetExpr{Name: "xs", Type: at(nt("Int"), 0), Value: intListLit(1, 2, 3)},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls[0].(*ast.FuncDecl).Body.Exprs[1].(*ast.LetExpr).Type.(*ast.ArrayType).Size = &ast.IdentExpr{Name: "n"}
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for an array size referencing a non-const `let`")
+	}
+}
+
+func TestCheck_IndexExprResolvesElementType(t *testing.T) {
+	idx := &ast.IndexExpr{Target: &ast.IdentExpr{Name: "xs"}, Index: &ast.IntLit{Value: 0}}
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		idx,
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if idx.ResolvedType != "Int64" {
+		t.Fatalf("got ResolvedType %q, want Int64", idx.ResolvedType)
+	}
+}
+
+func TestCheck_IndexOnScalarIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.IntLit{Value: 1}},
+		&ast.DiscardExpr{Value: &ast.IndexExpr{Target: &ast.IdentExpr{Name: "x"}, Index: &ast.IntLit{Value: 0}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for indexing into a scalar")
+	}
+}
+
+func TestCheck_IndexAssignExprIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.IndexAssignExpr{Target: &ast.IdentExpr{Name: "xs"}, Index: &ast.IntLit{Value: 0}, Value: &ast.IntLit{Value: 9}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_IndexAssignChainedIndexIsValid(t *testing.T) {
+	// matrix[0][0] = 9, matrix: List[List[Int]].
+	f := mainFile(
+		&ast.LetExpr{Name: "row", Value: intListLit(1, 2)},
+		&ast.LetExpr{Name: "matrix", Value: &ast.ListLit{Elems: []ast.Expr{&ast.IdentExpr{Name: "row"}}}},
+		&ast.IndexAssignExpr{
+			Target: &ast.IndexExpr{Target: &ast.IdentExpr{Name: "matrix"}, Index: &ast.IntLit{Value: 0}},
+			Index:  &ast.IntLit{Value: 0},
+			Value:  &ast.IntLit{Value: 9},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_IndexAssignThroughFieldIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.IndexAssignExpr{
+			Target: &ast.FieldExpr{Target: &ast.IdentExpr{Name: "p"}, Field: "xs"},
+			Index:  &ast.IntLit{Value: 0},
+			Value:  &ast.IntLit{Value: 9},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for an index-assignment target that reaches through a struct field")
+	}
+}
+
+func TestCheck_IndexAssignIntoNonReassignableParamIsValid(t *testing.T) {
+	// Element mutation through a non-reassignable (function parameter)
+	// binding is allowed — it never rebinds the parameter variable itself.
+	f := mainFile(
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "setFirst", Args: []ast.Expr{intListLit(1, 2, 3)}}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name:       "setFirst",
+		Params:     []ast.Param{{Name: "xs", Type: lt(nt("Int"))}},
+		ReturnType: nt("Unit"),
+		Body: &ast.Block{Exprs: []ast.Expr{
+			&ast.IndexAssignExpr{Target: &ast.IdentExpr{Name: "xs"}, Index: &ast.IntLit{Value: 0}, Value: &ast.IntLit{Value: 9}},
+		}},
+	})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_SliceExprAlwaysResolvesToList(t *testing.T) {
+	sl := &ast.SliceExpr{Target: &ast.IdentExpr{Name: "arr"}, From: &ast.IntLit{Value: 0}, To: &ast.IntLit{Value: 2}}
+	f := mainFile(
+		&ast.LetExpr{Name: "arr", Type: at(nt("Int"), 3), Value: intListLit(1, 2, 3)},
+		&ast.DiscardExpr{Value: sl},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if sl.ResolvedType != "List(Int64)" {
+		t.Fatalf("got ResolvedType %q, want List(Int64) even though Target was an Array", sl.ResolvedType)
+	}
+}
+
+func TestCheck_SliceExprOmittedBoundsAreValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.DiscardExpr{Value: &ast.SliceExpr{Target: &ast.IdentExpr{Name: "xs"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ForExprIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.ForExpr{
+			Var:   "x",
+			Items: &ast.IdentExpr{Name: "xs"},
+			Body:  &ast.Block{Exprs: []ast.Expr{&ast.DiscardExpr{Value: &ast.IdentExpr{Name: "x"}}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ForOverScalarIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.IntLit{Value: 1}},
+		&ast.ForExpr{Var: "y", Items: &ast.IdentExpr{Name: "x"}, Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for `for` iterating over a scalar")
+	}
+}
+
+func TestCheck_ForVarIsNotReassignable(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.ForExpr{
+			Var:   "x",
+			Items: &ast.IdentExpr{Name: "xs"},
+			Body:  &ast.Block{Exprs: []ast.Expr{&ast.AssignExpr{Name: "x", Value: &ast.IntLit{Value: 9}}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error assigning to a for-loop variable")
+	}
+}
+
+func TestCheck_ForVarScopedToBody(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.ForExpr{
+			Var:   "x",
+			Items: &ast.IdentExpr{Name: "xs"},
+			Body:  &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		},
+		&ast.DiscardExpr{Value: &ast.IdentExpr{Name: "x"}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error referencing the for-loop variable outside the loop body")
+	}
+}
+
+func TestCheck_NestedListLitTypeInference(t *testing.T) {
+	// [[1,2],[3,4]] with no annotation: List(List(Int64)).
+	outer := &ast.ListLit{Elems: []ast.Expr{intListLit(1, 2), intListLit(3, 4)}}
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Value: outer},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if outer.ResolvedType != "List(List(Int64))" {
+		t.Fatalf("got ResolvedType %q, want List(List(Int64))", outer.ResolvedType)
 	}
 }

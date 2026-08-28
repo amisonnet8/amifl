@@ -273,6 +273,10 @@ func (g *gen) genStmt(e ast.Expr) error {
 		return g.genIfBranch(v)
 	case *ast.WhileExpr:
 		return g.genWhileStmt(v)
+	case *ast.ForExpr:
+		return g.genForStmt(v)
+	case *ast.IndexAssignExpr:
+		return g.genIndexAssignStmt(v)
 	case *ast.BreakExpr:
 		g.b.WriteString("\tBREAK\n")
 		return nil
@@ -287,15 +291,15 @@ func (g *gen) genStmt(e ast.Expr) error {
 		// sema), but a discarded non-Unit expression's tail can — e.g. the
 		// `2` ending the else-branch in the doc comment's example above.
 		return nil
-	case *ast.TupleLit, *ast.StructLit, *ast.FieldExpr:
-		// Unlike the pure-value kinds above, a tuple/struct literal's
-		// elements/fields (or a field-access target) may themselves be an
-		// effectful call — `_ = Point{x: sideEffecting(), y: 2}` must still
-		// run sideEffecting() even though the resulting Point is discarded —
-		// so this constructs the value in full via the normal genValue path
-		// and discards the token it hands back (an unused temp amivm's own
-		// self-healing cleans up, same as every other discard here —
-		// CLAUDE.md's step-2 "確定した設計判断").
+	case *ast.TupleLit, *ast.StructLit, *ast.FieldExpr,
+		*ast.ListLit, *ast.IndexExpr, *ast.SliceExpr:
+		// Unlike the pure-value kinds above, these may themselves contain
+		// an effectful call — `_ = Point{x: sideEffecting(), y: 2}` must
+		// still run sideEffecting() even though the resulting Point is
+		// discarded — so this constructs the value in full via the normal
+		// genValue path and discards the token it hands back (an unused
+		// temp amivm's own self-healing cleans up, same as every other
+		// discard here — CLAUDE.md's step-2 "確定した設計判断").
 		_, err := g.genValue(v)
 		return err
 	default:
@@ -576,6 +580,12 @@ func (g *gen) genValue(e ast.Expr) (string, error) {
 		return g.genStructLitValue(v)
 	case *ast.FieldExpr:
 		return g.genFieldValue(v)
+	case *ast.ListLit:
+		return g.genListLitValue(v)
+	case *ast.IndexExpr:
+		return g.genIndexValue(v)
+	case *ast.SliceExpr:
+		return g.genSliceValue(v)
 	default:
 		return "", fmt.Errorf("codegen: %T is not a value expression (sema should have rejected this)", e)
 	}

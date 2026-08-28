@@ -25,13 +25,18 @@ const (
 	KwCase
 	KwDefault
 	KwStruct
+	KwFor
+	KwIn
 	LParen
 	RParen
 	LBrace
 	RBrace
+	LBracket
+	RBracket
 	Arrow
 	Comma
 	Colon
+	Semicolon
 	Dot
 	Assign
 
@@ -103,6 +108,10 @@ func (k Kind) String() string {
 		return "'default'"
 	case KwStruct:
 		return "'struct'"
+	case KwFor:
+		return "'for'"
+	case KwIn:
+		return "'in'"
 	case LParen:
 		return "'('"
 	case RParen:
@@ -111,12 +120,18 @@ func (k Kind) String() string {
 		return "'{'"
 	case RBrace:
 		return "'}'"
+	case LBracket:
+		return "'['"
+	case RBracket:
+		return "']'"
 	case Arrow:
 		return "'->'"
 	case Comma:
 		return "','"
 	case Colon:
 		return "':'"
+	case Semicolon:
+		return "';'"
 	case Dot:
 		return "'.'"
 	case Assign:
