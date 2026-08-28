@@ -245,9 +245,50 @@ func (p *parser) parseTypeExpr() (ast.TypeExpr, error) {
 		return p.parseListType(nameTok)
 	case "Array":
 		return p.parseArrayType(nameTok)
+	case "Set":
+		return p.parseSetType(nameTok)
+	case "Map":
+		return p.parseMapType(nameTok)
 	default:
 		return &ast.NamedType{Name: nameTok.Value, Line: nameTok.Line}, nil
 	}
+}
+
+// parseSetType parses `Set[Elem]` (amifl-spec.md section 2.2) — step 10.
+func (p *parser) parseSetType(nameTok lexer.Token) (ast.TypeExpr, error) {
+	if _, err := p.expect(lexer.LBracket); err != nil {
+		return nil, err
+	}
+	elem, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RBracket); err != nil {
+		return nil, err
+	}
+	return &ast.SetType{Elem: elem, Line: nameTok.Line}, nil
+}
+
+// parseMapType parses `Map[Key,Value]` (amifl-spec.md section 2.2) — step 10.
+func (p *parser) parseMapType(nameTok lexer.Token) (ast.TypeExpr, error) {
+	if _, err := p.expect(lexer.LBracket); err != nil {
+		return nil, err
+	}
+	key, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.Comma); err != nil {
+		return nil, err
+	}
+	val, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RBracket); err != nil {
+		return nil, err
+	}
+	return &ast.MapType{Key: key, Value: val, Line: nameTok.Line}, nil
 }
 
 func (p *parser) parseListType(nameTok lexer.Token) (ast.TypeExpr, error) {
@@ -901,6 +942,94 @@ func (p *parser) parseListLit() (ast.Expr, error) {
 	return &ast.ListLit{Elems: elems, Line: openTok.Line}, nil
 }
 
+// parseBraceLit parses a bare `{...}` value expression: `{v1, v2, ...}`
+// (Set[T]) or `{k1: v1, k2: v2, ...}` (Map[K,V]) (amifl-spec.md sections
+// 2.2/3.1) — step 10. Unlike a struct literal (`Name{...}`), a bare `{`
+// never needs noCompositeLit's disambiguation: its own matching `}`
+// unambiguously delimits the whole literal wherever it starts (including
+// right at the start of an if/while/for header — noCompositeLit's
+// disambiguation problem is specifically about a shared opening token
+// between "start of a composite literal" and "start of the following
+// block", which a struct literal has via its leading `Ident` and a bare
+// `{` simply doesn't).
+//
+// Set vs Map is told apart with one token of lookahead right after the
+// first entry: a `:` means Map (parse `key: value` pairs from here on),
+// anything else means Set (parse plain value expressions). A bare `{}`
+// can't be told apart at all (ast.SetOrMapLit's doc comment) — Elems and
+// Entries are both left nil for sema's resolveSetOrMapLit to sort out via
+// `expected`.
+func (p *parser) parseBraceLit() (ast.Expr, error) {
+	openTok, err := p.expect(lexer.LBrace)
+	if err != nil {
+		return nil, err
+	}
+	saved := p.noCompositeLit
+	p.noCompositeLit = false
+	defer func() { p.noCompositeLit = saved }()
+
+	if p.cur.Kind == lexer.RBrace {
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		return &ast.SetOrMapLit{Line: openTok.Line}, nil
+	}
+
+	first, err := p.parsePipeExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	if p.cur.Kind == lexer.Colon {
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		firstVal, err := p.parsePipeExpr()
+		if err != nil {
+			return nil, err
+		}
+		entries := []ast.MapLitEntry{{Key: first, Value: firstVal, Line: openTok.Line}}
+		for p.cur.Kind == lexer.Comma {
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			keyTok := p.cur.Line
+			key, err := p.parsePipeExpr()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.Colon); err != nil {
+				return nil, err
+			}
+			val, err := p.parsePipeExpr()
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, ast.MapLitEntry{Key: key, Value: val, Line: keyTok})
+		}
+		if _, err := p.expect(lexer.RBrace); err != nil {
+			return nil, err
+		}
+		return &ast.SetOrMapLit{Entries: entries, Line: openTok.Line}, nil
+	}
+
+	elems := []ast.Expr{first}
+	for p.cur.Kind == lexer.Comma {
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		elem, err := p.parsePipeExpr()
+		if err != nil {
+			return nil, err
+		}
+		elems = append(elems, elem)
+	}
+	if _, err := p.expect(lexer.RBrace); err != nil {
+		return nil, err
+	}
+	return &ast.SetOrMapLit{Elems: elems, Line: openTok.Line}, nil
+}
+
 func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
 	switch p.cur.Kind {
 	case lexer.KwTrue, lexer.KwFalse:
@@ -941,6 +1070,8 @@ func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
 		return p.parseParenOrTupleExpr()
 	case lexer.LBracket:
 		return p.parseListLit()
+	case lexer.LBrace:
+		return p.parseBraceLit()
 	case lexer.KwIf:
 		return p.parseIfExpr()
 	case lexer.KwSwitch:
@@ -1067,15 +1198,21 @@ func (p *parser) parseWhileExpr() (ast.Expr, error) {
 }
 
 // parseForExpr parses `for x in items { ... }` (amifl-spec.md section 7,
-// Unit-typed, side-effect-only) or, once `items` is immediately followed
-// by `yield` instead of `{`, step 9's `for x in items yield expr` form —
-// a single trailing expression (parsePipeExpr, not a `{ }` block: the spec
+// Unit-typed, side-effect-only), step 9's `for x in items yield expr` form
+// (a single trailing expression, parsePipeExpr, not a `{ }` block: the spec
 // gives no block form for `yield`, and every case-body-shaped position in
 // this parser already keeps to a single expression the same way — see
-// e.g. parseBoolSwitchExpr/parseEnumSwitchExpr). Which form this is can't
-// be told apart until `items` has already been fully parsed, so both
-// share this one function rather than being split the way parseSwitchExpr
-// splits on `switch`'s very next token.
+// e.g. parseBoolSwitchExpr/parseEnumSwitchExpr), or step 10's two-variable
+// `for k, v in m { ... }` form (Map[K,V] iteration — ast.ForExpr.Var2's
+// doc comment). Which of the first two forms this is can't be told apart
+// until `items` has already been fully parsed, so both share this one
+// function rather than being split the way parseSwitchExpr splits on
+// `switch`'s very next token; the two-variable form is detected earlier,
+// right after the first loop variable, via a comma one token of lookahead
+// can already resolve. `for k, v in m yield ...` is rejected here as a
+// plain parse error — step 10's deliberate scope cut (Var2's doc comment)
+// — rather than left for sema, since the combination can never mean
+// anything valid regardless of m's type.
 func (p *parser) parseForExpr() (ast.Expr, error) {
 	kwTok, err := p.expect(lexer.KwFor)
 	if err != nil {
@@ -1085,6 +1222,18 @@ func (p *parser) parseForExpr() (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
+	var var2Tok lexer.Token
+	hasVar2 := false
+	if p.cur.Kind == lexer.Comma {
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		var2Tok, err = p.expect(lexer.Ident)
+		if err != nil {
+			return nil, err
+		}
+		hasVar2 = true
+	}
 	if _, err := p.expect(lexer.KwIn); err != nil {
 		return nil, err
 	}
@@ -1093,6 +1242,9 @@ func (p *parser) parseForExpr() (ast.Expr, error) {
 		return nil, err
 	}
 	if p.cur.Kind == lexer.KwYield {
+		if hasVar2 {
+			return nil, p.errorf("`for %s, %s in ... yield ...` isn't supported (Map iteration with `yield` isn't supported yet — use the single-variable form)", varTok.Value, var2Tok.Value)
+		}
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
@@ -1106,7 +1258,11 @@ func (p *parser) parseForExpr() (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.ForExpr{Var: varTok.Value, Items: items, Body: body, Line: kwTok.Line}, nil
+	fe := &ast.ForExpr{Var: varTok.Value, Items: items, Body: body, Line: kwTok.Line}
+	if hasVar2 {
+		fe.Var2 = var2Tok.Value
+	}
+	return fe, nil
 }
 
 // switchCase is one `case <bool-expr>: <value-expr>` or

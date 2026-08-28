@@ -46,6 +46,17 @@ type program struct {
 	listSeq    int
 	arrayTypes map[string]string
 	arraySeq   int
+
+	// setTypes/setSeq and mapTypes/mapSeq back maps.go's setGoTypeName/
+	// mapGoTypeName — step 10's Set[T]/Map[K,V], minted and reused the
+	// same deduplicated-per-shape way List/Array are, each via its own
+	// MPTYPE (Set[T] and a structurally-identical Map[T,Bool] mint two
+	// separate MPTYPE declarations rather than sharing one — see
+	// setGoTypeName's doc comment for why that's fine).
+	setTypes map[string]string
+	setSeq   int
+	mapTypes map[string]string
+	mapSeq   int
 }
 
 // newFuncTypeDecl emits one FNTYPE line for a closure shaped by

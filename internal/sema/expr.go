@@ -68,6 +68,8 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 		return fc.resolveFieldExpr(v)
 	case *ast.ListLit:
 		return fc.resolveListLit(v, expected)
+	case *ast.SetOrMapLit:
+		return fc.resolveSetOrMapLit(v, expected)
 	case *ast.IndexExpr:
 		return fc.resolveIndexExpr(v)
 	case *ast.IndexAssignExpr:
@@ -1131,7 +1133,11 @@ func (fc *funcChecker) resolveListLit(v *ast.ListLit, expected string) (string, 
 // element isn't an untyped literal first" order-independence trick step 3
 // introduced for binary operators (resolveOperandTypes) and step 4
 // generalized to N if/elif/else branches (resolveBranches), applied here
-// to N list elements so `[x, 1]` and `[1, x]` behave symmetrically.
+// to N list elements so `[x, 1]` and `[1, x]` behave symmetrically. Step
+// 10 reuses this verbatim for an un-annotated Set literal's elements and a
+// Map literal's keys/values independently (resolveSetLit/resolveMapLit) —
+// the anchor-selection logic has nothing List-specific about it, it only
+// needs "a slice of same-kind expressions that must share one type".
 func (fc *funcChecker) resolveListElemTypes(elems []ast.Expr) (string, error) {
 	anchor := 0
 	for i, e := range elems {
@@ -1153,6 +1159,112 @@ func (fc *funcChecker) resolveListElemTypes(elems []ast.Expr) (string, error) {
 		}
 	}
 	return target, nil
+}
+
+// resolveSetOrMapLit type-checks `{v1, v2, ...}` (Set[T]) or `{k1: v1, ...}`
+// (Map[K,V]) (amifl-spec.md sections 2.2/3.1) — step 10. Which form this
+// is was already decided by the parser (ast.SetOrMapLit's doc comment):
+// Entries set means Map, Elems set means Set, both nil means a bare `{}`
+// whose kind can't be told from syntax alone — only that last case needs
+// expected at all, mirroring resolveListLit's identical "an empty [] needs
+// a type annotation" fallback.
+func (fc *funcChecker) resolveSetOrMapLit(v *ast.SetOrMapLit, expected string) (string, error) {
+	switch {
+	case v.Entries != nil:
+		return fc.resolveMapLit(v, expected)
+	case v.Elems != nil:
+		return fc.resolveSetLit(v, expected)
+	default:
+		return fc.resolveEmptySetOrMapLit(v, expected)
+	}
+}
+
+func (fc *funcChecker) resolveEmptySetOrMapLit(v *ast.SetOrMapLit, expected string) (string, error) {
+	if isSetType(expected) || isMapType(expected) {
+		v.ResolvedType = expected
+		return expected, nil
+	}
+	return "", fmt.Errorf("line %d: cannot tell whether an empty `{}` is a Set or a Map without a type annotation", v.Line)
+}
+
+// resolveSetLit type-checks the Set form of a SetOrMapLit: every element
+// resolves to one shared comparable type (isComparableKeyType — Set[T]'s
+// own restriction, amifl-spec.md section 2.2), adapting to expected's own
+// element type when given (`let s: Set[Int8] = {1, 2}`) or inferred the
+// same order-independent way an un-annotated List literal's elements are
+// (resolveListElemTypes) otherwise.
+func (fc *funcChecker) resolveSetLit(v *ast.SetOrMapLit, expected string) (string, error) {
+	var elemTyp string
+	if e, ok := setElemType(expected); ok {
+		for _, el := range v.Elems {
+			if _, err := fc.checkExpr(el, e); err != nil {
+				return "", err
+			}
+		}
+		elemTyp = e
+	} else {
+		t, err := fc.resolveListElemTypes(v.Elems)
+		if err != nil {
+			return "", err
+		}
+		elemTyp = t
+	}
+	if !isComparableKeyType(elemTyp) {
+		return "", fmt.Errorf("line %d: Set[T] requires a comparable element type (numeric, String, Bool, or Tuple), got %s", v.Line, elemTyp)
+	}
+	typ := makeSetType(elemTyp)
+	v.ResolvedType = typ
+	return typ, nil
+}
+
+// resolveMapLit type-checks the Map form of a SetOrMapLit: keys and values
+// each independently resolve to one shared type (keys/values may adapt to
+// expected's own Map[K,V] when given, or infer the same order-independent
+// way resolveListElemTypes already does for a plain list, applied here to
+// the keys and the values as two separate same-length slices). The key
+// type is further restricted to isComparableKeyType, exactly like Set —
+// mapKeyValueTypes/makeMapType, unlike Set's simpler single-element
+// encoding, requires depth-aware decoding on the codegen side too (see
+// types.go's own doc comment on why), but that's invisible here.
+func (fc *funcChecker) resolveMapLit(v *ast.SetOrMapLit, expected string) (string, error) {
+	var keyTyp, valTyp string
+	if ek, ev, ok := mapKeyValueTypes(expected); ok {
+		for i := range v.Entries {
+			e := &v.Entries[i]
+			if _, err := fc.checkExpr(e.Key, ek); err != nil {
+				return "", err
+			}
+			if _, err := fc.checkExpr(e.Value, ev); err != nil {
+				return "", err
+			}
+		}
+		keyTyp, valTyp = ek, ev
+	} else {
+		keys := make([]ast.Expr, len(v.Entries))
+		vals := make([]ast.Expr, len(v.Entries))
+		for i, e := range v.Entries {
+			keys[i] = e.Key
+			vals[i] = e.Value
+		}
+		kt, err := fc.resolveListElemTypes(keys)
+		if err != nil {
+			return "", err
+		}
+		vt, err := fc.resolveListElemTypes(vals)
+		if err != nil {
+			return "", err
+		}
+		keyTyp, valTyp = kt, vt
+	}
+	if !isComparableKeyType(keyTyp) {
+		return "", fmt.Errorf("line %d: Map[K,V] requires a comparable key type (numeric, String, Bool, or Tuple), got %s", v.Line, keyTyp)
+	}
+	if valTyp == unitType {
+		return "", fmt.Errorf("line %d: a Map value cannot be Unit-typed", v.Line)
+	}
+	typ := makeMapType(keyTyp, valTyp)
+	v.ResolvedType = typ
+	return typ, nil
 }
 
 // resolveIndexExpr type-checks `target[index]` (amifl-spec.md section
@@ -1249,12 +1361,16 @@ func (fc *funcChecker) resolveSliceExpr(v *ast.SliceExpr) (string, error) {
 }
 
 // resolveForExpr type-checks `for x in items { ... }` (amifl-spec.md
-// section 7, always Unit-typed) or, since step 9, `for x in items yield
+// section 7, always Unit-typed), since step 9, `for x in items yield
 // expr` (ast.ForExpr.Yield set instead of Body — always List(Yield's own
-// type)). Items must be a List or Array (the only iterable collection
-// types that exist yet — step 7 restricts `for` to them, deferring
-// String/Set/Map/Stream iteration to their own later steps); Var is
-// declared as a non-reassignable binding in its own child scope,
+// type)), and, since step 10, the two-variable `for k, v in m { ... }`
+// form (ast.ForExpr.Var2 set — Map[K,V] iteration, Body only; see Var2's
+// doc comment for why Yield is never combined with it — the parser
+// already rejects that combination outright, so it's never seen here).
+// Single-variable Items must be a List, Array, or (step 10) Set
+// (forIterableElemType); two-variable Items must be a Map[K,V]
+// (mapKeyValueTypes) — Var binds the key, Var2 the value. Var/Var2 are
+// declared as non-reassignable bindings in their own child scope,
 // mirroring a function parameter rather than a `let`
 // (ast.ForExpr.VarToken's doc comment).
 //
@@ -1268,19 +1384,44 @@ func (fc *funcChecker) resolveForExpr(v *ast.ForExpr, expected string) (string, 
 	if err != nil {
 		return "", err
 	}
-	elemTyp, ok := elementType(itemsTyp)
-	if !ok {
-		return "", fmt.Errorf("line %d: `for` requires a List or Array, got %s", v.Line, itemsTyp)
-	}
+	v.ItemsType = itemsTyp
 
 	fc.pushScope()
-	token := "%" + fc.freshInternalName(v.Var)
-	if err := fc.declare(v.Var, &binding{typ: elemTyp, token: token}); err != nil {
-		fc.popScope()
-		return "", fmt.Errorf("line %d: %s", v.Line, err)
+
+	if v.Var2 != "" {
+		keyTyp, valTyp, ok := mapKeyValueTypes(itemsTyp)
+		if !ok {
+			fc.popScope()
+			return "", fmt.Errorf("line %d: `for %s, %s in ...` requires a Map[K,V], got %s", v.Line, v.Var, v.Var2, itemsTyp)
+		}
+		token := "%" + fc.freshInternalName(v.Var)
+		if err := fc.declare(v.Var, &binding{typ: keyTyp, token: token}); err != nil {
+			fc.popScope()
+			return "", fmt.Errorf("line %d: %s", v.Line, err)
+		}
+		v.ElemType = keyTyp
+		v.VarToken = token
+		token2 := "%" + fc.freshInternalName(v.Var2)
+		if err := fc.declare(v.Var2, &binding{typ: valTyp, token: token2}); err != nil {
+			fc.popScope()
+			return "", fmt.Errorf("line %d: %s", v.Line, err)
+		}
+		v.Var2Type = valTyp
+		v.Var2Token = token2
+	} else {
+		elemTyp, ok := forIterableElemType(itemsTyp)
+		if !ok {
+			fc.popScope()
+			return "", fmt.Errorf("line %d: `for` requires a List, Array, or Set, got %s", v.Line, itemsTyp)
+		}
+		token := "%" + fc.freshInternalName(v.Var)
+		if err := fc.declare(v.Var, &binding{typ: elemTyp, token: token}); err != nil {
+			fc.popScope()
+			return "", fmt.Errorf("line %d: %s", v.Line, err)
+		}
+		v.ElemType = elemTyp
+		v.VarToken = token
 	}
-	v.ElemType = elemTyp
-	v.VarToken = token
 
 	if v.Yield != nil {
 		// break/continue are legal only in the Body form (amifl-spec.md
@@ -1368,6 +1509,28 @@ func (fc *funcChecker) resolveTypeExpr(te ast.TypeExpr) (string, error) {
 			return "", fmt.Errorf("line %d: array size %s", t.Size.Pos(), err)
 		}
 		return makeArrayType(elem, strconv.FormatUint(n, 10)), nil
+	case *ast.SetType:
+		elem, err := fc.resolveTypeExpr(t.Elem)
+		if err != nil {
+			return "", err
+		}
+		if !isComparableKeyType(elem) {
+			return "", fmt.Errorf("line %d: Set[T] requires a comparable element type (numeric, String, Bool, or Tuple), got %s", t.Line, elem)
+		}
+		return makeSetType(elem), nil
+	case *ast.MapType:
+		key, err := fc.resolveTypeExpr(t.Key)
+		if err != nil {
+			return "", err
+		}
+		if !isComparableKeyType(key) {
+			return "", fmt.Errorf("line %d: Map[K,V] requires a comparable key type (numeric, String, Bool, or Tuple), got %s", t.Line, key)
+		}
+		val, err := fc.resolveTypeExpr(t.Value)
+		if err != nil {
+			return "", err
+		}
+		return makeMapType(key, val), nil
 	default:
 		return "", fmt.Errorf("sema: unsupported type expression %T", te)
 	}

@@ -2100,3 +2100,223 @@ func TestCheck_ForYieldVarNotVisibleOutsideYield(t *testing.T) {
 		t.Fatal("expected an error referencing the for-yield variable outside its own scope")
 	}
 }
+
+// sett/mapt build Set[T]/Map[K,V] type annotations, mirroring lt/at above.
+func sett(elem ast.TypeExpr) ast.TypeExpr {
+	return &ast.SetType{Elem: elem}
+}
+
+func mapt(key, val ast.TypeExpr) ast.TypeExpr {
+	return &ast.MapType{Key: key, Value: val}
+}
+
+func intSetLit(vals ...uint64) *ast.SetOrMapLit {
+	elems := make([]ast.Expr, len(vals))
+	for i, v := range vals {
+		elems[i] = &ast.IntLit{Value: v}
+	}
+	return &ast.SetOrMapLit{Elems: elems}
+}
+
+func TestCheck_SetLitInferredTypeIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: intSetLit(1, 2, 3)},
+		&ast.IntLit{Value: 0},
+	)
+	let := f.Decls[0].(*ast.FuncDecl).Body.Exprs[0].(*ast.LetExpr)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if let.ResolvedType != "Set(Int64)" {
+		t.Fatalf("got ResolvedType %q, want Set(Int64)", let.ResolvedType)
+	}
+}
+
+func TestCheck_SetLitNonComparableElemIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: &ast.SetOrMapLit{Elems: []ast.Expr{
+			&ast.StructLit{TypeName: "Point", Fields: []ast.StructLitField{
+				{Name: "x", Value: &ast.IntLit{Value: 1}},
+				{Name: "y", Value: &ast.IntLit{Value: 2}},
+			}},
+		}}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append([]ast.TopLevelDecl{pointStructDecl()}, f.Decls...)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a Set[Point] (struct isn't a comparable key type)")
+	}
+}
+
+func TestCheck_SetTypeAnnotationRejectsNonComparableElem(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Type: sett(nt("Point")), Value: &ast.SetOrMapLit{}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append([]ast.TopLevelDecl{pointStructDecl()}, f.Decls...)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a Set[Point] type annotation")
+	}
+}
+
+func TestCheck_MapLitInferredTypeIsValid(t *testing.T) {
+	m := &ast.SetOrMapLit{Entries: []ast.MapLitEntry{
+		{Key: &ast.StringLit{Value: "a"}, Value: &ast.IntLit{Value: 1}},
+		{Key: &ast.StringLit{Value: "b"}, Value: &ast.IntLit{Value: 2}},
+	}}
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Value: m},
+		&ast.IntLit{Value: 0},
+	)
+	let := f.Decls[0].(*ast.FuncDecl).Body.Exprs[0].(*ast.LetExpr)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if let.ResolvedType != "Map(String,Int64)" {
+		t.Fatalf("got ResolvedType %q, want Map(String,Int64)", let.ResolvedType)
+	}
+}
+
+func TestCheck_MapLitNonComparableKeyIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Type: mapt(nt("Point"), nt("Int")), Value: &ast.SetOrMapLit{}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append([]ast.TopLevelDecl{pointStructDecl()}, f.Decls...)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a Map[Point,Int] type annotation")
+	}
+}
+
+func TestCheck_MapLitUnitValueIsAnError(t *testing.T) {
+	m := &ast.SetOrMapLit{Entries: []ast.MapLitEntry{
+		{Key: &ast.StringLit{Value: "a"}, Value: printStr("side effect")},
+	}}
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Value: m},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a Map value resolving to Unit")
+	}
+}
+
+func TestCheck_EmptyBraceLitWithoutAnnotationIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Value: &ast.SetOrMapLit{}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for an un-annotated empty {}")
+	}
+}
+
+func TestCheck_EmptyBraceLitAdaptsToSetAnnotation(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Type: sett(nt("Int")), Value: &ast.SetOrMapLit{}},
+		&ast.IntLit{Value: 0},
+	)
+	let := f.Decls[0].(*ast.FuncDecl).Body.Exprs[0].(*ast.LetExpr)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if let.ResolvedType != "Set(Int64)" {
+		t.Fatalf("got ResolvedType %q, want Set(Int64)", let.ResolvedType)
+	}
+}
+
+func TestCheck_EmptyBraceLitAdaptsToMapAnnotation(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Type: mapt(nt("String"), nt("Int")), Value: &ast.SetOrMapLit{}},
+		&ast.IntLit{Value: 0},
+	)
+	let := f.Decls[0].(*ast.FuncDecl).Body.Exprs[0].(*ast.LetExpr)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if let.ResolvedType != "Map(String,Int64)" {
+		t.Fatalf("got ResolvedType %q, want Map(String,Int64)", let.ResolvedType)
+	}
+}
+
+func TestCheck_ForOverSetIsValid(t *testing.T) {
+	forExpr := &ast.ForExpr{
+		Var:   "x",
+		Items: &ast.IdentExpr{Name: "s"},
+		Body:  &ast.Block{Exprs: []ast.Expr{&ast.DiscardExpr{Value: &ast.IdentExpr{Name: "x"}}}},
+	}
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: intSetLit(1, 2, 3)},
+		forExpr,
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if forExpr.ElemType != "Int64" {
+		t.Fatalf("got ElemType %q, want Int64", forExpr.ElemType)
+	}
+}
+
+func TestCheck_ForTwoVarsOverMapIsValid(t *testing.T) {
+	m := &ast.SetOrMapLit{Entries: []ast.MapLitEntry{
+		{Key: &ast.StringLit{Value: "a"}, Value: &ast.IntLit{Value: 1}},
+	}}
+	forExpr := &ast.ForExpr{
+		Var:   "k",
+		Var2:  "v",
+		Items: &ast.IdentExpr{Name: "m"},
+		Body: &ast.Block{Exprs: []ast.Expr{
+			&ast.DiscardExpr{Value: &ast.IdentExpr{Name: "k"}},
+			&ast.DiscardExpr{Value: &ast.IdentExpr{Name: "v"}},
+		}},
+	}
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Value: m},
+		forExpr,
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if forExpr.ElemType != "String" {
+		t.Fatalf("got ElemType (key) %q, want String", forExpr.ElemType)
+	}
+	if forExpr.Var2Type != "Int64" {
+		t.Fatalf("got Var2Type (value) %q, want Int64", forExpr.Var2Type)
+	}
+}
+
+func TestCheck_ForTwoVarsOverNonMapIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
+		&ast.ForExpr{
+			Var:   "k",
+			Var2:  "v",
+			Items: &ast.IdentExpr{Name: "xs"},
+			Body:  &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for `for k, v in xs` where xs is a List, not a Map")
+	}
+}
+
+func TestCheck_ForSingleVarOverMapIsAnError(t *testing.T) {
+	m := &ast.SetOrMapLit{Entries: []ast.MapLitEntry{
+		{Key: &ast.StringLit{Value: "a"}, Value: &ast.IntLit{Value: 1}},
+	}}
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Value: m},
+		&ast.ForExpr{
+			Var:   "k",
+			Items: &ast.IdentExpr{Name: "m"},
+			Body:  &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a single-variable `for` over a Map (needs `for k, v in m`)")
+	}
+}

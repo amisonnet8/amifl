@@ -1276,3 +1276,159 @@ func TestGenerate_ForYieldDiscardedInStatementPositionStillRuns(t *testing.T) {
 		t.Errorf("expected SLMAKE even though the resulting list is discarded; got:\n%s", ir)
 	}
 }
+
+func TestGenerate_SetLitEmitsMptypeMpmakeMset(t *testing.T) {
+	setType := "Set(Int64)"
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Token: "%s_1", ResolvedType: setType, Value: &ast.SetOrMapLit{
+			ResolvedType: setType,
+			Elems:        []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}, &ast.IntLit{Value: 3}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"MPTYPE\t^AmiflSet1\t^int64\t^bool",
+		"VAR\t%amifl_tmp1\t^AmiflSet1",
+		"MPMAKE\t%amifl_tmp1\t^AmiflSet1",
+		"MSET\t%amifl_tmp1\t1\ttrue",
+		"MSET\t%amifl_tmp1\t2\ttrue",
+		"MSET\t%amifl_tmp1\t3\ttrue",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_MapLitEmitsMptypeMpmakeMset(t *testing.T) {
+	mapType := "Map(String,Int64)"
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Token: "%m_1", ResolvedType: mapType, Value: &ast.SetOrMapLit{
+			ResolvedType: mapType,
+			Entries: []ast.MapLitEntry{
+				{Key: &ast.StringLit{Value: "a"}, Value: &ast.IntLit{Value: 1}},
+				{Key: &ast.StringLit{Value: "b"}, Value: &ast.IntLit{Value: 2}},
+			},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"MPTYPE\t^AmiflMap1\t^string\t^int64",
+		"VAR\t%amifl_tmp1\t^AmiflMap1",
+		"MPMAKE\t%amifl_tmp1\t^AmiflMap1",
+		"MSET\t%amifl_tmp1\t\"a\"\t1",
+		"MSET\t%amifl_tmp1\t\"b\"\t2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+// TestGenerate_SetTypeAndMapTypeShareNoMptypeEvenWhenStructurallyIdentical
+// pins down setGoTypeName's documented "keyed under Set[T]'s own canonical
+// string, never Map[T,Bool]'s" choice: a Set[Int] and a Map[Int,Bool] would
+// produce the identical Go type (map[int64]bool), but each still mints its
+// own separate MPTYPE rather than sharing one.
+func TestGenerate_SetTypeAndMapTypeShareNoMptypeEvenWhenStructurallyIdentical(t *testing.T) {
+	setType := "Set(Int64)"
+	mapType := "Map(Int64,Bool)"
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Token: "%s_1", ResolvedType: setType, Value: &ast.SetOrMapLit{ResolvedType: setType, Elems: []ast.Expr{&ast.IntLit{Value: 1}}}},
+		&ast.LetExpr{Name: "m", Token: "%m_2", ResolvedType: mapType, Value: &ast.SetOrMapLit{ResolvedType: mapType, Entries: []ast.MapLitEntry{
+			{Key: &ast.IntLit{Value: 1}, Value: &ast.BoolLit{Value: true}},
+		}}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"MPTYPE\t^AmiflSet1\t^int64\t^bool",
+		"MPTYPE\t^AmiflMap1\t^int64\t^bool",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_ForOverSetUsesMpkeysThenAget(t *testing.T) {
+	setType := "Set(Int64)"
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Token: "%s_1", ResolvedType: setType, Value: &ast.SetOrMapLit{ResolvedType: setType, Elems: []ast.Expr{&ast.IntLit{Value: 1}}}},
+		&ast.ForExpr{
+			Items:     &ast.IdentExpr{Name: "s", ResolvedType: setType, Token: "%s_1"},
+			ItemsType: setType,
+			Body:      &ast.Block{Exprs: []ast.Expr{&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "hi"}}}}},
+			ElemType:  "Int64",
+			VarToken:  "%x_2",
+		},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	// s's own SetOrMapLit consumes amifl_tmp1; the for-loop's own temps
+	// start at amifl_tmp2 (len), amifl_tmp3 (the MPKEYS-collected keys
+	// list — a Set isn't index-addressable, so it's never AGET'd directly).
+	for _, want := range []string{
+		"SLTYPE\t^AmiflList1\t^int64",
+		"VAR\t%amifl_tmp3\t^AmiflList1",
+		"MPKEYS\t%amifl_tmp3\t%s_1",
+		"CALL\t%amifl_tmp2\t:\t?len\t%amifl_tmp3",
+		"SET\t%amifl_tmp4\t-1",
+		"AGET\t%x_2\t%amifl_tmp3\t%amifl_tmp4",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_ForTwoVarsOverMapEmitsMpkeysAgetMget(t *testing.T) {
+	mapType := "Map(String,Int64)"
+	f := mainFile(
+		&ast.LetExpr{Name: "m", Token: "%m_1", ResolvedType: mapType, Value: &ast.SetOrMapLit{ResolvedType: mapType, Entries: []ast.MapLitEntry{
+			{Key: &ast.StringLit{Value: "a"}, Value: &ast.IntLit{Value: 1}},
+		}}},
+		&ast.ForExpr{
+			Var2:      "v",
+			Items:     &ast.IdentExpr{Name: "m", ResolvedType: mapType, Token: "%m_1"},
+			ItemsType: mapType,
+			Body:      &ast.Block{Exprs: []ast.Expr{&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "hi"}}}}},
+			ElemType:  "String",
+			VarToken:  "%k_2",
+			Var2Type:  "Int64",
+			Var2Token: "%v_3",
+		},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"SLTYPE\t^AmiflList1\t^string",
+		"MPKEYS\t%amifl_tmp3\t%m_1",
+		"CALL\t%amifl_tmp2\t:\t?len\t%amifl_tmp3",
+		"VAR\t%k_2\t^string",
+		"AGET\t%k_2\t%amifl_tmp3\t%amifl_tmp4",
+		"VAR\t%v_3\t^int64",
+		"MGET\t%v_3\t%m_1\t%k_2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}

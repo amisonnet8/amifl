@@ -160,7 +160,7 @@ Seed/Cascadeが通っていない領域、あるいはAmiFL固有の設計判断
 2. ✅ **`Array[T;N]`の実行時表現**：Step 7で確定。下記「確定した設計判断」参照（Goのネイティブ固定長配列型、AMIVM本体へ`ARTYPE`命令を新規要求）
 3. ✅ **`Tuple2〜8`の実行時表現**：Step 6で確定。下記「確定した設計判断」参照（型ごとに発行する名前付き`STTYPE`、フィールド名`F0`〜、等値比較は許可）
 4. ✅ **`enum`（タグ付きバリアント）の実行時表現**：`switch`でのバリアント判定・フィールド取り出し専用（2.2節）、値生成は`型名.バリアント名(...)`という通常の式。Goには直接対応するネイティブ機構が無く、タグ（int）+バリアントごとに異なるフィールド集合、という表現が必要——Cascadeの`error`型実装（コンパイラが自動登録する`STTYPE`）や、複数バリアントを1つの`STTYPE`に全フィールドを`Union`的に持たせる案（Goの構造体は値型なので単純にフィールドを足せる）、複数の`STTYPE`+タグによる判別のどちらが良いか検討する。`switch`のバリアント網羅性検査（コンパイル時にバリアント集合が閉じている）はsemaが担う
-5. **`Set[T]`の実行時表現**：Cascadeの実績（`MPTYPE ^T ^bool`または`^struct{}`相当）をそのまま踏襲できる見込み。要素順序は不定と明記済み（16.2節で解決済みの検討事項）なので、Goのmapイテレーション順序をそのまま使ってよい（Weaveのようにソートで決定的にする必要はない——`toList(_) |> sort`という運用に統一する方針が既に確定している）
+5. ✅ **`Set[T]`の実行時表現**：Step 10で確定。下記「確定した設計判断」参照（`MPTYPE ^T ^bool`、Cascadeの実績どおり）。要素順序は不定と明記済み（16.2節で解決済みの検討事項）なので、Goのmapイテレーション順序をそのまま使ってよい（Weaveのようにソートで決定的にする必要はない——`toList(_) |> sort`という運用に統一する方針が既に確定している）
 6. **`capability`（組み込み多相）の実装方式**：ユーザーには一切公開されない、コンパイラ内部限定の多相。各呼び出し箇所で引数の静的型からどの実装（`len`ならString/List/Array/Map/Set/Bytes/Chanのどれか）を使うか**コンパイル時に一意に確定**させ、その型専用のコード（ネイティブ命令 or `amiflrt`関数）を直接生成する——ジェネリクスも動的ディスパッチも不要な、最も単純な「多相」（各呼び出しが実質的にモノモーフィックにコンパイルされる）という理解でよいか、実装時に確認する
 7. ✅ **パイプ演算子`|>`のコード生成**：糖衣構文（9節）であり新しいAMIVM命令は不要——`a |> f`は単なる`f(a)`、`a |> f(_, b)`は`f(a, b)`への変換で完結する見込み。`for x in items yield expr`が`items |> map(x => expr)`の糖衣という規定（7節）が指す「`x => expr`」の構文自体が仕様の他箇所に明記が無い点は要確認（無名関数`fn(x) -> R {...}`と同じものと推測されるが、仕様側の確認が先）
 8. **`?`演算子とパイプラインDX機能（tap/peek・ステージ番号付きエラー表示）**：`?`自体はCascadeの後置`?`実装（8.6節「エラー処理」）がほぼそのまま参考になる。`tap`/`peek`（13.8節）・パイプラインの型不整合をステージ番号付きで示すコンパイルエラー表示（9.1節）はAmiFL独自のDX機能で先行実装が無く、sema側で新規に設計する必要がある
@@ -202,7 +202,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 7 ✅ | `Array[T;N]`・`List[T]`・`for` | 固定長配列（多次元糖衣込み）、可変長リスト、`x[i]`/`x[i]=v`/`x[a:b]`糖衣。**Step 4から延期した`for x in items { ... }`（`Unit`版のみ、`yield`はStep 9）もここで実装**——`items`に相当する型がこの時点で初めて存在するため | `SLTYPE` `SLMAKE` `SLICE` `ASET` `AGET` `ARTYPE`（AmiFLの機能要求によりamivm本体へ新規追加） | 設計課題2（Array表現、下記「確定した設計判断」参照） |
 | 8 ✅ | `enum`・`switch`拡張 | バリアント定義・値生成、`switch`での判定/フィールド取り出し、バリアント網羅性検査 | `STTYPE` `FIELD` `ENDSTTYPE` `FSET` `FGET` `IF` `ELSE` `ENDIF` `EQ`（新規命令ゼロ、Step 6/4の既存命令のみで実現） | 設計課題4（enum表現、下記「確定した設計判断」参照） |
 | 9 ✅ | パイプ演算子`|>` | `_`プレースホルダー、`for...yield`糖衣、`|>`の優先順位（最低） | （新規命令無し。糖衣構文） | 設計課題7（下記「確定した設計判断」参照） |
-| 10 | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5 |
+| 10 ✅ | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5（下記「確定した設計判断」参照） |
 | 11 | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開 | （`amiflrt`+ネイティブ命令の混在） | **設計課題6（capability多相の実装方式）** |
 | 12 | ファイルI/O・`Stream[T]`・並列処理 | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣、`spawn`/`send`/`recv`/`parallel` | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` `SPAWN` `SEL` `CASESEND` `CASERECV` `DEFAULT` `ENDSEL` `DEFER` | — |
 | 13 | `extern`機構 | Go資産バインド（15.1〜15.4節）、`Any`型境界の実装方式確定 | `ASSERT`（要否は設計課題1による） | **設計課題1（先例無し・最大の山場の1つ）** |
@@ -498,6 +498,42 @@ Step 4の時点で「サブジェクト無しのBool専用switchは`IfExpr`へ�
 ### 実地検証（`amivm`→`go build`→実行）で確認した項目（Step 9）
 
 `examples/pipe.aml`で以下を確認済み：`_`省略時の第1引数注入（`5 |> double`）、`_`を明示した位置への注入（`5 |> addN(_, 3)`・`5 |> addN(3, _)`）、`for x in nums yield x |> double`（パイプとyieldの組み合わせ）と`for x in nums yield addN(x, 10)`（通常の関数呼び出しのyield）。生成されたIRを目視確認し、`for...yield`が`?len`→`SLMAKE`（実行時に決まる長さを渡す、リテラルの`[1,2,3]`のような固定長ではない点がStep 7の`genListLitValue`との違い）→インクリメント優先の`LOOP`→`AGET`+`ASET`という単一ループへ下がっていること、パイプ式が単なる`CALL`列（`CALL !double 5`等）へ何の追加命令も無く展開されていることを確認。実行結果は終了コード96（`a+b+c+s1+s2 = 10+8+8+20+50 = 96`という手計算と一致）を確認。加えて、`_`の2回使用（構文エラー）・`yield`式内での`break`（単体・外側`while`ネスト時の両方でエラー）・`yield`式のUnit型拒否、をそれぞれ手動でCLIから確認し、いずれも期待どおりコンパイルエラーになることを確認した。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。
+
+### `Set[T]`は`Map[T,Bool]`と同じ`MPTYPE`（Go `map[T]bool`）で表現する——ただし正規型文字列・Go型宣言はMapとは別に発行する（Step 10で確定・設計課題5の解決）
+
+CLAUDE.mdが事前に予想していた「`MPTYPE ^T ^bool`または`^struct{}`相当」のうち、`^bool`版をそのまま採用した——Set構築（`{1,2,3}`）が`MSET`の繰り返しになる時点で、要素の重複排除はGoのmap代入セマンティクスがすでに無償で提供してくれる（同じキーへの2回目の`MSET`は単に上書きになるだけ）。`^struct{}`版と比べて実装上の複雑さの差がほぼ無い一方、`^bool`の方がAMIVM側の型オペランドとして素直（`^struct{}`という無名型トークンをAMIVM-IRでどう書くか確認する手間が要らない）だったため、これを選んだ。
+
+**重要な設計判断**：`Set[Int]`と`Map[Int,Bool]`はGoの実行時表現としては構造的に同一（`map[int64]bool`）になるが、**AmiFLの型としては最後まで別物**として扱う——`makeSetType`/`makeMapType`（`internal/sema/types.go`）はそれぞれ独立した正規化文字列（`"Set(T)"` / `"Map(K,V)"`）を発行し、`resolveSetOrMapLit`はリテラルの構文形（`Elems`か`Entries`か、パーサーが構文だけで決定済み）と`expected`の食い違いを既存の`checkExpr`の型不一致検査へそのまま委ねる（`{1,2,3}`をMap注釈の変数へ束縛しようとすると「`expected Map(...), got Set(...)`」という型エラーになる——実地確認済み）。codegen側も`setGoTypeName`/`mapGoTypeName`（`internal/codegen/maps.go`）をそれぞれ独立した`program.setTypes`/`program.mapTypes`キャッシュで管理し、**構造的に同じGo型になるとわかっていてもMPTYPE宣言を共有しない**——Tuple/List/Arrayが確立した「1つのAmiFL正規型文字列につき1つのGo型を発行する」という契約（`resolveGoType`の一貫した挙動）をここでも崩さないための選択で、代償は「`Set[Int]`と`Map[Int,Bool]`が両方登場するプログラムでは構造的に同一のMPTYPE行が2つ出力される」という無害な冗長性のみ（実地確認済み：`TestGenerate_SetTypeAndMapTypeShareNoMptypeEvenWhenStructurallyIdentical`）。
+
+### Set[T]の要素・Map[K,_]のキーは「数値・文字列・真偽値・タプル」に限定し、structは対象外とした（Step 10で確定・仕様の文言をそのまま採用）
+
+`amifl-spec.md` 2.2節はSet[T]について「`T`は比較可能な型（数値・文字列・真偽値・タプル）のみ」と明記しており、structへの言及が無い——Step 6でstructの`==`比較自体は許可しているため、Goの実装上はstructもmapキーとして使える（全フィールドが比較可能な限り）が、**仕様の文言をそのまま採用し、struct鍵は対象外**にした（`internal/sema/types.go`の`isComparableKeyType`）。Map[K,V]のK側にも同じ制限を適用した——仕様はMapのキー制限を明記していないが、Set[T]と同じくGoのネイティブmapへコンパイルする以上（下記参照）Goの「map key must be comparable」制約をそのまま引き継ぐ必要があり、Set/Mapで同じ判定関数を共有する方が一貫性がある。将来struct鍵への具体的な需要が出た場合はこの1関数を拡張するだけで済む、意図的なスコープ限定（Step 6のネストしたTupleカット等と同種の判断）。
+
+### `Map[K,V]`の正規化文字列は、カンマの深さを追跡して分割する——Tuple/List/Array/Set/Mapが入れ子になりうるため、単純な最初/最後のカンマ分割では壊れる（Step 10で確定・新しい罠）
+
+Tuple（`"Tuple(T1,T2,...)"`、ネスト禁止のため要素にカンマが無い）・Array（`"Array(elem;size)"`、最後の`;`で分割すれば十分——CLAUDE.mdの既存の教訓）とは異なり、Map[K,V]は**Vが任意のコレクション型（List/Array/Set/Map自身を含む）になれる**（仕様がこれを禁止する理由が無く、Goの map value型に比較可能性の制約も無いため）。加えてK自身もTupleになりうる（上記の許可された4種の1つ）。結果として`"Map(K,V)"`という正規化文字列のK・V部分がそれぞれ内部に`(` `)` `,` `;`を含みうる——`"Map(Tuple(Int64,String),List(Int64))"`のような文字列を、素朴な`strings.Index(",")`（最初のカンマ）や`strings.LastIndex(";")`（Arrayが使う手法）で分割しようとすると、K内部の入れ子カンマで誤った位置に切れてしまう。
+
+**対策**：`mapKeyValueTypes`（`internal/sema/types.go`、`internal/codegen/maps.go`にも独立したコピー）が、文字列を1文字ずつ走査しながら`(`で深さ+1・`)`で深さ-1を数え、**深さ0のカンマに最初に出会った位置**で分割する。`makeMapType`が常にK・Vそれぞれの正規化文字列（すでに構築済みで括弧の対応が取れている）をそのまま連結するだけなので、「深さ0の最初のカンマ」は必ずmakeMapType自身が挿入した区切りカンマと一致する——ネストの深さに関わらず安全に分割できる。この手法自体はTuple/Array登場時には不要だった（両者ともネストする内部要素がカンマ/セミコロンを持たない設計だったため）が、Mapで初めて「入れ子になった型を正規化文字列の内部に埋め込む」場面が生じ、汎用的な深さ追跡パーサーが必要になった。
+
+### `for x in items`は`List`/`Array`/`Set`の単一変数形、`for k, v in m`は`Map[K,V]`専用の2変数形——両者は構文レベルで明確に分離した（Step 10で確定）
+
+`amifl-spec.md`は`for x in items { ... }`のみを規定しており、Map反復の構文はCLAUDE.mdの実装ステップ計画表（「`for k, v in m`」）だけが示す実装対象だった。Mapの1エントリは「キーと値の組」という本質的に2値の情報のため、既存の1変数`for`をそのまま使うと（例えば「キーだけを返す」「エントリのタプルを1つ返す」等）暗黙の選択を強いられる——ここは仕様の沈黙を「2変数専用構文」という明示的な形で解決した（原則7「明示性 > 簡潔さ」に沿う判断）。パーサー（`parseForExpr`）は最初の変数名の直後に`,`があるかどうかで1変数形・2変数形を判定し、`ast.ForExpr.Var2`（空文字列なら1変数形）へ記録する。
+
+**2変数形はMap専用、1変数形はList/Array/Set（Setが今回追加）専用**——`resolveForExpr`（`internal/sema/expr.go`）はVar2の有無で完全に別の型解決パスに分岐し、Var2ありなら`mapKeyValueTypes`、Var2無しなら`forIterableElemType`（List/Array/Set、既存の`elementType`にSetを追加した専用ヘルパー——`x[i]`等の添字アクセスが使う`elementType`自体は変更していない、13.4節がSetの添字アクセスを規定していないため）を使う。**Mapを1変数形で反復しようとする・List/Array/Setを2変数形で反復しようとするのは、いずれも型エラーとして拒否される**（実地確認済み：`TestCheck_ForSingleVarOverMapIsAnError`・`TestCheck_ForTwoVarsOverNonMapIsAnError`）。
+
+**`for k, v in m yield ...`（2変数+yield）はパーサーレベルで拒否した**——Var2とYieldの組み合わせは意味を持たせるとすれば「キーと値からどう1つの値を作るか」という新しい設計判断が要る上、具体的な需要が無い。Step 5のClosureLit位置制限・Step 9のインラインクロージャーPipe RHS等と同じ「先送り可能なものは先送りする」判断で、Body形（2変数）とYield形（1変数のみ）を最初から別の文法として扱うことにした——ASTレベルでも「Var2とYieldが両方立つ状態」はパーサーが構造的に一度も生成しない（semaが後から弾く二重チェックは書いていない、Step 9の「BodyとYieldは排他」という既存の信頼パターンをそのまま踏襲）。
+
+### `Set`/`Map`の`for`反復は「MPKEYSでキー一覧をListへ集めてから、既存のList反復ループへ合流させる」という設計にした——添字アクセス不可能なコレクションを、既存の添字ベースループへ後付けで対応させる汎用パターン（Step 10で確定）
+
+Step 7で確立した`for`の下げ方（`?len`→インクリメント優先`LOOP`→`AGET`）はList/Arrayの「添字で直接読める」という性質に依存しており、Set/Mapにはそのまま使えない（`AGET`はGoのスライス/配列添字にしか対応しない）。既存のループ骨格を作り直す代わりに、**MPKEYSで一旦Set/Mapのキーを`List[K]`へ集約し、その後は既存のList反復ロジックをそのまま流用する**という設計にした（`internal/codegen/collections.go`の`prepareForIteration`）——Set反復ではキー自体が求める要素そのもの、Map（2変数形）反復ではキーをAGETした直後にもう1回`MGET`で対応する値を引く（`genForMapStmt`）。
+
+**この設計の副産物**：Step 7で確立した「LOOP本体の先頭で添字をインクリメントしてから使う」（CLAUDE.md「過去に踏まれた地雷」#3の対策）というループ骨格を、`emitIndexLoopHeader`という1つの関数へ切り出した（既存の`genForStmt`・`genForYieldValue`の重複コードを、これで初めて3箇所目の呼び出し元＝Set/Map対応が生まれたタイミングでリファクタリングした——「2箇所の重複は許容し、3箇所目で共通化を検討する」という一般的なリファクタリングの目安がそのまま当てはまった）。リファクタリング後もList/Arrayの既存コード生成結果は1バイトも変わらないことを既存のcodegenテスト全件green（無修正）で確認済み——構造を変えても出力が変わらない、という最も安全なリファクタリングの形になった。
+
+**MGETは`ok`を受け取らない単一結果形を使った**——Map（2変数形）の反復では、キーが`MPKEYS`自身から得られたものである以上、そのキーで`MGET`すれば必ず値が存在する（Mapが反復中に書き換えられる、というような並行性の懸念はAmiFL言語仕様の範囲外）。`multi1 <<multi2>> single1 value1`という`MGET`の`ok`受け取り形（13.6節の`get(m,k,default)`的な、キーが存在しない場合のフォールバック）はStep 11の組み込み関数実装まで出番が無い。
+
+### 実地検証（`amivm`→`go build`→実行）で確認した項目（Step 10）
+
+`examples/sets_maps.aml`で以下を確認済み：`Set[Int]`型注釈付きリテラル（重複要素の脱重複を含む）とその`for x in s`反復、型注釈無しの`Set`リテラル推論（`{10,20,30}`）、`Map[String,Int]`型注釈付きリテラルとその`for k, v in m`反復、`Map[String,List[Int]]`（値がコレクション型のMap）とそのネストした反復（`for k, xs in m { for x in xs { ... } }`）、型注釈無しの`Set[Tuple2[Int,Int]]`相当（タプル要素のSet、`Tuple2[...]`型注釈構文自体は書けないため`let`の値から推論させ、関数化せず`main`内にインライン化——Step 6の「タプル型注釈構文は実装していない」というスコープ制限がここで初めて実地で影響した）、注釈付き空`{}`（`Set[Int]`・`Map[String,Int]`の両方）。生成されたIRを目視確認し、`Set`/`Map`リテラルがMPMAKE+MSETの繰り返しへ、`for`反復がMPKEYS+既存Listループへ正しく下がっていることを確認。実行結果は終了コード82（`sTotal+emptySetTotal+mTotal+emptyMapTotal+inferredTotal+tsTotal+mmTotal = 6+0+6+0+60+4+6 = 82`という手計算と一致）を確認。加えて、注釈無し空`{}`（型推論不能エラー）・struct要素のSet（比較可能型エラー）・`for k,v in m yield ...`（パースエラー）・Set形リテラルをMap注釈へ束縛（型不一致エラー）の4パターンを手動でCLIから確認し、いずれも期待どおりコンパイルエラーになることを確認した。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。
 
 ## 開発の進め方
 

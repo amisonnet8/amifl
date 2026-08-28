@@ -1,0 +1,58 @@
+fn sumSet(s: Set[Int]) -> Int {
+    let total = 0
+    for x in s {
+        total = total + x
+    }
+    total
+}
+
+fn sumMapValues(m: Map[String, Int]) -> Int {
+    let total = 0
+    for k, v in m {
+        total = total + v
+    }
+    total
+}
+
+fn sumNestedMapValues(m: Map[String, List[Int]]) -> Int {
+    let total = 0
+    for k, xs in m {
+        for x in xs {
+            total = total + x
+        }
+    }
+    total
+}
+
+fn main() -> Int {
+    let s: Set[Int] = {1, 2, 3, 2, 1}
+    let sTotal = sumSet(s)
+
+    let emptySet: Set[Int] = {}
+    let emptySetTotal = sumSet(emptySet)
+
+    let m: Map[String, Int] = {"a": 1, "b": 2, "c": 3}
+    let mTotal = sumMapValues(m)
+
+    let emptyMap: Map[String, Int] = {}
+    let emptyMapTotal = sumMapValues(emptyMap)
+
+    let inferredSet = {10, 20, 30}
+    let inferredTotal = sumSet(inferredSet)
+
+    // Set[Tuple2[Int,Int]] can't be spelled as a type annotation (step 6's
+    // deliberate scope cut — no Tuple annotation syntax exists), so this
+    // stays inline rather than going through a helper function like the
+    // sums above; the element type is inferred purely from the literal.
+    let ts = {(1, 2), (3, 4), (1, 2)}
+    let tsTotal = 0
+    for t in ts {
+        tsTotal = tsTotal + t.0
+    }
+
+    let mm: Map[String, List[Int]] = {"x": [1, 2, 3]}
+    let mmTotal = sumNestedMapValues(mm)
+
+    print("sets and maps ok")
+    sTotal + emptySetTotal + mTotal + emptyMapTotal + inferredTotal + tsTotal + mmTotal
+}

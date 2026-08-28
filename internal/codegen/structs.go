@@ -31,9 +31,10 @@ func tupleTypeParts(t string) []string {
 }
 
 // resolveGoType returns the Go/AMIVM type name amifl type t compiles to: a
-// scalar's fixed name (goTypeNames), a tuple/list/array's deduplicated
-// synthesized type name (tupleGoTypeName/listGoTypeName/arrayGoTypeName,
-// each minted on first use across the whole program — unlike a closure's
+// scalar's fixed name (goTypeNames), a tuple/list/array/set/map's
+// deduplicated synthesized type name (tupleGoTypeName/listGoTypeName/
+// arrayGoTypeName/setGoTypeName/mapGoTypeName (maps.go, step 10), each
+// minted on first use across the whole program — unlike a closure's
 // FNTYPE, which mints fresh every time, these benefit from sharing one Go
 // type per shape so a type can flow through a function signature, a
 // struct field, or another collection's own element type meaningfully),
@@ -50,6 +51,12 @@ func (p *program) resolveGoType(t string) string {
 	}
 	if isArrayType(t) {
 		return p.arrayGoTypeName(t)
+	}
+	if isSetType(t) {
+		return p.setGoTypeName(t)
+	}
+	if isMapType(t) {
+		return p.mapGoTypeName(t)
 	}
 	if goType, ok := goTypeNames[t]; ok {
 		return goType

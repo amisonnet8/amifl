@@ -210,7 +210,11 @@ func arrayParts(t string) (elem string, size uint64, ok bool) {
 // elementType returns t's element type if t is a List or an Array —
 // shared by every consumer that only cares "does this hold a T, and what
 // T" regardless of which of the two container kinds it is (indexing,
-// `for`, slicing).
+// `for`, slicing). Deliberately excludes Set (step 10) — `x[i]`/`x[a:b]`
+// are List/Array only (amifl-spec.md section 13.4's at/setAt/slice row),
+// while `for` iteration also accepts Set — see forIterableElemType below,
+// which is why that's a separate function rather than an extra case added
+// here.
 func elementType(t string) (string, bool) {
 	if e, ok := listElemType(t); ok {
 		return e, true
@@ -219,6 +223,99 @@ func elementType(t string) (string, bool) {
 		return e, true
 	}
 	return "", false
+}
+
+// makeSetType/isSetType/setElemType encode Set[T] (amifl-spec.md sections
+// 2.2/13.5) as "Set(T)" — T already-canonical, mirroring List's identical
+// encoding convention (makeListType).
+func makeSetType(elem string) string {
+	return "Set(" + elem + ")"
+}
+
+func isSetType(t string) bool {
+	return strings.HasPrefix(t, "Set(") && strings.HasSuffix(t, ")")
+}
+
+func setElemType(t string) (string, bool) {
+	if !isSetType(t) {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(t, "Set("), ")"), true
+}
+
+// makeMapType/isMapType/mapKeyValueTypes encode Map[K,V] (amifl-spec.md
+// section 2.2) as "Map(K,V)" — K/V already-canonical. Unlike every other
+// type-encoding here (Tuple/Func/List/Array), V is *not* restricted to a
+// flat, comma-free shape: a Map's value may itself be another List/Array/
+// Set/Map/Tuple (there is no reason to forbid `Map[String, List[Int]]`
+// the way step 6 forbids a nested Tuple), and even K may be a Tuple (one
+// of the four comparable kinds Set/Map keys allow — isComparableKeyType).
+// Either can therefore itself contain "(" ")" "," or ";" internally, so a
+// naive first/last-comma split (the trick makeArrayType's arrayParts uses,
+// relying on ";" never appearing in a nested element) doesn't work here —
+// mapKeyValueTypes instead walks the string tracking paren depth and
+// splits at the first depth-0 comma, which is always exactly the one
+// makeMapType itself inserted between K and V (every canonical type
+// string has balanced parens by construction).
+func makeMapType(key, val string) string {
+	return "Map(" + key + "," + val + ")"
+}
+
+func isMapType(t string) bool {
+	return strings.HasPrefix(t, "Map(") && strings.HasSuffix(t, ")")
+}
+
+func mapKeyValueTypes(t string) (key, val string, ok bool) {
+	if !isMapType(t) {
+		return "", "", false
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(t, "Map("), ")")
+	depth := 0
+	for i, r := range inner {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				return inner[:i], inner[i+1:], true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// forIterableElemType is elementType (List/Array) plus Set (step 10) —
+// `for x in items { ... }`'s single-variable form accepts all three
+// (amifl-spec.md section 7 doesn't restrict `for` to List/Array once a
+// Set exists to iterate; Map instead needs the two-variable `for k, v in
+// m` form — resolveForExpr handles that separately via mapKeyValueTypes,
+// never through this function). Kept apart from elementType itself since
+// that one backs indexing/slicing too, which Set never supports (see
+// elementType's own doc comment).
+func forIterableElemType(t string) (string, bool) {
+	if e, ok := elementType(t); ok {
+		return e, true
+	}
+	if e, ok := setElemType(t); ok {
+		return e, true
+	}
+	return "", false
+}
+
+// isComparableKeyType reports whether t may be used as a Set[T] element or
+// a Map[K,_] key (amifl-spec.md section 2.2, "Tは比較可能な型（数値・文字列・
+// 真偽値・タプル）のみ" — stated for Set but applied here to Map's key too,
+// since both ultimately compile to a Go map (CLAUDE.md's "確定した設計判断"
+// for step 10) whose key type Go itself requires to be comparable). A
+// struct type is deliberately excluded even though step 6 made structs
+// Go-comparable too (its own `==` is allowed) — amifl-spec.md's own wording
+// enumerates exactly four kinds and doesn't mention struct; a documented,
+// conservative reading rather than an oversight, revisit if a concrete need
+// for struct-keyed Set/Map appears.
+func isComparableKeyType(t string) bool {
+	return isIntType(t) || isFloatType(t) || t == "Bool" || t == "String" || isTupleType(t)
 }
 
 func isIntType(name string) bool {

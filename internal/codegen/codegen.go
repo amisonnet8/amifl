@@ -297,7 +297,7 @@ func (g *gen) genStmt(e ast.Expr) error {
 		// `2` ending the else-branch in the doc comment's example above.
 		return nil
 	case *ast.TupleLit, *ast.StructLit, *ast.FieldExpr,
-		*ast.ListLit, *ast.IndexExpr, *ast.SliceExpr:
+		*ast.ListLit, *ast.SetOrMapLit, *ast.IndexExpr, *ast.SliceExpr:
 		// Unlike the pure-value kinds above, these may themselves contain
 		// an effectful call — `_ = Point{x: sideEffecting(), y: 2}` must
 		// still run sideEffecting() even though the resulting Point is
@@ -587,6 +587,8 @@ func (g *gen) genValue(e ast.Expr) (string, error) {
 		return g.genFieldValue(v)
 	case *ast.ListLit:
 		return g.genListLitValue(v)
+	case *ast.SetOrMapLit:
+		return g.genSetOrMapLitValue(v)
 	case *ast.IndexExpr:
 		return g.genIndexValue(v)
 	case *ast.SliceExpr:

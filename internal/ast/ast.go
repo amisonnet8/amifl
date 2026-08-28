@@ -58,13 +58,39 @@ type ArrayType struct {
 	Line int
 }
 
+// SetType is `Set[Elem]` (amifl-spec.md sections 2.2/13.5) — step 10.
+// Elem is restricted to a comparable type (sema's isComparableKeyType:
+// numeric, String, Bool, or Tuple — amifl-spec.md section 2.2's own
+// wording, "Tは比較可能な型（数値・文字列・真偽値・タプル）のみ") since
+// Set[T] compiles to a Go map[T]bool (CLAUDE.md's "確定した設計判断" for
+// step 10), and Go itself would reject a non-comparable map key type.
+type SetType struct {
+	Elem TypeExpr
+	Line int
+}
+
+// MapType is `Map[Key,Value]` (amifl-spec.md section 2.2) — step 10. Key
+// carries the identical comparability restriction SetType.Elem does (the
+// same Go map-key requirement); Value has none (amifl-spec.md never
+// restricts it, and Go's own map imposes no comparability requirement on
+// a map's value type).
+type MapType struct {
+	Key   TypeExpr
+	Value TypeExpr
+	Line  int
+}
+
 func (*NamedType) typeExprNode() {}
 func (*ListType) typeExprNode()  {}
 func (*ArrayType) typeExprNode() {}
+func (*SetType) typeExprNode()   {}
+func (*MapType) typeExprNode()   {}
 
 func (n *NamedType) Pos() int { return n.Line }
 func (n *ListType) Pos() int  { return n.Line }
 func (n *ArrayType) Pos() int { return n.Line }
+func (n *SetType) Pos() int   { return n.Line }
+func (n *MapType) Pos() int   { return n.Line }
 
 // TopLevelDecl is a top-level declaration: *FuncDecl or *ConstDecl.
 // AmiFL forbids top-level `let` (amifl-spec.md section 4, principle 5) —
@@ -430,6 +456,32 @@ type ListLit struct {
 	ResolvedType string // filled by sema: makeListType(elem) or makeArrayType(elem, n)
 }
 
+// SetOrMapLit is `{v1, v2, ...}` (Set[T]) or `{k1: v1, k2: v2, ...}`
+// (Map[K,V]) (amifl-spec.md sections 2.2/3.1) — step 10. Both forms share
+// one bare-brace literal syntax; which one a non-empty literal is gets
+// decided by the parser with one token of lookahead right after its first
+// entry (a `:` immediately after it means Map, anything else means Set —
+// parser's parseBraceLit), so Elems (Set form) and Entries (Map form) are
+// mutually exclusive and each non-nil slice always has at least one
+// element. A bare `{}` sets neither (both nil) — exactly like an empty
+// `[]` (ast.ListLit's doc comment), its actual kind can't be told apart
+// from syntax alone, so sema's resolveSetOrMapLit falls back to `expected`
+// to decide, erroring if there's no type annotation to consult either.
+type SetOrMapLit struct {
+	Elems   []Expr        // Set form; nil for the Map form or an empty `{}`
+	Entries []MapLitEntry // Map form; nil for the Set form or an empty `{}`
+	Line    int
+
+	ResolvedType string // filled by sema: makeSetType(elem) or makeMapType(key,val)
+}
+
+// MapLitEntry is one `key: value` entry inside a SetOrMapLit's Map form.
+type MapLitEntry struct {
+	Key   Expr
+	Value Expr
+	Line  int
+}
+
 // IndexExpr is `target[index]` (amifl-spec.md section 3.2, "x[i]" — the
 // spec describes this as sugar for a builtin `at(x,i)` call, but step 7
 // compiles it directly to AGET rather than routing through a named
@@ -490,8 +542,12 @@ type SliceExpr struct {
 // mirroring step 7's identical reasoning for why `x[i]` compiles directly
 // to AGET instead of routing through a named `at` function. Body and
 // Yield are mutually exclusive; exactly one is always set. Items must be
-// a List[T] or Array[T;N] (the only iterable collection types that exist
-// yet).
+// a List[T], Array[T;N], or (step 10) Set[T] — Var2 empty — or a Map[K,V]
+// with Var2 set (see Var2's own doc comment); a bare `{}` (Set/Map's own
+// ambiguous empty form) can never actually appear as Items in a way that
+// resolves either, since a for-loop's Items has no `expected` type of its
+// own for sema to disambiguate it with (amifl-spec.md never restricts
+// this — it just falls out of resolveForExpr calling checkExpr(Items, "")).
 //
 // break/continue inside Body act on this loop exactly like WhileExpr's
 // (same loopDepth bookkeeping, never crossing a closure boundary) — but
@@ -510,8 +566,31 @@ type ForExpr struct {
 	Yield Expr   // set iff Body == nil (step 9)
 	Line  int
 
+	// Var2 is step 10's `for k, v in m { ... }` second loop variable — set
+	// (non-empty) only for Map[K,V] iteration, which is the only iterable
+	// collection type step 10 adds that can't be walked with a single
+	// per-element value (a Map entry is inherently a key *and* a value).
+	// The parser rejects Var2 combined with Yield outright (`for k, v in m
+	// yield ...` never parses) rather than letting sema reject it — step
+	// 10's deliberate scope cut, mirroring how the parser (not sema)
+	// already keeps Body and Yield themselves mutually exclusive by
+	// construction; a two-variable Map yield form is a plausible future
+	// generalization, revisit once an actual need appears.
+	Var2 string
+
 	// filled by sema:
-	ElemType string // Items' element type — also Var's own type
+	// ItemsType is Items' own resolved canonical type (List/Array/Set/Map)
+	// — codegen needs this (unlike step 7/9, which never had to tell
+	// collection *kinds* apart at this point) to choose how to lower the
+	// loop: List/Array are already index-addressable and iterate directly;
+	// Set/Map are not, so codegen first collects their keys into a plain
+	// List via MPKEYS and iterates that instead (collections.go's
+	// prepareForIteration).
+	ItemsType string
+	// ElemType is Var's own type: the single-variable form's element type
+	// (List/Array/Set), or the two-variable form's *key* type (Var2Type
+	// holds the value type in that case).
+	ElemType string
 	// VarToken is Var's AMIVM value token (e.g. "%x_7"), minted once via
 	// freshInternalName exactly like LetExpr.Token — Var is a non-
 	// reassignable binding (binding.reassignable stays false), mirroring
@@ -520,6 +599,10 @@ type ForExpr struct {
 	// same silence about parameters was resolved the same conservative
 	// way, for the same "明示性 > 簡潔さ" reasoning).
 	VarToken string
+	// Var2Type/Var2Token mirror ElemType/VarToken for Var2 (the Map value
+	// type) — unused unless Var2 != "".
+	Var2Type  string
+	Var2Token string
 	// ResolvedType is set only for the Yield form: always
 	// makeListType(Yield's own resolved type) — unused (implicitly Unit)
 	// for the Body form, exactly like WhileExpr never bothers storing its
@@ -701,6 +784,7 @@ func (*TupleLit) exprNode()        {}
 func (*StructLit) exprNode()       {}
 func (*FieldExpr) exprNode()       {}
 func (*ListLit) exprNode()         {}
+func (*SetOrMapLit) exprNode()     {}
 func (*IndexExpr) exprNode()       {}
 func (*IndexAssignExpr) exprNode() {}
 func (*SliceExpr) exprNode()       {}
@@ -728,6 +812,7 @@ func (n *TupleLit) Pos() int        { return n.Line }
 func (n *StructLit) Pos() int       { return n.Line }
 func (n *FieldExpr) Pos() int       { return n.Line }
 func (n *ListLit) Pos() int         { return n.Line }
+func (n *SetOrMapLit) Pos() int     { return n.Line }
 func (n *IndexExpr) Pos() int       { return n.Line }
 func (n *IndexAssignExpr) Pos() int { return n.Line }
 func (n *SliceExpr) Pos() int       { return n.Line }

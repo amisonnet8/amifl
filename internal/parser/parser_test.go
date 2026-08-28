@@ -1202,6 +1202,129 @@ func TestParse_ForWithoutYieldStillHasBodyNotYield(t *testing.T) {
 	}
 }
 
+func TestParse_SetLitParsesAsElems(t *testing.T) {
+	src := "fn main() -> Int {\n    let s = {1, 2, 3}\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	lit, ok := let.Value.(*ast.SetOrMapLit)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.SetOrMapLit", let.Value)
+	}
+	if lit.Entries != nil {
+		t.Fatalf("got non-nil Entries %#v, want nil for the Set form", lit.Entries)
+	}
+	if len(lit.Elems) != 3 {
+		t.Fatalf("got %d elems, want 3", len(lit.Elems))
+	}
+}
+
+func TestParse_MapLitParsesAsEntries(t *testing.T) {
+	src := "fn main() -> Int {\n    let m = {\"a\": 1, \"b\": 2}\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	lit, ok := let.Value.(*ast.SetOrMapLit)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.SetOrMapLit", let.Value)
+	}
+	if lit.Elems != nil {
+		t.Fatalf("got non-nil Elems %#v, want nil for the Map form", lit.Elems)
+	}
+	if len(lit.Entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(lit.Entries))
+	}
+	if key, ok := lit.Entries[0].Key.(*ast.StringLit); !ok || key.Value != "a" {
+		t.Fatalf("got first entry key %#v, want StringLit{Value: \"a\"}", lit.Entries[0].Key)
+	}
+}
+
+func TestParse_EmptyBraceLitHasNilElemsAndEntries(t *testing.T) {
+	src := "fn main() -> Int {\n    let s: Set[Int] = {}\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	lit, ok := let.Value.(*ast.SetOrMapLit)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.SetOrMapLit", let.Value)
+	}
+	if lit.Elems != nil || lit.Entries != nil {
+		t.Fatalf("got Elems=%#v Entries=%#v, want both nil for a bare {}", lit.Elems, lit.Entries)
+	}
+}
+
+func TestParse_SetTypeAnnotation(t *testing.T) {
+	src := "fn main() -> Int {\n    let s: Set[Int] = {1}\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	st, ok := let.Type.(*ast.SetType)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.SetType", let.Type)
+	}
+	if named, ok := st.Elem.(*ast.NamedType); !ok || named.Name != "Int" {
+		t.Fatalf("got Elem %#v, want NamedType{Name: \"Int\"}", st.Elem)
+	}
+}
+
+func TestParse_MapTypeAnnotation(t *testing.T) {
+	src := "fn main() -> Int {\n    let m: Map[String, Int] = {\"a\": 1}\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	mt, ok := let.Type.(*ast.MapType)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.MapType", let.Type)
+	}
+	if named, ok := mt.Key.(*ast.NamedType); !ok || named.Name != "String" {
+		t.Fatalf("got Key %#v, want NamedType{Name: \"String\"}", mt.Key)
+	}
+	if named, ok := mt.Value.(*ast.NamedType); !ok || named.Name != "Int" {
+		t.Fatalf("got Value %#v, want NamedType{Name: \"Int\"}", mt.Value)
+	}
+}
+
+func TestParse_ForTwoVarsParsesVar2(t *testing.T) {
+	src := "fn main() -> Int {\n    for k, v in m {\n        print(\"hi\")\n    }\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	forExpr := parseFuncMain(t, f).Body.Exprs[0].(*ast.ForExpr)
+	if forExpr.Var != "k" || forExpr.Var2 != "v" {
+		t.Fatalf("got Var=%q Var2=%q, want Var=\"k\" Var2=\"v\"", forExpr.Var, forExpr.Var2)
+	}
+}
+
+func TestParse_ForSingleVarLeavesVar2Empty(t *testing.T) {
+	src := "fn main() -> Int {\n    for x in xs {\n        print(\"hi\")\n    }\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	forExpr := parseFuncMain(t, f).Body.Exprs[0].(*ast.ForExpr)
+	if forExpr.Var2 != "" {
+		t.Fatalf("got Var2 %q, want empty for the single-variable form", forExpr.Var2)
+	}
+}
+
+func TestParse_ForTwoVarsWithYieldIsAnError(t *testing.T) {
+	src := "fn main() -> Int {\n    let ys = for k, v in m yield k\n    0\n}\n"
+	if _, err := Parse(src); err == nil {
+		t.Fatal("expected an error for `for k, v in m yield ...`")
+	}
+}
+
 func TestParse_SwitchWithoutSubjectStillDesugarsToIfExpr(t *testing.T) {
 	// The subject-less Bool-only form (step 4) must keep desugaring into
 	// an IfExpr, unaffected by step 8's new subject-carrying form.
