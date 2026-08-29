@@ -446,6 +446,34 @@ type LetExpr struct {
 	Token string
 }
 
+// LetTupleExpr destructures a Tuple2..Tuple8 value into several new
+// bindings in one statement (`let (a, b) = pair`, amifl-spec.md section 4,
+// ex13) — sugar for writing one `let` per position, each reading the
+// corresponding `.0`/`.1`/... field by hand, but declared and evaluated in
+// a single statement instead. Like LetExpr, only usable inside a Block —
+// there is no top-level counterpart (see LetExpr's doc comment for why
+// that ban is structural rather than a sema check).
+//
+// No per-name type annotation exists (unlike LetExpr's optional `: Type`):
+// each position's type is always fully determined by Value's own resolved
+// tuple type, exactly the reasoning that already lets a ClosureLit value
+// skip one (resolveLetExpr's doc comment) — an annotation here would only
+// ever duplicate information the tuple type already carries.
+//
+// "_" in Names discards that position: no binding is declared for it and
+// codegen skips emitting anything for it, reusing the existing `_ = expr`
+// discard convention's meaning (DiscardExpr) rather than inventing a
+// second "skip this" spelling.
+type LetTupleExpr struct {
+	Names []string
+	Value Expr
+	Line  int
+
+	ResolvedType string   // Value's own resolved type, e.g. "Tuple(Int64,Error)"
+	ElemTypes    []string // filled in by sema, parallel to Names
+	Tokens       []string // filled in by sema, parallel to Names; "" for a "_" position
+}
+
 // AssignExpr reassigns an existing `let`-bound local (amifl-spec.md
 // section 4, "再代入可"). Whether Name actually names a reassignable
 // `let` (as opposed to a `const` or an undeclared identifier) can only be
@@ -1239,6 +1267,7 @@ func (*ImportDecl) topLevelDeclNode() {}
 
 func (*ConstDecl) exprNode()       {}
 func (*LetExpr) exprNode()         {}
+func (*LetTupleExpr) exprNode()    {}
 func (*AssignExpr) exprNode()      {}
 func (*DiscardExpr) exprNode()     {}
 func (*IdentExpr) exprNode()       {}
@@ -1271,6 +1300,7 @@ func (*TryExpr) exprNode()         {}
 
 func (n *ConstDecl) Pos() int       { return n.Line }
 func (n *LetExpr) Pos() int         { return n.Line }
+func (n *LetTupleExpr) Pos() int    { return n.Line }
 func (n *AssignExpr) Pos() int      { return n.Line }
 func (n *DiscardExpr) Pos() int     { return n.Line }
 func (n *IdentExpr) Pos() int       { return n.Line }

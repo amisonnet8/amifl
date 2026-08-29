@@ -2108,6 +2108,9 @@ func (p *parser) parseLetExpr() (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
+	if p.cur.Kind == lexer.LParen {
+		return p.parseLetTupleExpr(kwTok)
+	}
 	nameTok, err := p.expect(lexer.Ident)
 	if err != nil {
 		return nil, err
@@ -2124,6 +2127,37 @@ func (p *parser) parseLetExpr() (ast.Expr, error) {
 		return nil, err
 	}
 	return &ast.LetExpr{Name: nameTok.Value, Type: typeName, Value: value, Line: kwTok.Line}, nil
+}
+
+// parseLetTupleExpr parses `let (a, b, ...) = value` (amifl-spec.md
+// section 4, ex13), destructuring a Tuple2..Tuple8 value into several
+// bindings at once. The `let` keyword is already consumed by the caller
+// (kwTok is passed through only for its Line); reaching here at all
+// depends on the `(` lookahead in parseLetExpr, since a plain `let name`
+// never starts with `(`. No per-name type annotation is accepted — see
+// ast.LetTupleExpr's doc comment for why one would be redundant here.
+func (p *parser) parseLetTupleExpr(kwTok lexer.Token) (ast.Expr, error) {
+	if err := p.advance(); err != nil { // consume '('
+		return nil, err
+	}
+	names, err := parseCommaList(p, lexer.RParen, func() (string, error) {
+		tok, err := p.expect(lexer.Ident)
+		return tok.Value, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RParen); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.Assign); err != nil {
+		return nil, err
+	}
+	value, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.LetTupleExpr{Names: names, Value: value, Line: kwTok.Line}, nil
 }
 
 // parseDiscardExpr parses `_ = expr` (amifl-spec.md section 5). The `_`

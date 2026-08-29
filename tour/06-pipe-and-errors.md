@@ -68,9 +68,7 @@ AmiFLの関数は常に単一の値しか返せません(原則6)。「値、ま
 
 ```amifl
 fn main() -> Int {
-    let result = parse[Int]("42")   // Tuple2[Int, Error]
-    let value = result.0
-    let err = result.1
+    let (value, err) = parse[Int]("42")   // Tuple2[Int, Error]を1文で分解する(5章、ex13)
 
     if isError(err) {
         print("parse failed")
@@ -81,7 +79,7 @@ fn main() -> Int {
 }
 ```
 
-`parse[T](s: String) -> Tuple2[T, Error]`は文字列を数値へ変換する組み込み関数です。`isError(v: Error) -> Bool`はエラーが実際に発生したかどうかを判定します。
+`parse[T](s: String) -> Tuple2[T, Error]`は文字列を数値へ変換する組み込み関数です。`isError(v: Error) -> Bool`はエラーが実際に発生したかどうかを判定します。`let (value, err) = ...`の代わりに、5章で見た`.0`/`.1`を個別に書くこともできます——どちらも同じ結果になります。
 
 ## `?`演算子——エラーの短絡(§3.3)
 

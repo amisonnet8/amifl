@@ -1425,6 +1425,56 @@ func TestGenerate_TupleFieldAccessEmitsFgetWithSynthesizedFieldName(t *testing.T
 	}
 }
 
+func TestGenerate_LetTupleExprEvaluatesValueOnceAndSkipsUnderscorePositions(t *testing.T) {
+	tupType := "Tuple(Int64,String,Bool)"
+	f := mainFile(
+		&ast.LetTupleExpr{
+			Names:        []string{"a", "_", "c"},
+			Value:        &ast.IdentExpr{Name: "src", ResolvedType: tupType, Token: "%src_1"},
+			ResolvedType: tupType,
+			ElemTypes:    []string{"Int64", "String", "Bool"},
+			Tokens:       []string{"%a_2", "", "%c_3"},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	// Give %src_1 a declaration so the generated function is otherwise
+	// unremarkable — only the destructuring statement itself is under test.
+	f.Decls[0].(*ast.FuncDecl).Body.Exprs = append(
+		[]ast.Expr{&ast.LetExpr{Name: "src", Token: "%src_1", ResolvedType: tupType, Value: &ast.TupleLit{
+			ResolvedType: tupType,
+			Elems:        []ast.Expr{&ast.IntLit{Value: 1}, &ast.StringLit{Value: "x"}, &ast.BoolLit{Value: true}},
+		}}},
+		f.Decls[0].(*ast.FuncDecl).Body.Exprs...,
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if strings.Count(ir, "%src_1") < 2 {
+		// One CALL/FSET-site use to build it, plus at least the two FGETs
+		// below reading off it — never re-derived per destructured name.
+		t.Errorf("expected %%src_1 to be read directly (evaluated once), got:\n%s", ir)
+	}
+	for _, want := range []string{
+		"VAR\t%a_2\t^int64",
+		"FGET\t%a_2\t%src_1\t>F0",
+		"VAR\t%c_3\t^bool",
+		"FGET\t%c_3\t%src_1\t>F2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+	// The "_" position at index 1 is never read back out — no FGET targets
+	// F1, even though F1 legitimately appears elsewhere (the STTYPE's own
+	// FIELD declaration, and the FSET that built %src_1's tuple value).
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "FGET") && strings.Contains(line, ">F1") {
+			t.Errorf("expected no FGET for the \"_\"-discarded position (F1), found line %q in:\n%s", line, ir)
+		}
+	}
+}
+
 func TestGenerate_ListLitEmitsSltypeSlmakeAset(t *testing.T) {
 	listType := "List(Int64)"
 	f := mainFile(

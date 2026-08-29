@@ -51,6 +51,12 @@ fn main() -> Int {
     let tup2 = (100, "info")
     print(tup2.1)
 
+    // ex13: `let (a, b) = ...` destructures a Tuple2..Tuple8 value into
+    // several bindings at once instead of writing `.0`/`.1`/... by hand.
+    // "_" discards a position (amifl-spec.md section 4).
+    let (px, py) = (7, 8)
+    let (_, keep) = (0, 99)
+
     // ex10: `p.field = v` mutates the field in place (amifl-spec.md
     // section 3.2). Nested chains work the same way: `line.to.x = 50`
     // reaches through the intermediate `to` field.
@@ -63,5 +69,5 @@ fn main() -> Int {
     p1.x = 999
     let stillOriginal = line.from.x
 
-    xs + tx + ty + tz + a + b + afterMutation + stillOriginal
+    xs + tx + ty + tz + a + b + afterMutation + stillOriginal + px + py + keep
 }

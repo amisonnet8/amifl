@@ -140,6 +140,49 @@ func TestParse_LetExprWithoutTypeAnnotation(t *testing.T) {
 	}
 }
 
+func TestParse_LetTupleExpr(t *testing.T) {
+	src := "fn main() -> Int {\n    let (a, b, c) = t\n    a\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	lt, ok := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetTupleExpr)
+	if !ok {
+		t.Fatalf("body[0]: got %T, want *ast.LetTupleExpr", parseFuncMain(t, f).Body.Exprs[0])
+	}
+	if got := lt.Names; len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
+		t.Fatalf("got Names %v, want [a b c]", got)
+	}
+	ident, ok := lt.Value.(*ast.IdentExpr)
+	if !ok || ident.Name != "t" {
+		t.Fatalf("got let-tuple value %#v, want IdentExpr{Name: \"t\"}", lt.Value)
+	}
+}
+
+func TestParse_LetTupleExprWithUnderscoreDiscardsAPosition(t *testing.T) {
+	src := "fn main() -> Int {\n    let (a, _) = t\n    a\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	lt := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetTupleExpr)
+	if got := lt.Names; len(got) != 2 || got[0] != "a" || got[1] != "_" {
+		t.Fatalf("got Names %v, want [a _]", got)
+	}
+}
+
+func TestParse_LetTupleExprAllowsTrailingCommaAndMultipleLines(t *testing.T) {
+	src := "fn main() -> Int {\n    let (\n        a,\n        b,\n    ) = t\n    a\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	lt := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetTupleExpr)
+	if got := lt.Names; len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("got Names %v, want [a b]", got)
+	}
+}
+
 func TestParse_ConstDeclAtTopLevel(t *testing.T) {
 	src := "const Pi: Float = 3.14\n\nfn main() -> Int {\n    0\n}\n"
 	f, err := Parse(src)

@@ -450,6 +450,8 @@ func (g *gen) genStmt(e ast.Expr) error {
 		return g.genCallStmt(v)
 	case *ast.LetExpr:
 		return g.genLetStmt(v)
+	case *ast.LetTupleExpr:
+		return g.genLetTupleStmt(v)
 	case *ast.ConstDecl:
 		// Consts have no runtime representation — every reference to one
 		// was already inlined by sema (ast.IdentExpr.ConstValue).
@@ -719,6 +721,31 @@ func (g *gen) genLetStmt(v *ast.LetExpr) error {
 	}
 	fmt.Fprintf(g.b, "\tVAR\t%s\t^%s\n", v.Token, goType)
 	fmt.Fprintf(g.b, "\tSET\t%s\t%s\n", v.Token, val)
+	return nil
+}
+
+// genLetTupleStmt emits `let (a, b, ...) = value` (amifl-spec.md section 4,
+// ex13): value is evaluated exactly once (never re-evaluated per position —
+// re-running an effectful expression like a `parse[T](...)` call once per
+// destructured name would be wrong), then each non-"_" position gets its
+// own VAR under its Token followed by an FGET off the shared tuple value,
+// reading field "F<i>" — the same F0/F1/... naming tuples already use for
+// `.0`/`.1`/... access (structs.go's genFieldValue). "_" positions are
+// skipped outright (sema leaves Tokens[i] == "" for them): there's no
+// binding to declare and nothing else ever references that position.
+func (g *gen) genLetTupleStmt(v *ast.LetTupleExpr) error {
+	val, err := g.genValue(v.Value)
+	if err != nil {
+		return err
+	}
+	for i, token := range v.Tokens {
+		if token == "" {
+			continue
+		}
+		goType := g.prog.resolveGoType(v.ElemTypes[i])
+		fmt.Fprintf(g.b, "\tVAR\t%s\t^%s\n", token, goType)
+		fmt.Fprintf(g.b, "\tFGET\t%s\t%s\t>F%d\n", token, val, i)
+	}
 	return nil
 }
 

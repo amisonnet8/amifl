@@ -1930,6 +1930,71 @@ func TestCheck_TupleFieldAccessResolvesElementTypeAndSynthesizesFieldName(t *tes
 	}
 }
 
+func TestCheck_LetTupleExprDestructuresIntoIndependentBindings(t *testing.T) {
+	lt := &ast.LetTupleExpr{Names: []string{"a", "b"}, Value: tupleLit(&ast.IntLit{Value: 1}, &ast.StringLit{Value: "x"})}
+	f := mainFile(
+		lt,
+		&ast.DiscardExpr{Value: &ast.IdentExpr{Name: "b"}},
+		&ast.IdentExpr{Name: "a"},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if lt.ResolvedType != "Tuple(Int64,String)" {
+		t.Fatalf("got ResolvedType %q, want Tuple(Int64,String)", lt.ResolvedType)
+	}
+	if got := lt.ElemTypes; len(got) != 2 || got[0] != "Int64" || got[1] != "String" {
+		t.Fatalf("got ElemTypes %v, want [Int64 String]", got)
+	}
+	if got := lt.Tokens; len(got) != 2 || got[0] == "" || got[1] == "" {
+		t.Fatalf("got Tokens %v, want two non-empty tokens", got)
+	}
+}
+
+func TestCheck_LetTupleExprUnderscoreDiscardsAPositionWithoutDeclaringIt(t *testing.T) {
+	lt := &ast.LetTupleExpr{Names: []string{"a", "_"}, Value: tupleLit(&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2})}
+	f := mainFile(
+		lt,
+		&ast.IdentExpr{Name: "a"},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if got := lt.Tokens; len(got) != 2 || got[0] == "" || got[1] != "" {
+		t.Fatalf("got Tokens %v, want [non-empty, \"\"]", got)
+	}
+}
+
+func TestCheck_LetTupleExprArityMismatchIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetTupleExpr{Names: []string{"a", "b", "c"}, Value: tupleLit(&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2})},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error when the name count doesn't match the tuple's arity")
+	}
+}
+
+func TestCheck_LetTupleExprOnNonTupleValueIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetTupleExpr{Names: []string{"a", "b"}, Value: &ast.IntLit{Value: 5}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error when destructuring a non-tuple value")
+	}
+}
+
+func TestCheck_LetTupleExprDuplicateNameIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetTupleExpr{Names: []string{"a", "a"}, Value: tupleLit(&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2})},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a repeated non-\"_\" name")
+	}
+}
+
 func TestCheck_TupleWithOneElementIsAnError(t *testing.T) {
 	// The parser produces a 1-element TupleLit for `(x,)` (its own doc
 	// comment) — sema is where Tuple2~Tuple8's actual range is enforced.

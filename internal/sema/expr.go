@@ -126,6 +126,8 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 		return fc.resolveCallExpr(v)
 	case *ast.LetExpr:
 		return fc.resolveLetExpr(v)
+	case *ast.LetTupleExpr:
+		return fc.resolveLetTupleExpr(v)
 	case *ast.ConstDecl:
 		return fc.resolveLocalConstDecl(v)
 	case *ast.AssignExpr:
@@ -477,6 +479,42 @@ func (fc *funcChecker) declareLet(v *ast.LetExpr, typ string) (string, error) {
 	}
 	v.ResolvedType = typ
 	v.Token = token
+	return unitType, nil
+}
+
+// resolveLetTupleExpr type-checks `let (a, b, ...) = value` (amifl-spec.md
+// section 4, ex13). Value is checked exactly once, with no expected type
+// (there's nothing to adapt it to — a tuple's shape is always fully
+// self-determined, same reasoning as a ClosureLit's), then its resolved
+// type must itself be a Tuple2..Tuple8 whose arity matches len(v.Names)
+// exactly; both failures (not a tuple at all, or a tuple of the wrong
+// arity) share one message since either way "Names don't line up with
+// Value" is the whole story. Each non-"_" name is declared exactly like a
+// single-name `let` (declareLet's own duplicate-name/shadowing handling is
+// reused via fc.declare, not reimplemented) — "_" positions are skipped
+// entirely, leaving Tokens[i] empty for codegen to recognize and omit.
+func (fc *funcChecker) resolveLetTupleExpr(v *ast.LetTupleExpr) (string, error) {
+	typ, err := fc.checkExpr(v.Value, "")
+	if err != nil {
+		return "", err
+	}
+	elems, ok := tupleTypeParts(typ)
+	if !ok || len(elems) != len(v.Names) {
+		return "", fmt.Errorf("line %d: let (%s) needs a tuple value with exactly %d elements, got %s", v.Line, strings.Join(v.Names, ", "), len(v.Names), typ)
+	}
+	v.ResolvedType = typ
+	v.ElemTypes = elems
+	v.Tokens = make([]string, len(v.Names))
+	for i, name := range v.Names {
+		if name == "_" {
+			continue
+		}
+		token := "%" + fc.freshInternalName(name)
+		if err := fc.declare(name, &binding{typ: elems[i], token: token, reassignable: true}); err != nil {
+			return "", fmt.Errorf("line %d: %s", v.Line, err)
+		}
+		v.Tokens[i] = token
+	}
 	return unitType, nil
 }
 
