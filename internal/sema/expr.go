@@ -245,8 +245,11 @@ func (fc *funcChecker) resolveIdentExpr(v *ast.IdentExpr) (string, error) {
 }
 
 // resolveCallExpr type-checks `callee(args...)` (amifl-spec.md section 8).
-// `print` is still its own hardcoded special case, unchanged since step 1
-// (the general built-in function library arrives in step 11). Otherwise
+// `print` is still its own hardcoded special case, unchanged in *shape*
+// since step 1 even though ex6 (amifl-spec.md section 13.1) finally
+// generalized its argument from String to Any — see the "print" branch
+// below for why moving it into builtinFuncs alongside eprint/format/
+// formatWith/exit wasn't worth the churn. Otherwise
 // Callee is resolved in the same shadowing order as any other name: the
 // current scope chain first (a local closure-valued variable — step 5's
 // "ローカルクロージャー"), then top-level `fn`s (step 5's "トップレベル
@@ -280,8 +283,22 @@ func (fc *funcChecker) resolveCallExpr(v *ast.CallExpr) (string, error) {
 		if len(v.Args) != 1 {
 			return "", fmt.Errorf("line %d: print expects exactly 1 argument, got %d", v.Line, len(v.Args))
 		}
-		if _, err := fc.checkExprPipeAware(v, 0, v.Args[0], "String"); err != nil {
+		// ex6: print(v: Any) -> Unit (amifl-spec.md section 13.1) — the
+		// String-only restriction from step 1 is lifted, matching the
+		// spec's original intent (13.1/13.2's "無制約な多相引数,
+		// モノモーフィックに解決される" Any, same category as typeName's
+		// own argument — CLAUDE.md's step-1 design note on the two senses
+		// of "Any"). checkExprPipeAware's "Any" bypass (expr.go) means
+		// this can never actually fail on a type mismatch — any concrete
+		// type is accepted — so the pipe-stage diagnostic never fires for
+		// print anymore either, matching typeName's own established
+		// behavior (it never used checkExprPipeAware to begin with).
+		argTyp, err := fc.checkExprPipeAware(v, 0, v.Args[0], "Any")
+		if err != nil {
 			return "", err
+		}
+		if argTyp == unitType {
+			return "", fmt.Errorf("line %d: print: v must not be Unit-typed (nothing to print)", v.Line)
 		}
 		v.ResolvedType = unitType
 		return unitType, nil

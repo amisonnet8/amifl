@@ -98,17 +98,29 @@ func TestCheck_LastExprMustMatchReturnType(t *testing.T) {
 	}
 }
 
-func TestCheck_NonPrintCallIsAnError(t *testing.T) {
-	f := mainFile(&ast.CallExpr{Callee: "eprint", Args: []ast.Expr{&ast.StringLit{Value: "x"}}}, &ast.IntLit{Value: 0})
+func TestCheck_UndefinedCallIsAnError(t *testing.T) {
+	f := mainFile(&ast.CallExpr{Callee: "someUndefinedFunction", Args: []ast.Expr{&ast.StringLit{Value: "x"}}}, &ast.IntLit{Value: 0})
 	if err := Check(f); err == nil {
-		t.Fatal("expected an error for a non-print call (step 2 limitation)")
+		t.Fatal("expected an error for a call to an undefined name")
 	}
 }
 
-func TestCheck_PrintWithNonStringArgIsAnError(t *testing.T) {
+// TestCheck_PrintWithNonStringArgIsFine documents ex6's generalization of
+// print's argument from String to Any (amifl-spec.md section 13.1) — a
+// call this same test used to reject before ex6.
+func TestCheck_PrintWithNonStringArgIsFine(t *testing.T) {
 	f := mainFile(&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.IntLit{Value: 1}}}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("print(1) should type-check after ex6's Any generalization: %v", err)
+	}
+}
+
+func TestCheck_PrintWithUnitArgIsAnError(t *testing.T) {
+	f := mainFile(&ast.CallExpr{Callee: "print", Args: []ast.Expr{
+		&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "x"}}},
+	}}, &ast.IntLit{Value: 0})
 	if err := Check(f); err == nil {
-		t.Fatal("expected an error for print(non-string)")
+		t.Fatal("expected an error for print(Unit-typed value)")
 	}
 }
 
@@ -4430,5 +4442,108 @@ func TestCheck_ReduceAcceptsTupleTypedAccumulator(t *testing.T) {
 	}
 	if call.ResolvedType != "Tuple(Int64,Int64)" {
 		t.Fatalf("got ResolvedType %q, want Tuple(Int64,Int64)", call.ResolvedType)
+	}
+}
+
+// --- ex6: print/eprint/format/formatWith/exit (amifl-spec.md section
+// 13.1) ---
+
+func TestCheck_EprintAcceptsAnyConcreteValue(t *testing.T) {
+	call := &ast.CallExpr{Callee: "eprint", Args: []ast.Expr{&ast.IntLit{Value: 5}}}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != unitType {
+		t.Fatalf("got ResolvedType %q, want %q", call.ResolvedType, unitType)
+	}
+}
+
+func TestCheck_EprintRejectsUnitTypedValue(t *testing.T) {
+	call := &ast.CallExpr{Callee: "eprint", Args: []ast.Expr{printStr("x")}}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: eprint's v must not be Unit-typed")
+	}
+}
+
+func TestCheck_FormatReturnsString(t *testing.T) {
+	call := &ast.CallExpr{Callee: "format", Args: []ast.Expr{&ast.BoolLit{Value: true}}}
+	f := mainFile(&ast.LetExpr{Name: "s", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "String" {
+		t.Fatalf("got ResolvedType %q, want String", call.ResolvedType)
+	}
+}
+
+func TestCheck_FormatRejectsUnitTypedValue(t *testing.T) {
+	call := &ast.CallExpr{Callee: "format", Args: []ast.Expr{printStr("x")}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: format's v must not be Unit-typed")
+	}
+}
+
+func TestCheck_FormatWithReturnsStringAndRequiresStringTemplate(t *testing.T) {
+	call := &ast.CallExpr{Callee: "formatWith", Args: []ast.Expr{&ast.StringLit{Value: "{}"}, &ast.IntLit{Value: 5}}}
+	f := mainFile(&ast.LetExpr{Name: "s", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "String" {
+		t.Fatalf("got ResolvedType %q, want String", call.ResolvedType)
+	}
+
+	bad := &ast.CallExpr{Callee: "formatWith", Args: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 5}}}
+	f2 := mainFile(&ast.DiscardExpr{Value: bad}, &ast.IntLit{Value: 0})
+	if err := Check(f2); err == nil {
+		t.Fatal("expected an error: formatWith's template must be a String")
+	}
+}
+
+func TestCheck_ExitAcceptsIntReturnsUnit(t *testing.T) {
+	call := &ast.CallExpr{Callee: "exit", Args: []ast.Expr{&ast.IntLit{Value: 1}}}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != unitType {
+		t.Fatalf("got ResolvedType %q, want %q", call.ResolvedType, unitType)
+	}
+}
+
+func TestCheck_ExitRejectsNonIntArg(t *testing.T) {
+	call := &ast.CallExpr{Callee: "exit", Args: []ast.Expr{&ast.StringLit{Value: "1"}}}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: exit's code must be Int")
+	}
+}
+
+// TestCheck_ExitAsIfBranchFallbackRequiresUnitSiblingBranch documents ex6's
+// deliberate scope cut (CLAUDE.md's ex6 design note, amifl-spec.md section
+// 17.2): exit is plain Unit-typed, not a Never-like "fits any expected
+// type" the way Go's panic does structurally, so it can stand alongside
+// another Unit branch...
+func TestCheck_ExitAsIfBranchFallbackRequiresUnitSiblingBranch(t *testing.T) {
+	okBranch := &ast.Block{Exprs: []ast.Expr{printStr("ok")}}
+	exitBranch := &ast.Block{Exprs: []ast.Expr{&ast.CallExpr{Callee: "exit", Args: []ast.Expr{&ast.IntLit{Value: 1}}}}}
+	ifExpr := &ast.IfExpr{Cond: &ast.BoolLit{Value: true}, Then: okBranch, Else: exitBranch}
+	f := mainFile(ifExpr, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v (both branches are Unit-typed, so this should be fine)", err)
+	}
+}
+
+// ...but not alongside a non-Unit branch (unlike Go's panic).
+func TestCheck_ExitAsNonUnitIfBranchFallbackIsAnError(t *testing.T) {
+	okBranch := &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 5}}}
+	exitBranch := &ast.Block{Exprs: []ast.Expr{&ast.CallExpr{Callee: "exit", Args: []ast.Expr{&ast.IntLit{Value: 1}}}}}
+	ifExpr := &ast.IfExpr{Cond: &ast.BoolLit{Value: true}, Then: okBranch, Else: exitBranch}
+	f := mainFile(&ast.LetExpr{Name: "r", Value: ifExpr}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: exit is Unit-typed, it can't stand in for an Int branch")
 	}
 }

@@ -56,15 +56,10 @@ var builtinFuncs map[string]builtinResolver
 func init() {
 	builtinFuncs = map[string]builtinResolver{
 		// 13.1 出力・終了 — "print" is resolveCallExpr's own special case
-		// (unchanged since step 1); the rest of 13.1 was never in step 11's
-		// approved scope (CLAUDE.md's step-11 design note keeps `print`
-		// String-only until a dedicated later pass generalizes 13.1 as a
-		// whole) but is reserved here so it can't be redefined in the
-		// meantime.
-		"eprint":     notYetImplemented("a later pass", "amifl-spec.md section 13.1 generalization, deferred alongside print"),
-		"format":     notYetImplemented("a later pass", "amifl-spec.md section 13.1 generalization, deferred alongside print"),
-		"formatWith": notYetImplemented("a later pass", "amifl-spec.md section 13.1 generalization, deferred alongside print"),
-		"exit":       notYetImplemented("a later pass", "amifl-spec.md section 13.1 generalization, deferred alongside print"),
+		// (unchanged since step 1); eprint/format/formatWith/exit are
+		// registered by builtins_output.go's own init() (ex6) rather than
+		// listed directly here, the same split builtins_pipeline.go/
+		// builtins_chan.go already use for their own sections.
 
 		// 13.2 型・値判定
 		"typeName": resolveTypeName,

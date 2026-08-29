@@ -3048,3 +3048,91 @@ func TestGenerateProgram_ListOfQualifiedStructSharesGoTypeWithDeclaringPackage(t
 		t.Errorf("expected exactly one shared SLTYPE for List(Point)/List(Qualified(geo_Point)) (both wrapping geo_Point); got:\n%s", ir)
 	}
 }
+
+// --- ex6: print/eprint/format/formatWith/exit (amifl-spec.md section
+// 13.1) ---
+
+// TestGenerate_PrintAcceptsNonStringValueDirectly confirms ex6's
+// generalization needed zero codegen change: fmt.Println's own `...any`
+// parameter already accepts a concrete Go value (here an Int64) with no
+// boxing/VAR-of-any machinery, unlike typeName's own literal-boxing
+// concern (which only matters for %T, not %v).
+func TestGenerate_PrintAcceptsNonStringValueDirectly(t *testing.T) {
+	call := &ast.CallExpr{Callee: "print", ResolvedType: unitType, Args: []ast.Expr{&ast.IntLit{Value: 5}}}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := "CALL\t:\t?fmt.Println\t5"; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+	}
+}
+
+func TestGenerate_EprintCallsAmiflrtEprint(t *testing.T) {
+	call := &ast.CallExpr{Callee: "eprint", Builtin: "eprint", ResolvedType: unitType, Args: []ast.Expr{&ast.StringLit{Value: "oops"}}}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := "CALL\t:\t?amiflrt.Eprint\t\"oops\""; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+	}
+}
+
+func TestGenerate_FormatCallsAmiflrtFormat(t *testing.T) {
+	call := &ast.CallExpr{Callee: "format", Builtin: "format", ResolvedType: "String", Args: []ast.Expr{&ast.IntLit{Value: 5}}}
+	f := mainFile(&ast.LetExpr{Name: "s", Token: "%s_1", ResolvedType: "String", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"VAR\t%amifl_tmp1\t^string",
+		"CALL\t%amifl_tmp1\t:\t?amiflrt.Format\t5",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_FormatWithCallsAmiflrtFormatWith(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "formatWith", Builtin: "formatWith", ResolvedType: "String",
+		Args: []ast.Expr{&ast.StringLit{Value: "hi {}"}, &ast.IntLit{Value: 5}},
+	}
+	f := mainFile(&ast.LetExpr{Name: "s", Token: "%s_1", ResolvedType: "String", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := "CALL\t%amifl_tmp1\t:\t?amiflrt.FormatWith\t\"hi {}\"\t5"; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+	}
+}
+
+// TestGenerate_ExitCastsInt64ToNativeIntBeforeOsExit is a regression test
+// for the same "os.Exit takes Go's native int, not AmiFL's fixed-width
+// Int64" gotcha codegen.go's own `!main` wrapper already bridges (CLAUDE.md's
+// "過去に踏まれた地雷" #5) — exit's own codegen must apply the identical
+// CALL-as-conversion cast rather than passing an Int64 value straight to
+// ?os.Exit, which go/types would reject.
+func TestGenerate_ExitCastsInt64ToNativeIntBeforeOsExit(t *testing.T) {
+	call := &ast.CallExpr{Callee: "exit", Builtin: "exit", ResolvedType: unitType, Args: []ast.Expr{&ast.IntLit{Value: 1}}}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"VAR\t%amifl_tmp1\t^int",
+		"CALL\t%amifl_tmp1\t:\t?int\t1",
+		"CALL\t:\t?os.Exit\t%amifl_tmp1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}

@@ -1,0 +1,41 @@
+// ex6 (amifl-spec.md section 13.1): print generalized from String to Any,
+// plus eprint/format/formatWith/exit.
+
+struct Point {
+    x: Int,
+    y: Int
+}
+
+fn main() -> Int {
+    // print now accepts any concrete type, not just String.
+    print(42)
+    print(true)
+    print(Point { x: 1, y: 2 })
+    print((1, "two"))
+
+    // eprint writes to stderr instead of stdout, same %v formatting.
+    eprint("this line goes to stderr, not stdout")
+
+    // format returns the same %v-formatted text print would write.
+    let s = format(3.5)
+    print(s)
+
+    // formatWith replaces the first "{}" per call; chain via |> to fill
+    // more than one placeholder, each consuming the leftmost remaining one.
+    let msg = "point: ({}, {})" |> formatWith(_, 10) |> formatWith(_, 20)
+    print(msg)
+
+    // exit(code) is Unit-typed (not a Never-like "fits any expected type"),
+    // so it's usable wherever Unit already is: here, both branches of this
+    // if are Unit, so the whole thing is a valid non-tail statement. Once
+    // reached, exit terminates the process immediately with 77 — the
+    // dead-looking `99` after this if never actually executes at runtime.
+    let shouldExit = true
+    if shouldExit {
+        exit(77)
+    } else {
+        print("unreachable")
+    }
+
+    99
+}

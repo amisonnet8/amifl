@@ -17,6 +17,10 @@ import (
 // which already checked c.Builtin != "".
 func (g *gen) genBuiltinValue(c *ast.CallExpr) (string, error) {
 	switch c.Builtin {
+	case "format":
+		return g.genFormatValue(c)
+	case "formatWith":
+		return g.genFormatWithValue(c)
 	case "typeName":
 		return g.genTypeNameValue(c)
 	case "isError":
@@ -156,14 +160,20 @@ func (g *gen) genBuiltinValue(c *ast.CallExpr) (string, error) {
 
 // genBuiltinStmt dispatches a built-in call used purely for effect — a
 // Unit-returning built-in (setAt, and, since phase 11c, Set's add/discard
-// and Map's set/delete — all mutate their first argument in place rather
-// than producing a value), or a non-Unit one reached through a discard,
-// which falls through to genBuiltinValue and discards the token
+// and Map's set/delete, all mutate their first argument in place rather
+// than producing a value; ex6's eprint/exit are Unit-returning for a
+// different reason — a write and a process termination, respectively,
+// neither producing a value at all), or a non-Unit one reached through a
+// discard, which falls through to genBuiltinValue and discards the token
 // (mirroring genStmt's own established "generate as a value, discard the
 // result" pattern for every other non-Unit kind that can appear discarded
 // — codegen.go's genStmt, the TupleLit/StructLit/... bucket).
 func (g *gen) genBuiltinStmt(c *ast.CallExpr) error {
 	switch c.Builtin {
+	case "eprint":
+		return g.genEprintStmt(c)
+	case "exit":
+		return g.genExitStmt(c)
 	case "setAt":
 		return g.genSetAtStmt(c)
 	case "add":
