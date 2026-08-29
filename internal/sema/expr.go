@@ -168,11 +168,11 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 		// A ClosureLit only ever reaches resolveType from somewhere other
 		// than resolveLetExpr's own dedicated check (which intercepts it
 		// before checkExpr is ever called) — a call argument, an if/while
-		// condition, a binary operand, a discard target, and so on. Step
-		// 5 deliberately doesn't support any of those (see the type's doc
-		// comment), so every other path lands here with a clear, specific
-		// rejection instead of the generic "unsupported expression" below.
-		return "", fmt.Errorf("line %d: a closure literal is only allowed as a `let`'s value in step 5 (bind it first: `let f = fn(...) -> R { ... }`, then use f)", v.Line)
+		// condition, a binary operand, a discard target, and so on. None
+		// of those are supported yet (see the type's doc comment), so
+		// every other path lands here with a clear, specific rejection
+		// instead of the generic "unsupported expression" below.
+		return "", fmt.Errorf("line %d: a closure literal can only be used as a `let`'s value (bind it first: `let f = fn(...) -> R { ... }`, then use f — passing one directly, e.g. as a call argument, isn't supported yet)", v.Line)
 	default:
 		return "", fmt.Errorf("sema: unsupported expression %T", e)
 	}
@@ -210,18 +210,38 @@ func (fc *funcChecker) resolveFloatLit(v *ast.FloatLit, expected string) (string
 	return target, nil
 }
 
+// resolveIdentExpr resolves a bare identifier — a scope-bound `let`/
+// parameter/closure-parameter, a `const` (b.isConst, inlined via
+// ConstValue), or, since ex3, a *top-level* `fn`/extern-bind name
+// referenced as a value rather than called (v.IsFuncRef): fc.funcs is
+// checked only once fc.lookup finds nothing, mirroring resolveCallExpr's
+// own shadowing order ("scope chain first, then top-level `fn`s" — a
+// local binding of the same name still wins). A method-style extern bind
+// (sig.externMethod set) has no fixed callname without a receiver already
+// in scope (extern.go's externCallee — METHVAL needs one), so it's
+// rejected here with a clear message rather than silently producing a
+// broken reference.
 func (fc *funcChecker) resolveIdentExpr(v *ast.IdentExpr) (string, error) {
-	b, ok := fc.lookup(v.Name)
-	if !ok {
-		return "", fmt.Errorf("line %d: undefined name %q", v.Line, v.Name)
+	if b, ok := fc.lookup(v.Name); ok {
+		v.ResolvedType = b.typ
+		if b.isConst {
+			v.ConstValue = b.value
+		} else {
+			v.Token = b.token
+		}
+		return b.typ, nil
 	}
-	v.ResolvedType = b.typ
-	if b.isConst {
-		v.ConstValue = b.value
-	} else {
-		v.Token = b.token
+	if sig, ok := fc.funcs[v.Name]; ok {
+		if sig.externMethod != "" {
+			return "", fmt.Errorf("line %d: %q is a method-style extern bind and can't be referenced as a value (it has no receiver here)", v.Line, v.Name)
+		}
+		typ := makeFuncType(sig.params, sig.ret)
+		v.ResolvedType = typ
+		v.IsFuncRef = true
+		v.FuncRefCallee = sig.externCallee
+		return typ, nil
 	}
-	return b.typ, nil
+	return "", fmt.Errorf("line %d: undefined name %q", v.Line, v.Name)
 }
 
 // resolveCallExpr type-checks `callee(args...)` (amifl-spec.md section 8).
@@ -338,18 +358,30 @@ func (fc *funcChecker) checkCallArgs(v *ast.CallExpr, params []string) error {
 // any of the usual literal-adaptation/type-annotation machinery: its type
 // is always fully self-determined (every parameter and the return type
 // are already explicit in the closure literal itself), so an *additional*
-// type annotation on the `let` would be redundant at best — rejected here
-// with a clear message rather than silently accepted or run through
-// checkExpr's generic (and, for a closure, not even reachable — see
-// resolveType's *ast.ClosureLit case) expected-type machinery.
+// type annotation is never needed to resolve it — but, since ex3 gives
+// AmiFL a real `fn(...) -> R` grammar to write one in (ast.FuncType), one
+// may now optionally be given anyway, checked for exact agreement with the
+// closure's own inferred signature rather than rejected outright (step 5's
+// original rejection message cited "no grammar exists to write one in
+// even if it wanted to" as half its reasoning — that half no longer
+// holds). This still never runs through checkExpr's generic expected-type
+// machinery (resolveType's default *ast.ClosureLit case remains
+// unreachable from here) — the comparison is a plain string equality
+// against the already-self-determined type, not a literal-adaptation.
 func (fc *funcChecker) resolveLetExpr(v *ast.LetExpr) (string, error) {
 	if clos, ok := v.Value.(*ast.ClosureLit); ok {
-		if v.Type != nil {
-			return "", fmt.Errorf("line %d: a closure literal's type is always inferred from its own signature; remove the type annotation on %q", v.Line, v.Name)
-		}
 		typ, err := fc.resolveClosureLit(clos)
 		if err != nil {
 			return "", err
+		}
+		if v.Type != nil {
+			annotated, err := fc.resolveTypeExpr(v.Type)
+			if err != nil {
+				return "", err
+			}
+			if annotated != typ {
+				return "", fmt.Errorf("line %d: closure literal's inferred type is %s, doesn't match the annotation %s", v.Line, typ, annotated)
+			}
 		}
 		return fc.declareLet(v, typ)
 	}
@@ -1747,6 +1779,25 @@ func (fc *funcChecker) resolveTypeExpr(te ast.TypeExpr) (string, error) {
 			return "", err
 		}
 		return makeStreamType(elem), nil
+	case *ast.FuncType:
+		// resolveReturnTypeExpr (not plain resolveTypeExpr) for t.Ret so a
+		// Func-typed annotation can name a `-> Unit`-returning function
+		// value exactly like an ordinary `fn`/ClosureLit return type can
+		// (amifl-spec.md section 8.3) — e.g. a callback parameter
+		// `f: fn(String) -> Unit`.
+		paramTypes := make([]string, len(t.Params))
+		for i, p := range t.Params {
+			pt, err := fc.resolveTypeExpr(p)
+			if err != nil {
+				return "", err
+			}
+			paramTypes[i] = pt
+		}
+		retTyp, err := fc.resolveReturnTypeExpr(t.Ret)
+		if err != nil {
+			return "", err
+		}
+		return makeFuncType(paramTypes, retTyp), nil
 	default:
 		return "", fmt.Errorf("sema: unsupported type expression %T", te)
 	}

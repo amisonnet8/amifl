@@ -1083,7 +1083,12 @@ func TestCheck_ClosureCapturesOuterLet(t *testing.T) {
 	}
 }
 
-func TestCheck_ClosureLitWithTypeAnnotationIsAnError(t *testing.T) {
+func TestCheck_ClosureLitWithNonFuncTypeAnnotationIsAnError(t *testing.T) {
+	// "Int" isn't even a Func-shaped annotation at all — still rejected,
+	// same as ever, though ex3 changed *why* (a mismatch against the
+	// closure's own inferred type, not "annotations are always forbidden"
+	// — see TestCheck_ClosureLitWithMatchingFuncTypeAnnotationIsValid for
+	// the now-valid case a bare rejection-of-all-annotations would miss).
 	f := mainFile(
 		&ast.LetExpr{Name: "square", Type: nt("Int"), Value: &ast.ClosureLit{
 			Params:     []ast.Param{{Name: "x", Type: nt("Int")}},
@@ -1093,13 +1098,44 @@ func TestCheck_ClosureLitWithTypeAnnotationIsAnError(t *testing.T) {
 		&ast.IntLit{Value: 0},
 	)
 	if err := Check(f); err == nil {
-		t.Fatal("expected an error for a closure-valued `let` carrying its own type annotation")
+		t.Fatal("expected an error for a closure-valued `let` annotated with a non-Func type")
+	}
+}
+
+func TestCheck_ClosureLitWithMatchingFuncTypeAnnotationIsValid(t *testing.T) {
+	// Ex3: a closure-valued `let` may now carry a FuncType annotation, as
+	// long as it agrees with the closure's own self-inferred signature.
+	f := mainFile(
+		&ast.LetExpr{Name: "square", Type: ft([]ast.TypeExpr{nt("Int")}, nt("Int")), Value: &ast.ClosureLit{
+			Params:     []ast.Param{{Name: "x", Type: nt("Int")}},
+			ReturnType: nt("Int"),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IdentExpr{Name: "x"}}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ClosureLitWithMismatchedFuncTypeAnnotationIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "square", Type: ft([]ast.TypeExpr{nt("Int")}, nt("Bool")), Value: &ast.ClosureLit{
+			Params:     []ast.Param{{Name: "x", Type: nt("Int")}},
+			ReturnType: nt("Int"),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IdentExpr{Name: "x"}}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a closure literal's inferred type disagreeing with its own annotation")
 	}
 }
 
 func TestCheck_ClosureLitAsCallArgumentIsAnError(t *testing.T) {
-	// Step 5 only supports a ClosureLit as a `let`'s direct value — not as
-	// a call argument (no higher-order functions yet).
+	// An inline ClosureLit only supports being a `let`'s direct value —
+	// not a call argument (deferred, tracked separately from ex3's own
+	// scope — see ast.ClosureLit's doc comment).
 	f := mainFile(
 		&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.ClosureLit{
 			ReturnType: nt("Int"),
@@ -1108,6 +1144,211 @@ func TestCheck_ClosureLitAsCallArgumentIsAnError(t *testing.T) {
 	)
 	if err := Check(f); err == nil {
 		t.Fatal("expected an error for a closure literal used as a call argument")
+	}
+}
+
+func TestCheck_TopLevelFnReferencedByNameAsValueIsValid(t *testing.T) {
+	// Ex3: `let f = add` where `add` is a top-level `fn`, previously
+	// deferred (step 5's "トップレベル関数を名前で値として渡す" scope cut).
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:       "add",
+			Params:     []ast.Param{{Name: "a", Type: nt("Int")}, {Name: "b", Type: nt("Int")}},
+			ReturnType: nt("Int"),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}}}},
+		},
+		&ast.FuncDecl{
+			Name:       "main",
+			ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "f", Value: &ast.IdentExpr{Name: "add"}},
+				&ast.CallExpr{Callee: "f", Args: []ast.Expr{&ast.IntLit{Value: 3}, &ast.IntLit{Value: 4}}},
+			}},
+		},
+	}}
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_TopLevelFnReferencedWithMismatchedFuncTypeAnnotationIsAnError(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:       "add",
+			Params:     []ast.Param{{Name: "a", Type: nt("Int")}, {Name: "b", Type: nt("Int")}},
+			ReturnType: nt("Int"),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}}}},
+		},
+		&ast.FuncDecl{
+			Name:       "main",
+			ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "f", Type: ft([]ast.TypeExpr{nt("Int")}, nt("Bool")), Value: &ast.IdentExpr{Name: "add"}},
+				&ast.IntLit{Value: 0},
+			}},
+		},
+	}}
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a top-level `fn` reference whose actual signature doesn't match its `let` annotation")
+	}
+}
+
+func TestCheck_MethodStyleExternBindReferencedAsValueIsAnError(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.ExternDecl{
+			Path:  "time",
+			Alias: "time",
+			Types: []ast.ExternTypeDecl{{Name: "Time"}},
+			Binds: []ast.ExternBindDecl{
+				{Name: "Now", ReturnType: nt("Time")},
+				{Name: "TimeUnix", Params: []ast.Param{{Name: "t", Type: nt("Time")}}, ReturnType: nt("Int"), GoTarget: "Time.Unix"},
+			},
+		},
+		&ast.FuncDecl{
+			Name:       "main",
+			ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "f", Value: &ast.IdentExpr{Name: "TimeUnix"}},
+				&ast.IntLit{Value: 0},
+			}},
+		},
+	}}
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a method-style extern bind referenced by name as a value")
+	}
+}
+
+func TestCheck_FuncTypedParamIsCallableInsideFunctionBody(t *testing.T) {
+	// `fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }` — a genuine
+	// user-defined higher-order function, ex3's core new capability.
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name: "apply",
+			Params: []ast.Param{
+				{Name: "f", Type: ft([]ast.TypeExpr{nt("Int")}, nt("Int"))},
+				{Name: "x", Type: nt("Int")},
+			},
+			ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.CallExpr{Callee: "f", Args: []ast.Expr{&ast.IdentExpr{Name: "x"}}},
+			}},
+		},
+		&ast.FuncDecl{
+			Name:       "double",
+			Params:     []ast.Param{{Name: "n", Type: nt("Int")}},
+			ReturnType: nt("Int"),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.BinaryExpr{Op: "*", Left: &ast.IdentExpr{Name: "n"}, Right: &ast.IntLit{Value: 2}}}},
+		},
+		&ast.FuncDecl{
+			Name:       "main",
+			ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.CallExpr{Callee: "apply", Args: []ast.Expr{&ast.IdentExpr{Name: "double"}, &ast.IntLit{Value: 5}}},
+			}},
+		},
+	}}
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_FuncTypedParamRejectsWrongSignature(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:       "apply",
+			Params:     []ast.Param{{Name: "f", Type: ft([]ast.TypeExpr{nt("Int")}, nt("Int"))}, {Name: "x", Type: nt("Int")}},
+			ReturnType: nt("Int"),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.CallExpr{Callee: "f", Args: []ast.Expr{&ast.IdentExpr{Name: "x"}}}}},
+		},
+		&ast.FuncDecl{
+			Name:       "isPositive",
+			Params:     []ast.Param{{Name: "n", Type: nt("Int")}},
+			ReturnType: nt("Bool"),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.BinaryExpr{Op: ">", Left: &ast.IdentExpr{Name: "n"}, Right: &ast.IntLit{Value: 0}}}},
+		},
+		&ast.FuncDecl{
+			Name:       "main",
+			ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.CallExpr{Callee: "apply", Args: []ast.Expr{&ast.IdentExpr{Name: "isPositive"}, &ast.IntLit{Value: 5}}},
+			}},
+		},
+	}}
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for passing fn(Int)->Bool where fn(Int)->Int is required")
+	}
+}
+
+func TestCheck_NestedFuncTypedParamResolvesCorrectly(t *testing.T) {
+	// `fn compose(g: fn(Int) -> Int, x: Int) -> Int { g(x) }` — a Func type
+	// nested inside another Func type's own parameter list. This is
+	// exactly the shape (examples/higher_order_functions.aml's `compose`)
+	// that turned out to need funcTypeParts' depth-aware ")->" fix: a naive
+	// strings.Index(t, ")->") finds the *inner* Func type's own ")->" and
+	// silently truncates the outer parameter list to one entry instead of
+	// two — this test locks that fix in at the sema layer directly (the
+	// example file exercises it end-to-end through actual codegen too).
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name: "compose",
+			Params: []ast.Param{
+				{Name: "g", Type: ft([]ast.TypeExpr{nt("Int")}, nt("Int"))},
+				{Name: "x", Type: nt("Int")},
+			},
+			ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.CallExpr{Callee: "g", Args: []ast.Expr{&ast.IdentExpr{Name: "x"}}},
+			}},
+		},
+		&ast.FuncDecl{
+			Name:       "double",
+			Params:     []ast.Param{{Name: "n", Type: nt("Int")}},
+			ReturnType: nt("Int"),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.BinaryExpr{Op: "*", Left: &ast.IdentExpr{Name: "n"}, Right: &ast.IntLit{Value: 2}}}},
+		},
+		&ast.FuncDecl{
+			Name:       "main",
+			ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				// compose expects exactly 2 arguments — if the depth-aware
+				// fix regressed, sema would instead report the truncated
+				// arity (1) here and this call would spuriously fail.
+				&ast.CallExpr{Callee: "compose", Args: []ast.Expr{&ast.IdentExpr{Name: "double"}, &ast.IntLit{Value: 7}}},
+			}},
+		},
+	}}
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_TopLevelFnReturningFuncTypeIsValid(t *testing.T) {
+	// `fn makeAdder(n: Int) -> fn(Int) -> Int { let f = fn(x: Int) -> Int { x + n }; f }`
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:       "makeAdder",
+			Params:     []ast.Param{{Name: "n", Type: nt("Int")}},
+			ReturnType: ft([]ast.TypeExpr{nt("Int")}, nt("Int")),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "f", Value: &ast.ClosureLit{
+					Params:     []ast.Param{{Name: "x", Type: nt("Int")}},
+					ReturnType: nt("Int"),
+					Body:       &ast.Block{Exprs: []ast.Expr{&ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "x"}, Right: &ast.IdentExpr{Name: "n"}}}},
+				}},
+				&ast.IdentExpr{Name: "f"},
+			}},
+		},
+		&ast.FuncDecl{
+			Name:       "main",
+			ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "addThree", Value: &ast.CallExpr{Callee: "makeAdder", Args: []ast.Expr{&ast.IntLit{Value: 3}}}},
+				&ast.CallExpr{Callee: "addThree", Args: []ast.Expr{&ast.IntLit{Value: 5}}},
+			}},
+		},
+	}}
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
 	}
 }
 
@@ -1514,6 +1755,11 @@ func lt(elem ast.TypeExpr) ast.TypeExpr {
 
 func at(elem ast.TypeExpr, size uint64) ast.TypeExpr {
 	return &ast.ArrayType{Elem: elem, Size: &ast.IntLit{Value: size}}
+}
+
+// ft builds a Func type annotation (ast.FuncType, ex3) — `fn(params) -> ret`.
+func ft(params []ast.TypeExpr, ret ast.TypeExpr) ast.TypeExpr {
+	return &ast.FuncType{Params: params, Ret: ret}
 }
 
 func intListLit(vals ...uint64) *ast.ListLit {

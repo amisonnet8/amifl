@@ -58,20 +58,28 @@ func splitTopLevelCommas(s string) []string {
 }
 
 // resolveGoType returns the Go/AMIVM type name amifl type t compiles to: a
-// scalar's fixed name (goTypeNames), a tuple/list/array/set/map's
-// deduplicated synthesized type name (tupleGoTypeName/listGoTypeName/
-// arrayGoTypeName/setGoTypeName/mapGoTypeName (maps.go, step 10), each
-// minted on first use across the whole program — unlike a closure's
-// FNTYPE, which mints fresh every time, these benefit from sharing one Go
-// type per shape so a type can flow through a function signature, a
-// struct field, or another collection's own element type meaningfully),
-// or a struct's own declared name verbatim (its STTYPE's Go type is
-// always exactly the struct's AmiFL name — already a valid Go identifier,
-// since every AmiFL identifier is one, so no mangling is needed the way a
-// tuple/array's positional shape needs one).
+// scalar's fixed name (goTypeNames), a tuple/func/list/array/set/map's
+// deduplicated synthesized type name (tupleGoTypeName/funcGoTypeName
+// (closure.go, ex3)/listGoTypeName/arrayGoTypeName/setGoTypeName/
+// mapGoTypeName (maps.go, step 10), each minted on first use across the
+// whole program and reused for every later reference to the same shape —
+// load-bearing for Func specifically, not just an optimization the way it
+// is for the others: Go requires two *named* function types to be
+// identical, not just structurally alike, for one to be assignable to the
+// other, so a closure literal, a passed-by-name top-level `fn`, and a
+// Func-typed parameter/return/let-annotation of the same shape all have to
+// resolve to the exact same Go type or they simply won't compile — see
+// funcGoTypeName's own doc comment), or a struct's own declared name
+// verbatim (its STTYPE's Go type is always exactly the struct's AmiFL
+// name — already a valid Go identifier, since every AmiFL identifier is
+// one, so no mangling is needed the way a tuple/array's positional shape
+// needs one).
 func (p *program) resolveGoType(t string) string {
 	if isTupleType(t) {
 		return p.tupleGoTypeName(t)
+	}
+	if isFuncType(t) {
+		return p.funcGoTypeName(t)
 	}
 	if isListType(t) {
 		return p.listGoTypeName(t)

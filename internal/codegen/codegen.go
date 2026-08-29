@@ -778,6 +778,9 @@ func (g *gen) genValue(e ast.Expr) (string, error) {
 		if v.ConstValue != nil {
 			return g.genValue(v.ConstValue)
 		}
+		if v.IsFuncRef {
+			return g.genFuncRefValue(v)
+		}
 		return v.Token, nil
 	case *ast.BinaryExpr:
 		return g.genBinaryValue(v)

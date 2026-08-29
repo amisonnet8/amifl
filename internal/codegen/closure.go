@@ -1,7 +1,10 @@
 // closure.go compiles amifl-spec.md section 8.1's local closure literals
-// (`let f = fn(x: Int) -> Int { x * x }`) — see codegen.go's package doc
-// and ast.ClosureLit's doc comment for the step-5 scope this operates
-// under (a closure literal only ever appears as a `let`'s direct value).
+// (`let f = fn(x: Int) -> Int { x * x }`) and, since ex3, every other
+// producer of a Func-typed Go function type — see ast.ClosureLit's and
+// ast.FuncType's own doc comments for the surrounding scope (a closure
+// literal only ever appears as a `let`'s direct value; a Func-typed value
+// more generally may now flow through a parameter, a return type, or a
+// passed-by-name top-level `fn` reference).
 package codegen
 
 import (
@@ -12,21 +15,27 @@ import (
 )
 
 // program holds state shared across every function Generate compiles in
-// one call — currently just the synthesized FNTYPE declarations every
-// closure literal's own Go function type needs (amivm_spec.md section
-// 4.19: `CLOS`'s target must already be VAR-declared under a named
-// function type, exactly like any other VAR/SET pair — there is no
-// "declare and assign a closure in one step" instruction). Unlike
-// goTypeNames' scalar lookups, a closure's Go type has no natural shared
-// name to reuse, so each closure literal simply mints its own ("AmiflFuncN"
-// in first-encountered order) rather than de-duplicating identically-
-// shaped closures — step 5 never needs two closures to share a Go type
-// (no Func-typed parameters/return types exist yet to require matching an
-// external annotation — see ast.ClosureLit's doc comment), so
-// deduplication would add bookkeeping with no payoff yet.
+// one call — including the synthesized FNTYPE declarations every Func-
+// typed Go function type needs (amivm_spec.md section 4.19: `CLOS`'s
+// target must already be VAR-declared under a named function type, exactly
+// like any other VAR/SET pair — there is no "declare and assign a closure
+// in one step" instruction). closureSeq is the single counter behind every
+// synthesized "AmiflFuncN" name, shared by two different mint paths:
+// newFuncTypeDecl's own always-fresh, uncached use (chan.go's internal
+// Stream relay closures — synthetic, with no canonical AmiFL Func type of
+// their own to key a cache on) and funcGoTypeName's canonical-string-keyed
+// cache below (every AmiFL-visible Func shape) — one shared counter keeps
+// the two mint paths from ever emitting the same name twice.
 type program struct {
 	typeHeader strings.Builder
 	closureSeq int
+
+	// funcTypes backs funcGoTypeName — a Func shape's synthesized FNTYPE,
+	// minted once per distinct canonical "fn(P1,...)->R" string and reused
+	// program-wide (resolveGoType's own doc comment explains why this
+	// sharing, unlike step 5's original per-literal-fresh minting, is now
+	// load-bearing rather than optional).
+	funcTypes map[string]string
 
 	// tupleTypes/tupleSeq back structs.go's tupleGoTypeName — a tuple
 	// shape's synthesized STTYPE, unlike a closure's FNTYPE, is minted
@@ -111,12 +120,17 @@ type program struct {
 	pkgPrefix string
 }
 
-// newFuncTypeDecl emits one FNTYPE line for a closure shaped by
-// paramGoTypes/retGoType (retGoType == "" for a Unit-returning closure —
+// newFuncTypeDecl emits one FNTYPE line for a function value shaped by
+// paramGoTypes/retGoType (retGoType == "" for a Unit-returning function —
 // FNTYPE's own return-type segment is then left empty, matching FUNC's
-// same "no result list at all" treatment for Unit — see genFuncDecl) and
-// returns the synthesized Go type name to declare the closure's VAR
-// under.
+// same "no result list at all" treatment for Unit — see genFuncDecl),
+// unconditionally minting a fresh "AmiflFuncN" name every call — the
+// low-level primitive behind two different callers with two different
+// needs: chan.go's internal Stream relay closures call this directly,
+// uncached, since those have no canonical AmiFL Func type to key a cache
+// on at all; funcGoTypeName below wraps this with exactly that caching for
+// every AmiFL-visible Func shape. Both draw from the same p.closureSeq
+// counter, so the two mint paths never collide on a name.
 func (p *program) newFuncTypeDecl(paramGoTypes []string, retGoType string) string {
 	p.closureSeq++
 	name := fmt.Sprintf("AmiflFunc%d", p.closureSeq)
@@ -129,6 +143,44 @@ func (p *program) newFuncTypeDecl(paramGoTypes []string, retGoType string) strin
 		fmt.Fprintf(&p.typeHeader, "\t^%s", retGoType)
 	}
 	p.typeHeader.WriteString("\n")
+	return name
+}
+
+// funcGoTypeName mints (or reuses) the shared Go/AMIVM function type for
+// one Func canonical shape ("fn(P1,...)->R" — sema's makeFuncType/
+// funcTypeParts), keyed by that full string exactly like tupleGoTypeName
+// keys a tuple shape — see resolveGoType's own doc comment for why this
+// sharing is load-bearing here, not just an optimization: Go requires two
+// *named* function types to be identical, not just structurally alike,
+// for one to be assignable to the other, so every closure literal,
+// passed-by-name top-level `fn` reference, and Func-typed parameter/
+// return/let-annotation of the same shape must resolve to this exact same
+// name or a perfectly valid AmiFL program simply won't compile as Go.
+func (p *program) funcGoTypeName(canonical string) string {
+	if name, ok := p.funcTypes[canonical]; ok {
+		return name
+	}
+	params, ret, _ := funcTypeParts(canonical)
+	// Resolved before newFuncTypeDecl writes this FNTYPE's own header line
+	// — see tupleGoTypeName's identical fix/doc comment for why
+	// interleaving a nested type's own header mid-declaration would be
+	// wrong (CLAUDE.md's step-13 "STTYPE/ENDSTTYPE内側でネストした型宣言を
+	// 発行してはいけない" lesson, equally true of FNTYPE's own single-line
+	// form — resolveGoType for a param/ret can still mint an entirely new
+	// nested SLTYPE/MPTYPE/etc mid-resolution).
+	paramGoTypes := make([]string, len(params))
+	for i, pt := range params {
+		paramGoTypes[i] = p.resolveGoType(pt)
+	}
+	var retGoType string
+	if ret != unitType {
+		retGoType = p.resolveGoType(ret)
+	}
+	name := p.newFuncTypeDecl(paramGoTypes, retGoType)
+	if p.funcTypes == nil {
+		p.funcTypes = map[string]string{}
+	}
+	p.funcTypes[canonical] = name
 	return name
 }
 
@@ -153,26 +205,18 @@ func (p *program) newFuncTypeDecl(paramGoTypes []string, retGoType string) strin
 // genIfBranch/genWhileStmt's existing approach (step 4) rather than
 // needing any goto/VAR-hoisting machinery of its own.
 func (g *gen) genClosureLitInto(token string, lit *ast.ClosureLit) error {
-	// A ClosureLit's own params/return are always plain scalars when it's
-	// written as a `let`'s direct value (step 5's scope), but the *same*
-	// let-bound closure is routinely passed to map/filter/reduce/sortBy
-	// (step 11) as the List/Array element's own type — which can be a
-	// compound type (Tuple/List/Map/Set/struct, whatever the collection
-	// holds). A direct goTypeNames[...] lookup here only ever has scalar
-	// entries, so it must go through resolveGoType (the same dispatcher
-	// every other type-to-Go-type site uses) rather than duplicate its
-	// scalar-only fallback — found via a Tuple2-typed reduce accumulator
-	// in examples/run_length_encode.aml (step 15's examples expansion).
-	var paramGoTypes []string
-	for _, p := range lit.Params {
-		paramGoTypes = append(paramGoTypes, g.prog.resolveGoType(p.ResolvedType))
-	}
-	var retGoType string
-	if lit.ResolvedReturnType != unitType {
-		retGoType = g.prog.resolveGoType(lit.ResolvedReturnType)
-	}
-
-	typeName := g.prog.newFuncTypeDecl(paramGoTypes, retGoType)
+	// lit.ResolvedType is already the canonical "fn(P1,...)->R" string
+	// sema computed (checkClosureBody) — funcGoTypeName decodes it back
+	// into paramGoTypes/retGoType itself (closureGoTypes below does the
+	// identical decoding for CLOS's own operand list), so this routes
+	// through the same shared, deduplicated cache every other Func-typed
+	// position now uses (resolveGoType's own doc comment) instead of
+	// step 5's original always-fresh newFuncTypeDecl call — load-bearing
+	// since ex3, not merely tidier: a closure passed into a Func-typed
+	// parameter of the same shape, or reassigned into another Func-typed
+	// variable, needs the identical Go type to type-check at all.
+	paramGoTypes, retGoType := g.closureGoTypes(lit.ResolvedType)
+	typeName := g.prog.funcGoTypeName(lit.ResolvedType)
 	fmt.Fprintf(g.b, "\tVAR\t%s\t^%s\n", token, typeName)
 
 	fmt.Fprintf(g.b, "\tCLOS\t%s", token)
@@ -201,4 +245,34 @@ func (g *gen) genClosureLitInto(token string, lit *ast.ClosureLit) error {
 	}
 	g.b.WriteString("\tENDCLOS\n")
 	return nil
+}
+
+// genFuncRefValue materializes v — a bare reference to a *top-level* `fn`
+// or extern plain-callee bind, resolved as a value rather than called
+// directly (ex3, sema's resolveIdentExpr sets v.IsFuncRef) — via AMIVM's
+// FUNCVAL instruction (`local := callname`, amivm_spec.md section 4.20).
+// Unlike every other IdentExpr, there is no pre-existing runtime binding/
+// token to just hand back here, so this is the one genValue IdentExpr case
+// that actually emits an instruction. FUNCVAL's own local operand is never
+// VAR-predeclared (amivm_spec.md's own note on this, mirrored by METHVAL's
+// identical rule — extern.go's externCallee already relies on it), so,
+// unlike genLetStmt's ordinary VAR-then-SET pattern, this one line is the
+// entire instruction.
+func (g *gen) genFuncRefValue(v *ast.IdentExpr) (string, error) {
+	callname := v.FuncRefCallee
+	if callname == "" {
+		// A plain top-level `fn`, mirroring calleeToken()'s identical
+		// derivation for an ordinary call — sema has no pkgPrefix of its
+		// own to bake in (program.pkgPrefix's doc comment), so codegen
+		// derives it here instead, substituting the internal entry-point
+		// name for "main" exactly like calleeToken does.
+		name := g.prog.pkgPrefix + v.Name
+		if g.prog.pkgPrefix == "" && v.Name == "main" {
+			name = entryFunc
+		}
+		callname = "!" + name
+	}
+	tmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tFUNCVAL\t%%%s\t%s\n", tmp, callname)
+	return "%" + tmp, nil
 }

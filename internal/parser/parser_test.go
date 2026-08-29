@@ -1586,6 +1586,74 @@ func TestParse_ChanTypeAnnotation(t *testing.T) {
 	}
 }
 
+func TestParse_FuncTypeAnnotation(t *testing.T) {
+	src := "fn main() -> Int {\n    let f: fn(Int, String) -> Bool = g\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	ft, ok := let.Type.(*ast.FuncType)
+	if !ok {
+		t.Fatalf("got Type %T, want *ast.FuncType", let.Type)
+	}
+	if len(ft.Params) != 2 || namedTypeName(ft.Params[0]) != "Int" || namedTypeName(ft.Params[1]) != "String" {
+		t.Fatalf("got Params %#v, want [Int, String]", ft.Params)
+	}
+	if namedTypeName(ft.Ret) != "Bool" {
+		t.Fatalf("got Ret %v, want Bool", ft.Ret)
+	}
+}
+
+func TestParse_FuncTypeAnnotationZeroParams(t *testing.T) {
+	src := "fn main() -> Int {\n    let f: fn() -> Int = g\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	ft, ok := let.Type.(*ast.FuncType)
+	if !ok {
+		t.Fatalf("got Type %T, want *ast.FuncType", let.Type)
+	}
+	if len(ft.Params) != 0 {
+		t.Fatalf("got %d params, want 0", len(ft.Params))
+	}
+}
+
+func TestParse_FuncTypeAnnotationNested(t *testing.T) {
+	// A Func-typed parameter within a Func type — the case that turned out
+	// to need funcTypeParts' depth-aware ")->" fix (sema/types.go).
+	src := "fn main() -> Int {\n    let f: fn(fn(Int) -> Int, Int) -> Int = g\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	ft, ok := let.Type.(*ast.FuncType)
+	if !ok {
+		t.Fatalf("got Type %T, want *ast.FuncType", let.Type)
+	}
+	if len(ft.Params) != 2 {
+		t.Fatalf("got %d params, want 2", len(ft.Params))
+	}
+	if _, ok := ft.Params[0].(*ast.FuncType); !ok {
+		t.Fatalf("got Params[0] %T, want *ast.FuncType", ft.Params[0])
+	}
+}
+
+func TestParse_FuncTypeAsParamType(t *testing.T) {
+	src := "fn apply(f: fn(Int) -> Int, x: Int) -> Int {\n    0\n}\nfn main() -> Int {\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	apply := f.Decls[0].(*ast.FuncDecl)
+	if _, ok := apply.Params[0].Type.(*ast.FuncType); !ok {
+		t.Fatalf("got Params[0].Type %T, want *ast.FuncType", apply.Params[0].Type)
+	}
+}
+
 func TestParse_StreamTypeAnnotationParsesAsNestedBracket(t *testing.T) {
 	src := "fn main() -> Int {\n    let s: Stream[String] = lines(f)\n    0\n}\n"
 	f, err := Parse(src)

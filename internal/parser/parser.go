@@ -365,16 +365,22 @@ func (p *parser) parseFuncDecl() (*ast.FuncDecl, error) {
 }
 
 // parseTypeExpr parses a type annotation: a plain name (a scalar or
-// struct type, amifl-spec.md sections 2.1/2.2), or one of step 7's two
+// struct type, amifl-spec.md sections 2.1/2.2), one of step 7's two
 // bracket-generic collection types, `List[Elem]` and `Array[Elem;N1,N2,
-// ...]` (section 2.2). "List" and "Array" are recognized structurally
-// here, by comparing the leading identifier's text, rather than being
-// reserved keywords — exactly like "Unit" is only special in a return-type
+// ...]` (section 2.2), or (ex3) `fn(T1,T2,...) -> R` — the one case that
+// isn't a leading identifier at all (`fn` is lexer.KwFn, a keyword, not an
+// Ident), so it's checked first, before the p.expect(lexer.Ident) every
+// other case still shares. "List" and "Array" are recognized structurally,
+// by comparing the leading identifier's text, rather than being reserved
+// keywords — exactly like "Unit" is only special in a return-type
 // position (sema's canonicalReturnType) without being a keyword anywhere
 // else. A variable can still be named "List" or "Array" without conflict,
 // since this function is only ever reached from a type-annotation
 // position.
 func (p *parser) parseTypeExpr() (ast.TypeExpr, error) {
+	if p.cur.Kind == lexer.KwFn {
+		return p.parseFuncType()
+	}
 	nameTok, err := p.expect(lexer.Ident)
 	if err != nil {
 		return nil, err
@@ -503,6 +509,55 @@ func (p *parser) parseStreamType(nameTok lexer.Token) (ast.TypeExpr, error) {
 	return &ast.StreamType{Elem: elem, Line: nameTok.Line}, nil
 }
 
+// parseFuncType parses `fn(T1,T2,...) -> R` as a *type annotation*
+// (amifl-spec.md section 8.3's Func type, ex3) — distinct from
+// parseClosureLit's `fn(params) -> R { body }` *value* syntax (reached
+// only from parsePrimaryExpr, never here, exactly the way parseTopLevelDecl's
+// statement-position `fn` and parseClosureLit's expression-position `fn`
+// already share KwFn without ambiguity — the two are told apart purely by
+// which parse function is on the call stack when KwFn is seen). The two
+// share an outwardly similar params/arrow/return-type shape, but a type
+// position never has a body, and this one's param list holds bare
+// TypeExprs (no parameter *names* — see ast.FuncType's own doc comment for
+// why), so it can't just delegate to parseParamList the way parseClosureLit
+// does.
+func (p *parser) parseFuncType() (ast.TypeExpr, error) {
+	kwTok, err := p.expect(lexer.KwFn)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.LParen); err != nil {
+		return nil, err
+	}
+	var params []ast.TypeExpr
+	if p.cur.Kind != lexer.RParen {
+		for {
+			pt, err := p.parseTypeExpr()
+			if err != nil {
+				return nil, err
+			}
+			params = append(params, pt)
+			if p.cur.Kind != lexer.Comma {
+				break
+			}
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RParen); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.Arrow); err != nil {
+		return nil, err
+	}
+	ret, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.FuncType{Params: params, Ret: ret, Line: kwTok.Line}, nil
+}
+
 func (p *parser) parseListType(nameTok lexer.Token) (ast.TypeExpr, error) {
 	if _, err := p.expect(lexer.LBracket); err != nil {
 		return nil, err
@@ -564,11 +619,10 @@ func (p *parser) parseArrayType(nameTok lexer.Token) (ast.TypeExpr, error) {
 // (everything between an already-consumed `(` and the terminating `)`,
 // which this also consumes): zero or more comma-separated `name: Type`
 // entries. Shared verbatim between parseFuncDecl and parseClosureLit —
-// amifl-spec.md section 8.1's grammar for the two is identical. Step 5
-// restricts Type to a plain scalar identifier (see ast.Param's doc
-// comment) — a `fn(...) -> R` type here (a function-valued parameter)
-// isn't supported yet, so this never recurses into fn-type parsing the
-// way a hypothetical parseType would.
+// amifl-spec.md section 8.1's grammar for the two is identical. Type is
+// parsed by the ordinary parseTypeExpr (via parseFieldTypeList below), so
+// a parameter may since ex3 be Func-typed (`f: fn(Int) -> Int`) exactly
+// like any other type-annotation position — see ast.Param's doc comment.
 func (p *parser) parseParamList() ([]ast.Param, error) {
 	fields, err := p.parseFieldTypeList(lexer.RParen)
 	if err != nil {

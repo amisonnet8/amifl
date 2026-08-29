@@ -878,6 +878,158 @@ func TestGenerate_ClosureCapturesOuterLetTokenDirectly(t *testing.T) {
 	}
 }
 
+// TestGenerate_TwoClosureLitsOfSameShapeShareOneFuncType locks in ex3's
+// load-bearing change to genClosureLitInto (funcGoTypeName, replacing step
+// 5's original always-fresh newFuncTypeDecl call): two closure literals of
+// the identical Func shape must compile to the *same* named Go function
+// type, not two structurally-identical-but-distinct ones — Go requires two
+// named function types to be identical (not just alike) for one to be
+// assignable to the other, so this is correctness-critical the moment a
+// Func-typed value can flow between two different closures of the same
+// shape (a parameter, a reassignment, ...), not merely an optimization.
+func TestGenerate_TwoClosureLitsOfSameShapeShareOneFuncType(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "square", Token: "%square_1", Value: &ast.ClosureLit{
+			Params:             []ast.Param{{Name: "x", Type: nt("Int"), ResolvedType: "Int64"}},
+			ReturnType:         nt("Int"),
+			ResolvedReturnType: "Int64",
+			ResolvedType:       "fn(Int64)->Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.IdentExpr{Name: "x", ResolvedType: "Int64", Token: "&1-1"},
+			}},
+		}},
+		&ast.LetExpr{Name: "cube", Token: "%cube_2", Value: &ast.ClosureLit{
+			Params:             []ast.Param{{Name: "x", Type: nt("Int"), ResolvedType: "Int64"}},
+			ReturnType:         nt("Int"),
+			ResolvedReturnType: "Int64",
+			ResolvedType:       "fn(Int64)->Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.IdentExpr{Name: "x", ResolvedType: "Int64", Token: "&1-1"},
+			}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if strings.Count(ir, "FNTYPE\t^AmiflFunc1\t^int64\t:\t^int64") != 1 {
+		t.Errorf("expected exactly one FNTYPE declaration shared by both closures; got:\n%s", ir)
+	}
+	if strings.Count(ir, "FNTYPE") != 1 {
+		t.Errorf("expected no second, distinct FNTYPE for the second closure; got:\n%s", ir)
+	}
+	for _, want := range []string{
+		"VAR\t%square_1\t^AmiflFunc1",
+		"VAR\t%cube_2\t^AmiflFunc1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+// TestGenerate_TopLevelFnReferencedAsValueEmitsFuncval covers ex3's
+// genFuncRefValue: a bare reference to a top-level `fn` (sema's
+// resolveIdentExpr sets IsFuncRef, leaving FuncRefCallee "" — codegen
+// derives "!"+name itself, exactly like calleeToken() does for an
+// ordinary call).
+func TestGenerate_TopLevelFnReferencedAsValueEmitsFuncval(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:               "add",
+			Params:             []ast.Param{{Name: "a", Type: nt("Int"), ResolvedType: "Int64"}, {Name: "b", Type: nt("Int"), ResolvedType: "Int64"}},
+			ReturnType:         nt("Int"),
+			ResolvedReturnType: "Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.BinaryExpr{Op: "+", ResolvedType: "Int64",
+					Left:  &ast.IdentExpr{Name: "a", ResolvedType: "Int64", Token: "$1"},
+					Right: &ast.IdentExpr{Name: "b", ResolvedType: "Int64", Token: "$2"},
+				},
+			}},
+		},
+		&ast.FuncDecl{
+			Name:               "main",
+			ReturnType:         nt("Int"),
+			ResolvedReturnType: "Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "f", Token: "%f_1", ResolvedType: "fn(Int64,Int64)->Int64", Value: &ast.IdentExpr{
+					Name: "add", ResolvedType: "fn(Int64,Int64)->Int64", IsFuncRef: true,
+				}},
+				&ast.IntLit{Value: 0},
+			}},
+		},
+	}}
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "FUNCVAL\t%amifl_tmp1\t!add") {
+		t.Errorf("expected FUNCVAL against the derived \"!add\" callname; got:\n%s", ir)
+	}
+	if !strings.Contains(ir, "SET\t%f_1\t%amifl_tmp1") {
+		t.Errorf("expected the FUNCVAL result to be SET into the `let`'s own token; got:\n%s", ir)
+	}
+}
+
+// TestGenerate_ExternBindReferencedAsValueEmitsFuncvalWithResolvedCallee
+// covers genFuncRefValue's other branch: FuncRefCallee already holds the
+// fully-resolved "?alias.GoName" callname (sema's resolveIdentExpr, mirroring
+// CallExpr.CalleeToken's identical convention for an extern plain-callee
+// bind), so codegen must use it verbatim rather than deriving "!"+Name.
+func TestGenerate_ExternBindReferencedAsValueEmitsFuncvalWithResolvedCallee(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "f", Token: "%f_1", ResolvedType: "fn(String)->String", Value: &ast.IdentExpr{
+			Name: "ToUpperCased", ResolvedType: "fn(String)->String", IsFuncRef: true, FuncRefCallee: "?strs.ToUpper",
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "FUNCVAL\t%amifl_tmp1\t?strs.ToUpper") {
+		t.Errorf("expected FUNCVAL against the pre-resolved \"?strs.ToUpper\" callname; got:\n%s", ir)
+	}
+}
+
+// TestGenerate_FuncTypedParamResolvesToSharedFuncGoType covers a
+// FUNC header's own parameter type going through resolveGoType's new
+// isFuncType dispatch (structs.go) — a Func-typed parameter must resolve
+// to the identical funcGoTypeName-cached type a closure literal of the
+// same shape would.
+func TestGenerate_FuncTypedParamResolvesToSharedFuncGoType(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:               "apply",
+			Params:             []ast.Param{{Name: "f", Type: nt("_"), ResolvedType: "fn(Int64)->Int64"}, {Name: "x", Type: nt("Int"), ResolvedType: "Int64"}},
+			ReturnType:         nt("Int"),
+			ResolvedReturnType: "Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.CallExpr{Callee: "f", CalleeToken: "$1", ResolvedType: "Int64", Args: []ast.Expr{
+					&ast.IdentExpr{Name: "x", ResolvedType: "Int64", Token: "$2"},
+				}},
+			}},
+		},
+		&ast.FuncDecl{
+			Name:               "main",
+			ReturnType:         nt("Int"),
+			ResolvedReturnType: "Int64",
+			Body:               &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		},
+	}}
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "FUNC\t!apply\t^AmiflFunc1\t^int64\t:\t^int64") {
+		t.Errorf("expected apply's FUNC header to declare f's parameter as the synthesized Func Go type; got:\n%s", ir)
+	}
+	if !strings.Contains(ir, "FNTYPE\t^AmiflFunc1\t^int64\t:\t^int64") {
+		t.Errorf("expected exactly one FNTYPE minted for fn(Int64)->Int64; got:\n%s", ir)
+	}
+}
+
 func TestGenerate_StructDeclEmitsSttype(t *testing.T) {
 	f := mainFile(&ast.IntLit{Value: 0})
 	f.Decls = append(f.Decls, &ast.StructDecl{

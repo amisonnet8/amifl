@@ -14,20 +14,48 @@ import (
 	"github.com/amisonnet8/amifl/internal/ast"
 )
 
+// isFuncType is codegen's own copy of sema's identical predicate
+// (types.go) — resolveGoType's own dispatch (structs.go) uses it exactly
+// like every other shape check there (isTupleType, isListType, ...).
+func isFuncType(t string) bool {
+	return strings.HasPrefix(t, "fn(")
+}
+
 // funcTypeParts is codegen's own copy of sema's identical decoder
 // (types.go's "fn(P1,P2,...)->R" convention) — needed here because map/
 // filter/reduce/sortBy's closure argument type has to be split back into
 // its parameter/return types to mint the right Go type arguments for
-// amiflrt's generic helpers. paramsRaw is split with splitTopLevelCommas
-// (structs.go), not a plain strings.Split — a param can itself be a
-// compound type (a List/Array element passed through map/filter/reduce/
-// sortBy is under no scalar-only restriction) and so may contain a "," of
-// its own; see sema/types.go's identical fix for the full explanation.
+// amiflrt's generic helpers (and, since ex3, funcGoTypeName/closureGoTypes
+// use it to decode any Func-typed value's canonical shape generally).
+// paramsRaw is split with splitTopLevelCommas (structs.go), not a plain
+// strings.Split — a param can itself be a compound type (a List/Array
+// element passed through map/filter/reduce/sortBy is under no scalar-only
+// restriction, and since ex3 a param can itself be another Func type) and
+// so may contain a "," of its own. The ")->" params/return separator needs
+// the identical depth-aware treatment, for the identical reason — see
+// sema/types.go's funcTypeParts for the full explanation (found via
+// examples/higher_order_functions.aml's `compose`, actually run through
+// the full pipeline, not caught by inspection).
 func funcTypeParts(t string) (params []string, ret string, ok bool) {
-	if !strings.HasPrefix(t, "fn(") {
+	if !isFuncType(t) {
 		return nil, "", false
 	}
-	sep := strings.Index(t, ")->")
+	sep := -1
+	depth := 0
+	for i := 0; i < len(t); i++ {
+		switch t[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && i+2 < len(t) && t[i+1] == '-' && t[i+2] == '>' {
+				sep = i
+			}
+		}
+		if sep >= 0 {
+			break
+		}
+	}
 	if sep < 0 {
 		return nil, "", false
 	}
@@ -315,13 +343,24 @@ func (g *gen) genJoinValue(c *ast.CallExpr) (string, error) {
 // closureGoTypes splits a Func-typed argument's already-resolved type
 // string (funcTypeParts) into the Go type names its parameter(s) and
 // return type compile to — shared by map/filter/reduce/sortBy below to
-// mint amiflrt's explicit `<<T,U>>` type arguments.
+// mint amiflrt's explicit `<<T,U>>` type arguments, and (ex3) by
+// closure.go's genClosureLitInto to emit a closure literal's own CLOS
+// instruction operands. ret is left "" for a Unit-returning function —
+// resolveGoType has no entry for "Unit" at all (it isn't a real runtime
+// type; genFuncDecl's identical `!= unitType` check is what this mirrors)
+// — a case map/filter/reduce/sortBy's own callers never hit (their closure
+// argument's return type is always constrained to something concrete) but
+// genClosureLitInto very much does, since an ordinary `fn(x: Int) -> Unit
+// { ... }` closure is common.
 func (g *gen) closureGoTypes(fTyp string) (paramGoTypes []string, retGoType string) {
 	params, ret, _ := funcTypeParts(fTyp)
 	for _, p := range params {
 		paramGoTypes = append(paramGoTypes, g.prog.resolveGoType(p))
 	}
-	return paramGoTypes, g.prog.resolveGoType(ret)
+	if ret != unitType {
+		retGoType = g.prog.resolveGoType(ret)
+	}
+	return paramGoTypes, retGoType
 }
 
 // genMapValue emits `map(xs, f) -> List[U]` (amifl-spec.md section 13.4)

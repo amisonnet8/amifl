@@ -116,6 +116,48 @@ type StreamType struct {
 	Line int
 }
 
+// FuncType is `fn(T1,T2,...) -> R` used as a *type annotation* (amifl-spec.md
+// section 8.3, ex3) — a `let`, a `fn`/ClosureLit parameter, a `fn`/
+// ClosureLit return type, or a struct field may now all name a function
+// value's shape explicitly, lifting step 5's "no fn(...)->R grammar exists
+// to write one in" limitation (this type's encoding — sema's makeFuncType —
+// already existed since step 5 for a ClosureLit's own self-inferred type;
+// only the surface syntax to *name* that encoding directly was missing).
+// This is what makes two things possible that step 5 deliberately deferred
+// (CLAUDE.md's "確定した設計判断" for that step): a top-level `fn` can now
+// be referenced by name as a value (sema's resolveIdentExpr falls back to
+// the top-level function table once an ordinary scope lookup fails), and a
+// user-defined `fn`/closure can declare a parameter that itself accepts a
+// function value — genuine higher-order functions, not just the built-in
+// map/filter/reduce/sortBy's own hardcoded acceptance of one (sema/
+// builtins_data.go).
+//
+// Distinct from ClosureLit (a *value*, carrying a body) — this node is
+// purely a type. Params holds bare TypeExprs with no parameter *names*,
+// mirroring every other bracketed type's element list (List[T],
+// Tuple2[T1,T2], ...) rather than Param's `name: Type` pairs, which only
+// make sense where an actual value binds to each parameter. sema's
+// resolveTypeExpr resolves this into the exact same "fn(P1,...)->R"
+// canonical string (types.go's makeFuncType) a ClosureLit's own
+// ResolvedType already used before this type had any surface syntax at
+// all — the two converge on one canonical string regardless of which one
+// produced it, so nothing downstream (codegen's shared, deduplicated Go
+// function-type minting included) needs to tell them apart.
+//
+// An inline ClosureLit literal still may only appear as a `let`'s direct
+// value (unchanged from step 5 — see ClosureLit's own doc comment); what's
+// new is that such a `let` may now optionally carry a matching FuncType
+// annotation (previously rejected unconditionally, since no grammar
+// existed to write one), and that a Func-typed value — whether a `let`-
+// bound closure or a bare top-level `fn` reference — can now flow through
+// any position an ordinary value can: a call argument, a function
+// parameter, a function's own return value.
+type FuncType struct {
+	Params []TypeExpr
+	Ret    TypeExpr
+	Line   int
+}
+
 func (*NamedType) typeExprNode()  {}
 func (*ListType) typeExprNode()   {}
 func (*ArrayType) typeExprNode()  {}
@@ -124,6 +166,7 @@ func (*MapType) typeExprNode()    {}
 func (*TupleType) typeExprNode()  {}
 func (*ChanType) typeExprNode()   {}
 func (*StreamType) typeExprNode() {}
+func (*FuncType) typeExprNode()   {}
 
 func (n *NamedType) Pos() int  { return n.Line }
 func (n *ListType) Pos() int   { return n.Line }
@@ -133,6 +176,7 @@ func (n *MapType) Pos() int    { return n.Line }
 func (n *TupleType) Pos() int  { return n.Line }
 func (n *ChanType) Pos() int   { return n.Line }
 func (n *StreamType) Pos() int { return n.Line }
+func (n *FuncType) Pos() int   { return n.Line }
 
 // TopLevelDecl is a top-level declaration: *FuncDecl or *ConstDecl.
 // AmiFL forbids top-level `let` (amifl-spec.md section 4, principle 5) —
@@ -167,12 +211,11 @@ type FuncDecl struct {
 }
 
 // Param is one `name: Type` entry in a FuncDecl's or ClosureLit's
-// parameter list (amifl-spec.md section 8.1). Step 5 restricts Type to a
-// plain scalar type name — a parameter typed `fn(...) -> R` (a function
-// value passed as an argument, i.e. a higher-order function) is not yet
-// supported, a deliberate scope cut documented in CLAUDE.md's "確定した
-// 設計判断" for step 5 (no surface syntax exists yet to write a Func-type
-// annotation at all; see ClosureLit).
+// parameter list (amifl-spec.md section 8.1). Type may be any TypeExpr —
+// a plain scalar/struct/enum name, a collection (List/Array/Set/Map/Tuple/
+// Chan/Stream), or, since ex3, FuncType (`fn(...) -> R`, a function value
+// passed as a parameter — genuine higher-order functions; see FuncType's
+// own doc comment for what this newly enables).
 type Param struct {
 	Name string
 	Type TypeExpr
@@ -411,6 +454,27 @@ type IdentExpr struct {
 	// binding — a `let` ("%x_3"), a top-level fn parameter ("$N"), or a
 	// closure parameter ("&L-N"). See LetExpr.Token.
 	Token string
+	// IsFuncRef is set instead of ConstValue/Token when Name resolves to
+	// neither a scope-bound binding nor a const, but a *top-level* `fn` or
+	// extern plain-callee bind's own name, referenced here as a value
+	// rather than called directly (ex3: passing a top-level function by
+	// name, e.g. `let f = add` or `apply(add, 5)` — step 5's originally
+	// deferred "トップレベル関数を名前で値として渡す" scope cut, lifted
+	// now that FuncType gives this a type to have). There is no runtime
+	// binding to read a token from in this case — codegen's genValue
+	// instead emits an AMIVM FUNCVAL instruction on the spot
+	// (genFuncRefValue) to materialize the reference into a fresh value.
+	// FuncRefCallee is the already-resolved AMIVM callname ("?alias.
+	// GoName") for the extern-bind case, mirroring CallExpr.CalleeToken's
+	// identical convention; left "" for a plain top-level `fn`, in which
+	// case codegen derives "!"+pkgPrefix+Name itself (mirroring
+	// calleeToken()), since sema has no pkgPrefix of its own to bake in —
+	// see program.pkgPrefix's doc comment. A method-style extern bind
+	// (ExternMethod-only — no fixed callname without a receiver in scope)
+	// can't be referenced this way at all; resolveIdentExpr rejects it
+	// with a clear error rather than setting IsFuncRef.
+	IsFuncRef     bool
+	FuncRefCallee string
 }
 
 // CallExpr is a function call `callee(args...)` (amifl-spec.md section 8).
@@ -515,21 +579,23 @@ type CallExpr struct {
 
 // ClosureLit is `fn(params) -> R { body }` used as an expression — a
 // local, unnamed function value (amifl-spec.md section 8.1, "let square =
-// fn(x: Int) -> Int { x * x }"). Unlike a top-level FuncDecl, a
-// ClosureLit's own Params/ReturnType are always themselves plain scalar
-// types (see Param) and, per step 5's scope, a ClosureLit is only legal
-// as a `let`'s direct value — never a call argument, an if/while
-// condition, a binary operand, or any other position (sema's
-// resolveType's default *ast.ClosureLit case rejects it there with a
-// clear message; resolveLetExpr is the sole place that recognizes and
-// accepts one). This is what "no first-class function values beyond a
-// `let`, no higher-order functions yet" amounts to concretely — a
-// deliberate, documented step-5 scope cut (CLAUDE.md's "確定した設計判断"),
-// not an oversight; revisit once actually needed. A `let` binding a
-// ClosureLit may not carry its own type annotation either (the closure's
-// signature is always fully explicit already, so an annotation would be
-// redundant — and step 5 has no `fn(...) -> R` type-annotation grammar to
-// write one in even if it wanted to).
+// fn(x: Int) -> Int { x * x }"). Params/ReturnType are ordinary TypeExprs
+// (Param's own doc comment) — since step 7+ these could already be List/
+// Array/Set/Map/Tuple/struct types (map/filter/reduce/sortBy routinely
+// pass a collection's element type through), and since ex3 a param/return
+// may itself be FuncType, letting a closure accept or produce another
+// function value. A ClosureLit is still only legal as a `let`'s direct
+// value — never a call argument, an if/while condition, a binary operand,
+// or any other position (sema's resolveType's default *ast.ClosureLit
+// case rejects it there with a clear message; resolveLetExpr is the sole
+// place that recognizes and accepts one) — passing an inline closure
+// literal directly (e.g. as a call argument) remains future work, tracked
+// separately from ex3. A `let` binding a ClosureLit may now optionally
+// carry a matching FuncType annotation (FuncType's own doc comment) —
+// sema checks it against the closure's self-inferred signature rather
+// than rejecting it outright, since ex3 gives AmiFL a real grammar to
+// write one in; omitting it, as before, is just as valid (the signature
+// is always fully self-determined from the literal itself either way).
 type ClosureLit struct {
 	Params     []Param
 	ReturnType TypeExpr

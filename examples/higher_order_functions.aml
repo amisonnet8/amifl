@@ -1,0 +1,45 @@
+fn addNums(a: Int, b: Int) -> Int {
+    a + b
+}
+
+fn mulNums(a: Int, b: Int) -> Int {
+    a * b
+}
+
+fn applyTwo(f: fn(Int, Int) -> Int, a: Int, b: Int) -> Int {
+    f(a, b)
+}
+
+fn makeAdder(n: Int) -> fn(Int) -> Int {
+    let f = fn(x: Int) -> Int { x + n }
+    f
+}
+
+fn callWith5(f: fn(Int) -> Int) -> Int {
+    f(5)
+}
+
+fn main() -> Int {
+    let sum1 = applyTwo(addNums, 3, 4)
+    let prod1 = applyTwo(mulNums, 3, 4)
+
+    let f: fn(Int, Int) -> Int = addNums
+    let sum2 = f(10, 20)
+
+    let square: fn(Int) -> Int = fn(x: Int) -> Int { x * x }
+    let sq = square(6)
+
+    let addThree = makeAdder(3)
+    let a3 = callWith5(addThree)
+
+    let compose = fn(g: fn(Int) -> Int, x: Int) -> Int { g(x) }
+    let c1 = compose(square, 7)
+
+    let xs: List[Int] = [1, 2, 3]
+    let doubled = for x in xs yield x * 2
+    let mapSum = reduce(doubled, 0, addNums)
+
+    print("higher order functions ok")
+
+    sum1 + prod1 + sum2 + sq + a3 + c1 + mapSum
+}

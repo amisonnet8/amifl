@@ -104,14 +104,17 @@ func (c *checker) canonicalReturnType(name string) (string, bool) {
 	return c.canonicalType(name)
 }
 
-// makeFuncType/funcTypeParts/isFuncType encode a closure's signature as
-// "fn(P1,P2,...)->R" (Pi/R already-canonical types) — a purely internal
-// sema/codegen convention, never surfaced in source syntax. Step 5 gives
-// AmiFL no `fn(...) -> R` type-annotation grammar at all (see
-// ast.ClosureLit's doc comment), so, unlike scalar type names, this
-// string is never parsed from user-written text — makeFuncType is the
-// only producer (always fed already-canonical pieces) and funcTypeParts
-// only ever decodes strings makeFuncType itself built.
+// makeFuncType/funcTypeParts/isFuncType encode a Func value's signature as
+// "fn(P1,P2,...)->R" (Pi/R already-canonical types) — an internal sema/
+// codegen convention, unchanged since step 5, when it was still never
+// surfaced in source syntax at all (a ClosureLit's own self-inferred type
+// was its only producer). Ex3 adds ast.FuncType, a real `fn(...) -> R`
+// type-annotation grammar — resolveTypeExpr's *ast.FuncType case is now a
+// second producer, always converging on this identical encoding, so every
+// existing consumer (funcTypeParts, codegen's own copy, map/filter/reduce/
+// sortBy's resolvers) needed no changes at all: a canonical Func string
+// means the same thing and decodes the same way regardless of which
+// syntax wrote it.
 //
 // Pi/R were assumed scalar-only when step 5 wrote this (a ClosureLit's
 // own params/return are indeed always scalar), but step 11's map/filter/
@@ -133,11 +136,41 @@ func isFuncType(t string) bool {
 	return strings.HasPrefix(t, "fn(")
 }
 
+// funcTypeParts's own ")->" params/return separator needs the identical
+// depth-aware treatment splitTopLevelCommas already gives commas — found
+// the hard way (examples/higher_order_functions.aml's `compose`, ex3's
+// examples expansion, actually run through the full amivm -> go build ->
+// execute pipeline, not caught by inspection): once a param can itself be
+// a Func type (`fn(g: fn(Int)->Int, x: Int) -> Int`, ex3's whole point),
+// the canonical string becomes "fn(fn(Int64)->Int64,Int64)->Int64" — a
+// naive strings.Index(t, ")->") finds the *inner* Func type's own ")->"
+// first (right after its single param's closing paren), silently
+// truncating paramsRaw to just that inner Func type and handing back a
+// bogus ret starting mid-string. The fix walks the string tracking paren
+// depth (exactly splitTopLevelCommas's own technique) and only accepts a
+// ")->" match once depth has returned all the way to 0 — the point that's
+// always exactly the outermost "fn(...)"'s own closing paren, however deep
+// a nested Func-typed param's own parens go.
 func funcTypeParts(t string) (params []string, ret string, ok bool) {
 	if !isFuncType(t) {
 		return nil, "", false
 	}
-	sep := strings.Index(t, ")->")
+	sep := -1
+	depth := 0
+	for i := 0; i < len(t); i++ {
+		switch t[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && i+2 < len(t) && t[i+1] == '-' && t[i+2] == '>' {
+				sep = i
+			}
+		}
+		if sep >= 0 {
+			break
+		}
+	}
 	if sep < 0 {
 		return nil, "", false
 	}
