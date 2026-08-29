@@ -145,12 +145,13 @@ type StreamType struct {
 // function-type minting included) needs to tell them apart.
 //
 // An inline ClosureLit literal still may only appear as a `let`'s direct
-// value (unchanged from step 5 — see ClosureLit's own doc comment); what's
-// new is that such a `let` may now optionally carry a matching FuncType
-// annotation (previously rejected unconditionally, since no grammar
-// existed to write one), and that a Func-typed value — whether a `let`-
-// bound closure or a bare top-level `fn` reference — can now flow through
-// any position an ordinary value can: a call argument, a function
+// value, plus one further carve-out since ex4 (a `|>` pipe's right-hand
+// side, CallExpr.InlineClosure — see both doc comments); what's new here
+// (ex3) is that a `let` binding one may now optionally carry a matching
+// FuncType annotation (previously rejected unconditionally, since no
+// grammar existed to write one), and that a Func-typed value — whether a
+// `let`-bound closure or a bare top-level `fn` reference — can now flow
+// through any position an ordinary value can: a call argument, a function
 // parameter, a function's own return value.
 type FuncType struct {
 	Params []TypeExpr
@@ -478,26 +479,47 @@ type IdentExpr struct {
 }
 
 // CallExpr is a function call `callee(args...)` (amifl-spec.md section 8).
-// Callee is always a bare name — never an arbitrary expression — resolved
-// by sema to exactly one of: the built-in `print` (Callee == "print",
-// handled as its own special case throughout, unchanged since step 1 —
-// the general built-in function library arrives in step 11), a top-level
-// `fn`, or a local closure-valued variable (CalleeToken set; a local
-// binding shadows a same-named top-level `fn`, mirroring how a `let`
-// already shadows a top-level `const` — see sema's resolveCallExpr).
-// AmiFL has no syntax for calling the result of an arbitrary expression
-// (`(fn(x: Int) -> Int { x })(5)` isn't reachable — parseIdentOrCall only
-// ever produces a CallExpr from a bare identifier), so Callee never needs
-// to generalize beyond a name. Step 9's `|>` (amifl-spec.md section 9) is
-// the one other producer of this node: `a |> f`/`a |> f(_, b)` desugar at
-// parse time straight into a CallExpr exactly as if the user had written
+// Callee is a bare name — never an arbitrary expression — resolved by sema
+// to exactly one of: the built-in `print` (Callee == "print", handled as
+// its own special case throughout, unchanged since step 1 — the general
+// built-in function library arrives in step 11), a top-level `fn`, or a
+// local closure-valued variable (CalleeToken set; a local binding shadows a
+// same-named top-level `fn`, mirroring how a `let` already shadows a
+// top-level `const` — see sema's resolveCallExpr). AmiFL still has no
+// syntax for calling the result of an arbitrary *general* expression
+// (`(someExpr)(5)` isn't reachable — parseIdentOrCall only ever produces a
+// CallExpr from a bare identifier), so Callee itself never needs to
+// generalize beyond a name. Step 9's `|>` (amifl-spec.md section 9) is the
+// one other producer of this node: `a |> f`/`a |> f(_, b)` desugar at parse
+// time straight into a CallExpr exactly as if the user had written
 // `f(a)`/`f(a, b)` by hand (parser's parsePipeRHS) — sema and codegen
 // never know a pipe was involved at all, requiring no code of their own
 // for the common case (CLAUDE.md's design-issue-7 prediction).
+//
+// InlineClosure is `|>`'s *other* producer (ex4, amifl-spec.md section 9:
+// `data |> fn(x) -> R {...}`) — the one shape where Callee genuinely isn't
+// a name at all: parsePipeRHS sets InlineClosure instead of Callee when the
+// pipe's right-hand side is a bare `fn(...)->R{...}` literal rather than an
+// existing name, and leaves Callee as the display-only placeholder
+// "<closure>" (pipeChainLabel's own convention for a labelless stage,
+// reused here since the real callee has no name to show). This is
+// deliberately narrower than "a ClosureLit anywhere a value can go" —
+// ClosureLit's own doc comment's restriction to a `let`'s direct value is
+// otherwise unchanged; only this one additional position (pipe RHS) is
+// carved out, reachable only through this field, never by relaxing
+// resolveType's general ClosureLit rejection. sema's resolveCallExpr
+// resolves InlineClosure via the same resolveClosureLit used for a `let`
+// (checkCallArgs then validates Args — always exactly [lhs] — against the
+// closure's own inferred parameter types, giving the same stage-numbered
+// pipeline diagnostic, amifl-spec.md section 9.1, as any other pipe stage
+// for free); codegen's calleeToken mints the closure into a fresh temp via
+// genClosureLitInto and calls through that token, exactly as if the user
+// had first `let`-bound it and then piped into the name.
 type CallExpr struct {
-	Callee string
-	Args   []Expr
-	Line   int
+	Callee        string
+	InlineClosure *ClosureLit
+	Args          []Expr
+	Line          int
 	// TypeArg is the bracketed type argument for the four reserved generic
 	// builtins `cast[T]`/`parse[T]`/`unwrap[T]`/`okOr[T]` (amifl-spec.md
 	// sections 13.3/13.9) — nil for every other call, including a call to a
@@ -588,9 +610,13 @@ type CallExpr struct {
 // value — never a call argument, an if/while condition, a binary operand,
 // or any other position (sema's resolveType's default *ast.ClosureLit
 // case rejects it there with a clear message; resolveLetExpr is the sole
-// place that recognizes and accepts one) — passing an inline closure
-// literal directly (e.g. as a call argument) remains future work, tracked
-// separately from ex3. A `let` binding a ClosureLit may now optionally
+// place that recognizes and accepts one) — with exactly one further
+// carve-out since ex4: a `|>` pipe's right-hand side (CallExpr.
+// InlineClosure's own doc comment), reached through a dedicated field
+// rather than by relaxing this general rule. Passing an inline closure
+// literal directly as an ordinary call argument remains future work,
+// tracked separately from both ex3 and ex4. A `let` binding a ClosureLit
+// may now optionally
 // carry a matching FuncType annotation (FuncType's own doc comment) —
 // sema checks it against the closure's self-inferred signature rather
 // than rejecting it outright, since ex3 gives AmiFL a real grammar to

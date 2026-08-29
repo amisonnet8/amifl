@@ -929,6 +929,95 @@ func TestGenerate_TwoClosureLitsOfSameShapeShareOneFuncType(t *testing.T) {
 	}
 }
 
+// TestGenerate_PipeInlineClosureMintsClosureThenCallsThroughItsToken covers
+// ex4's calleeToken branch: a CallExpr with InlineClosure set (the shape
+// parser.parsePipeRHS produces for `x |> fn(v) -> R {...}`) mints the
+// closure into a fresh temp via genClosureLitInto — VAR+CLOS...ENDCLOS,
+// exactly as a `let`-bound closure would — and then calls through that
+// same temp token, rather than through any pre-existing binding.
+func TestGenerate_PipeInlineClosureMintsClosureThenCallsThroughItsToken(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "a", Token: "%a_1", ResolvedType: "Int64", Value: &ast.CallExpr{
+			InlineClosure: &ast.ClosureLit{
+				Params:             []ast.Param{{Name: "v", Type: nt("Int"), ResolvedType: "Int64"}},
+				ReturnType:         nt("Int"),
+				ResolvedReturnType: "Int64",
+				ResolvedType:       "fn(Int64)->Int64",
+				Body: &ast.Block{Exprs: []ast.Expr{
+					&ast.BinaryExpr{Op: "+", ResolvedType: "Int64",
+						Left:  &ast.IdentExpr{Name: "v", ResolvedType: "Int64", Token: "&1-1"},
+						Right: &ast.IntLit{Value: 1},
+					},
+				}},
+			},
+			Args:         []ast.Expr{&ast.IntLit{Value: 5}},
+			ResolvedType: "Int64",
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"VAR\t%amifl_tmp1\t^AmiflFunc1",
+		"CLOS\t%amifl_tmp1\t^int64\t:\t^int64",
+		"ENDCLOS",
+		// The closure body's own temp (the ADD result) is minted first —
+		// amifl_tmp2 — so the CALL result that follows ENDCLOS lands on
+		// amifl_tmp3, not amifl_tmp2.
+		"CALL\t%amifl_tmp3\t:\t%amifl_tmp1\t5",
+		"SET\t%a_1\t%amifl_tmp3",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+// TestGenerate_PipeInlineClosureSharesFuncTypeWithOrdinaryClosureLit
+// confirms the ex3 shared, deduplicated funcGoTypeName cache (locked in by
+// TestGenerate_TwoClosureLitsOfSameShapeShareOneFuncType for two `let`-bound
+// closures) applies identically when one of the two producers is instead an
+// ex4 inline pipe closure reached through calleeToken rather than
+// genLetStmt — both routes fall through to the same genClosureLitInto, so
+// there is only one code path here to potentially diverge, but this locks
+// in that it doesn't.
+func TestGenerate_PipeInlineClosureSharesFuncTypeWithOrdinaryClosureLit(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "square", Token: "%square_1", Value: &ast.ClosureLit{
+			Params:             []ast.Param{{Name: "x", Type: nt("Int"), ResolvedType: "Int64"}},
+			ReturnType:         nt("Int"),
+			ResolvedReturnType: "Int64",
+			ResolvedType:       "fn(Int64)->Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.IdentExpr{Name: "x", ResolvedType: "Int64", Token: "&1-1"},
+			}},
+		}},
+		&ast.DiscardExpr{Value: &ast.CallExpr{
+			InlineClosure: &ast.ClosureLit{
+				Params:             []ast.Param{{Name: "v", Type: nt("Int"), ResolvedType: "Int64"}},
+				ReturnType:         nt("Int"),
+				ResolvedReturnType: "Int64",
+				ResolvedType:       "fn(Int64)->Int64",
+				Body: &ast.Block{Exprs: []ast.Expr{
+					&ast.IdentExpr{Name: "v", ResolvedType: "Int64", Token: "&1-1"},
+				}},
+			},
+			Args:         []ast.Expr{&ast.IntLit{Value: 5}},
+			ResolvedType: "Int64",
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if strings.Count(ir, "FNTYPE") != 1 {
+		t.Errorf("expected exactly one FNTYPE shared by both closures; got:\n%s", ir)
+	}
+}
+
 // TestGenerate_TopLevelFnReferencedAsValueEmitsFuncval covers ex3's
 // genFuncRefValue: a bare reference to a top-level `fn` (sema's
 // resolveIdentExpr sets IsFuncRef, leaving FuncRefCallee "" — codegen

@@ -530,7 +530,23 @@ func (g *gen) genCallValue(c *ast.CallExpr) (string, error) {
 // name here directly, substituting the internal entry-point name for
 // "main" (ast.CallExpr.CalleeToken's doc comment explains why this
 // substitution lives here rather than in sema).
+//
+// c.InlineClosure (ex4) is checked first — there is no pre-existing
+// binding token to hand back for it at all, unlike every other case here,
+// so this mints one on the spot: a fresh temp var, filled in by
+// genClosureLitInto exactly the way genLetStmt fills in a `let`'s own
+// token, then used as the callname immediately after. This is the only
+// place genClosureLitInto is ever invoked with a temp rather than a
+// `let`'s pre-computed token — see closure.go's own doc comment on why
+// that function doesn't care which kind of token it's given.
 func (g *gen) calleeToken(c *ast.CallExpr) (string, error) {
+	if c.InlineClosure != nil {
+		tmp := g.newTemp()
+		if err := g.genClosureLitInto("%"+tmp, c.InlineClosure); err != nil {
+			return "", err
+		}
+		return "%" + tmp, nil
+	}
 	if c.CalleeToken != "" {
 		return c.CalleeToken, nil
 	}

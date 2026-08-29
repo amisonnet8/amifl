@@ -252,7 +252,30 @@ func (fc *funcChecker) resolveIdentExpr(v *ast.IdentExpr) (string, error) {
 // "ローカルクロージャー"), then top-level `fn`s (step 5's "トップレベル
 // fn") — mirroring how a local `let`/`const` already shadows a top-level
 // `const` of the same name (funcChecker.lookup).
+//
+// InlineClosure (ex4, a `|>` pipe's inline-closure RHS — CallExpr's own
+// doc comment) is checked first and short-circuits all of that: there is
+// no Callee name to look up at all here, just a closure literal to
+// type-check directly via the exact same resolveClosureLit a `let` uses.
+// checkCallArgs then validates Args (always exactly [lhs], set by
+// parsePipeRHS) against the closure's own freshly-inferred parameter
+// types — reusing checkCallArgs rather than hand-rolling a 1-argument
+// check also means this gets amifl-spec.md section 9.1's stage-numbered
+// pipeline diagnostic for free, exactly like any other pipe stage, since
+// checkCallArgs already routes each argument through checkExprPipeAware.
 func (fc *funcChecker) resolveCallExpr(v *ast.CallExpr) (string, error) {
+	if v.InlineClosure != nil {
+		typ, err := fc.resolveClosureLit(v.InlineClosure)
+		if err != nil {
+			return "", err
+		}
+		params, ret, _ := funcTypeParts(typ)
+		if err := fc.checkCallArgs(v, params); err != nil {
+			return "", err
+		}
+		v.ResolvedType = ret
+		return ret, nil
+	}
 	if v.Callee == "print" {
 		if len(v.Args) != 1 {
 			return "", fmt.Errorf("line %d: print expects exactly 1 argument, got %d", v.Line, len(v.Args))

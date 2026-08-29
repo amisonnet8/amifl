@@ -1157,6 +1157,49 @@ func TestParse_PipeChainIsLeftAssociative(t *testing.T) {
 	}
 }
 
+func TestParse_PipeInlineClosureRHS(t *testing.T) {
+	src := "fn main() -> Int {\n    let a = x |> fn(v: Int) -> Int { v + 1 }\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	call, ok := let.Value.(*ast.CallExpr)
+	if !ok || call.InlineClosure == nil || call.Callee != "<closure>" {
+		t.Fatalf("got %#v, want CallExpr{InlineClosure: non-nil, Callee: \"<closure>\"}", let.Value)
+	}
+	if len(call.Args) != 1 {
+		t.Fatalf("got %d args, want exactly 1 (lhs)", len(call.Args))
+	}
+	arg, ok := call.Args[0].(*ast.IdentExpr)
+	if !ok || arg.Name != "x" {
+		t.Fatalf("got arg %#v, want IdentExpr{Name: \"x\"}", call.Args[0])
+	}
+	if len(call.InlineClosure.Params) != 1 || call.InlineClosure.Params[0].Name != "v" {
+		t.Fatalf("got closure params %#v, want a single param named \"v\"", call.InlineClosure.Params)
+	}
+}
+
+func TestParse_PipeInlineClosureChainsWithNamedStages(t *testing.T) {
+	// `x |> f |> fn(v) -> R {...}` — an inline closure stage following an
+	// ordinary named-callee stage, exercising parsePipeExpr's chain-collection
+	// loop with a mix of both RHS shapes.
+	src := "fn main() -> Int {\n    let a = x |> f |> fn(v: Int) -> Int { v }\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	outer, ok := let.Value.(*ast.CallExpr)
+	if !ok || outer.InlineClosure == nil {
+		t.Fatalf("got outer %#v, want CallExpr{InlineClosure: non-nil}", let.Value)
+	}
+	inner, ok := outer.Args[0].(*ast.CallExpr)
+	if !ok || inner.Callee != "f" || inner.InlineClosure != nil {
+		t.Fatalf("got inner %#v, want ordinary CallExpr{Callee: \"f\"}", outer.Args[0])
+	}
+}
+
 func TestParse_RangeExprHalfOpenAndInclusive(t *testing.T) {
 	src := "fn main() -> Int {\n    let a = 0..10\n    let b = 0..=10\n    0\n}\n"
 	f, err := Parse(src)

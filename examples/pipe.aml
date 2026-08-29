@@ -29,5 +29,22 @@ fn main() -> Int {
     let tapped = 7 |> tap(_, "seven")
     let peeked = peek(9)
 
-    a + b + c + s1 + s2 + tapped + peeked
+    // ex4: an inline closure literal directly as a pipe's right-hand
+    // side (amifl-spec.md section 9) — lhs becomes the closure's sole
+    // argument, exactly like `|> double` above but without needing a
+    // name in scope for a one-off transformation.
+    let d = 5 |> fn(x: Int) -> Int { x * x }
+
+    // Chains freely with an ordinary named stage on either side.
+    let e = 5 |> double |> fn(x: Int) -> Int { x + 1 }
+
+    // Also usable inside for...yield's own piped yield expression.
+    let squared = for x in nums yield x |> fn(v: Int) -> Int { v * v }
+    let s3 = sum(squared)
+
+    // Unit-returning inline closure used purely for effect (statement
+    // position, not the block's final expression).
+    3 |> fn(v: Int) -> Unit { print("inline pipe closure saw a value") }
+
+    a + b + c + s1 + s2 + tapped + peeked + d + e + s3
 }

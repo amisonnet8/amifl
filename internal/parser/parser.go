@@ -680,8 +680,12 @@ func (p *parser) parseFieldTypeList(end lexer.Kind) ([]ast.Param, error) {
 }
 
 // parseClosureLit parses `fn(params) -> R { body }` as an expression
-// (amifl-spec.md section 8.1) — reachable only from parsePrimaryExpr,
-// never from parseTopLevelDecl's statement-position `fn`, so there's no
+// (amifl-spec.md section 8.1) — reachable from parsePrimaryExpr (an
+// ordinary value position — sema still restricts what a bare ClosureLit
+// value may resolve *from* there to just a `let`'s direct value, its own
+// doc comment) and, since ex4, from parsePipeRHS (a `|>` chain's right-hand
+// side, wrapped into InlineClosure rather than left as a bare value). Never
+// reachable from parseTopLevelDecl's statement-position `fn`, so there's no
 // ambiguity between the two despite sharing the KwFn keyword.
 func (p *parser) parseClosureLit() (ast.Expr, error) {
 	kwTok, err := p.expect(lexer.KwFn)
@@ -970,16 +974,34 @@ func pipeChainLabel(e ast.Expr) string {
 // parsePipeRHS parses the right-hand side of one `|>` step, given the
 // already-parsed left-hand value lhs, and desugars the whole step directly
 // into an *ast.CallExpr (amifl-spec.md section 9) — see CallExpr's doc
-// comment. The right-hand side is always `name` or `name(args...)`
-// (CallExpr.Callee is always a bare name, never an arbitrary expression —
-// the same restriction parseIdentOrCall already enforces for an ordinary
-// call, so this doesn't introduce a new capability, just a new way to
-// reach the existing one). Section 9's other RHS form — an inline closure
-// literal receiving lhs as its sole argument — is a deliberate step 9
-// scope cut (CLAUDE.md's "確定した設計判断": revisit once a concrete need
-// appears, mirroring step 5's identical treatment of ClosureLit's other
-// restricted positions).
+// comment. Most of the time the right-hand side is `name` or
+// `name(args...)` (CallExpr.Callee is always a bare name in this case,
+// never an arbitrary expression — the same restriction parseIdentOrCall
+// already enforces for an ordinary call, so this doesn't introduce a new
+// capability, just a new way to reach the existing one).
+//
+// Since ex4, the right-hand side may instead be a bare inline closure
+// literal (`data |> fn(x) -> R {...}`) — step 9's original scope cut here
+// (CLAUDE.md's "確定した設計判断" for that step) is lifted now that ex3's
+// FuncType gives a closure's signature a name to check against, and AMIVM's
+// FUNCVAL/CLOS instructions already give codegen everything needed to mint
+// one on the spot. This is recognized by a leading `fn` keyword — no other
+// RHS form starts with one — and produces a CallExpr with InlineClosure set
+// instead of Callee (that field's own doc comment) rather than trying to
+// force a closure literal through the name-based CallExpr shape below;
+// like the plain `a |> f` case, lhs becomes the closure's sole argument
+// (amifl-spec.md section 9 doesn't offer `_`/explicit-args syntax for this
+// form — the closure's own parameter list already says everything an
+// argument list would).
 func (p *parser) parsePipeRHS(lhs ast.Expr) (ast.Expr, error) {
+	if p.cur.Kind == lexer.KwFn {
+		closExpr, err := p.parseClosureLit()
+		if err != nil {
+			return nil, err
+		}
+		lit := closExpr.(*ast.ClosureLit)
+		return &ast.CallExpr{Callee: "<closure>", InlineClosure: lit, Args: []ast.Expr{lhs}, Line: lit.Line, PipeArgIndex: 0}, nil
+	}
 	nameTok, err := p.expect(lexer.Ident)
 	if err != nil {
 		return nil, err

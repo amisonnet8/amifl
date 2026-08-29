@@ -1147,6 +1147,136 @@ func TestCheck_ClosureLitAsCallArgumentIsAnError(t *testing.T) {
 	}
 }
 
+// TestCheck_PipeInlineClosureRHSIsValid builds the CallExpr shape
+// parser.parsePipeRHS produces for `x |> fn(v: Int) -> Int { v + 1 }`
+// (InlineClosure set, Callee left at the "<closure>" display placeholder,
+// Args always exactly [lhs]) — ex4.
+func TestCheck_PipeInlineClosureRHSIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "a", Value: &ast.CallExpr{
+			Callee: "<closure>",
+			InlineClosure: &ast.ClosureLit{
+				Params:     []ast.Param{{Name: "v", Type: nt("Int")}},
+				ReturnType: nt("Int"),
+				Body: &ast.Block{Exprs: []ast.Expr{
+					&ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "v"}, Right: &ast.IntLit{Value: 1}},
+				}},
+			},
+			Args: []ast.Expr{&ast.IdentExpr{Name: "x"}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_PipeInlineClosureWrongArityIsAnError(t *testing.T) {
+	// The closure takes 2 params, but a pipe's RHS always supplies exactly
+	// 1 argument (lhs) — checkCallArgs' ordinary arity check catches this
+	// exactly as it would for any other call.
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.IntLit{Value: 5}},
+		&ast.DiscardExpr{Value: &ast.CallExpr{
+			Callee: "<closure>",
+			InlineClosure: &ast.ClosureLit{
+				Params:     []ast.Param{{Name: "a", Type: nt("Int")}, {Name: "b", Type: nt("Int")}},
+				ReturnType: nt("Int"),
+				Body:       &ast.Block{Exprs: []ast.Expr{&ast.IdentExpr{Name: "a"}}},
+			},
+			Args: []ast.Expr{&ast.IdentExpr{Name: "x"}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for an inline pipe closure declaring 2 params but receiving 1 argument")
+	}
+}
+
+// TestCheck_PipeInlineClosureStageMismatchProducesStageNumberedError mirrors
+// TestCheck_PipeStageMismatchProducesStageNumberedError but with an inline
+// closure as the mismatching stage, confirming amifl-spec.md section 9.1's
+// diagnostic covers this RHS form too (checkCallArgs routes InlineClosure's
+// arguments through checkExprPipeAware exactly like any other call).
+func TestCheck_PipeInlineClosureStageMismatchProducesStageNumberedError(t *testing.T) {
+	labels := []string{"data", "parseIt", "<closure>"}
+	stageA := &ast.CallExpr{
+		Callee: "parseIt", Args: []ast.Expr{&ast.IdentExpr{Name: "data"}},
+		PipeStage: 1, PipeArgIndex: 0, PipeChainLabels: labels,
+	}
+	stageB := &ast.CallExpr{
+		Callee: "<closure>",
+		InlineClosure: &ast.ClosureLit{
+			Params:     []ast.Param{{Name: "s", Type: nt("String")}},
+			ReturnType: nt("Int"),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
+		},
+		Args:            []ast.Expr{stageA},
+		PipeStage:       2,
+		PipeArgIndex:    0,
+		PipeChainLabels: labels,
+	}
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name: "parseIt", Params: []ast.Param{{Name: "s", Type: nt("String")}}, ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 5}}},
+		},
+		&ast.FuncDecl{
+			Name: "main", ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "data", Type: nt("String"), Value: &ast.StringLit{Value: "hi"}},
+				&ast.DiscardExpr{Value: stageB},
+				&ast.IntLit{Value: 0},
+			}},
+		},
+	}}
+	err := Check(f)
+	if err == nil {
+		t.Fatal("expected a pipeline type-mismatch error: parseIt returns Int, the inline closure expects String")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"pipeline type mismatch at stage 2 (<closure>)",
+		"pipeline: data |> parseIt |> <closure>",
+		"stage 1 (parseIt) outputs: Int64",
+		"stage 2 (<closure>) expects: String",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error message %q doesn't contain %q", msg, want)
+		}
+	}
+}
+
+// TestCheck_PipeInlineClosureBreakInsideIsAnError confirms an inline pipe
+// closure still counts as a closure boundary for break/continue (resolveCallExpr
+// routes InlineClosure through the exact same resolveClosureLit a `let`
+// uses, which saves/resets loopDepth around the body) even when a `while`
+// loop syntactically encloses the whole pipe expression.
+func TestCheck_PipeInlineClosureBreakInsideIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.WhileExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.DiscardExpr{Value: &ast.CallExpr{
+					Callee: "<closure>",
+					InlineClosure: &ast.ClosureLit{
+						Params:     []ast.Param{{Name: "v", Type: nt("Int")}},
+						ReturnType: nt("Int"),
+						Body:       &ast.Block{Exprs: []ast.Expr{&ast.BreakExpr{}}},
+					},
+					Args: []ast.Expr{&ast.IntLit{Value: 5}},
+				}},
+				&ast.BreakExpr{},
+			}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for break inside an inline pipe closure, even with an enclosing while loop")
+	}
+}
+
 func TestCheck_TopLevelFnReferencedByNameAsValueIsValid(t *testing.T) {
 	// Ex3: `let f = add` where `add` is a top-level `fn`, previously
 	// deferred (step 5's "トップレベル関数を名前で値として渡す" scope cut).
