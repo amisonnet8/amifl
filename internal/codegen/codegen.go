@@ -42,6 +42,11 @@ var goTypeNames = map[string]string{
 	// bare `VAR` declaration already produces with no further codegen
 	// needed (see errors.go's emitEarlyReturn).
 	"Error": "error",
+	// File (amifl-spec.md section 2.2, step 12) is an opaque handle around
+	// amiflrt's own FileHandle wrapper (chan_files.go) — never constructed
+	// except through 13.10's built-ins, so a bare pointer type with no
+	// AmiFL-visible fields/methods is all codegen ever needs to know.
+	"File": "*amiflrt.FileHandle",
 }
 
 // Generate lowers a sema-checked AmiFL file into AMIVM-IR text. Step 5

@@ -74,6 +74,24 @@ func (g *gen) genSliceBuiltinValue(c *ast.CallExpr) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	// Stream[T] (step 12) can't use SLICE at all — AMIVM's own SLICE
+	// instruction always generates Go's native `x[from:to]` syntax, which a
+	// channel can't be subjected to. slice(s, from, to) is composed instead
+	// as skip(s, from) |> take(_, to-from) (chan.go's genSkipStream/
+	// genTakeStream), reusing exactly the codegen the named `skip`/`take`
+	// built-ins themselves use.
+	if isStreamType(c.ArgTypes[0]) {
+		skipped, err := g.genSkipStream(targetVal, fromVal, c.ArgTypes[0], c.ArgTypes[0])
+		if err != nil {
+			return "", err
+		}
+		nTmp := g.newTemp()
+		fmt.Fprintf(g.b, "\tVAR\t%%%s\t^int64\n", nTmp)
+		fmt.Fprintf(g.b, "\tSUB\t%%%s\t%s\t%s\n", nTmp, toVal, fromVal)
+		return g.genTakeStream(skipped, "%"+nTmp, c.ArgTypes[0], c.ResolvedType)
+	}
+
 	goType := g.prog.resolveGoType(c.ResolvedType)
 	tmp := g.newTemp()
 	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, goType)

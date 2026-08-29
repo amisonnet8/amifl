@@ -96,19 +96,43 @@ type TupleType struct {
 	Line  int
 }
 
-func (*NamedType) typeExprNode() {}
-func (*ListType) typeExprNode()  {}
-func (*ArrayType) typeExprNode() {}
-func (*SetType) typeExprNode()   {}
-func (*MapType) typeExprNode()   {}
-func (*TupleType) typeExprNode() {}
+// ChanType is `Chan[Elem]` (amifl-spec.md sections 2.2/11/13.8) — step 12.
+// No comparability restriction on Elem (unlike SetType/MapType.Key) since a
+// channel's element type imposes no such requirement in Go either.
+type ChanType struct {
+	Elem TypeExpr
+	Line int
+}
 
-func (n *NamedType) Pos() int { return n.Line }
-func (n *ListType) Pos() int  { return n.Line }
-func (n *ArrayType) Pos() int { return n.Line }
-func (n *SetType) Pos() int   { return n.Line }
-func (n *MapType) Pos() int   { return n.Line }
-func (n *TupleType) Pos() int { return n.Line }
+// StreamType is `Stream[Elem]` (amifl-spec.md sections 2.2/13.8) — step 12.
+// Deliberately its own node rather than reusing ChanType even though both
+// ultimately compile to the same Go channel shape (CLAUDE.md's "確定した
+// 設計判断" for step 12): amifl-spec.md's own 17.2節#4 treats Stream[T] and
+// Chan[T] as distinct types with no implicit conversion between them,
+// mirroring Set[T]/Map[T,Bool]'s step-10 precedent of two distinct AmiFL
+// types sharing one underlying Go representation.
+type StreamType struct {
+	Elem TypeExpr
+	Line int
+}
+
+func (*NamedType) typeExprNode()  {}
+func (*ListType) typeExprNode()   {}
+func (*ArrayType) typeExprNode()  {}
+func (*SetType) typeExprNode()    {}
+func (*MapType) typeExprNode()    {}
+func (*TupleType) typeExprNode()  {}
+func (*ChanType) typeExprNode()   {}
+func (*StreamType) typeExprNode() {}
+
+func (n *NamedType) Pos() int  { return n.Line }
+func (n *ListType) Pos() int   { return n.Line }
+func (n *ArrayType) Pos() int  { return n.Line }
+func (n *SetType) Pos() int    { return n.Line }
+func (n *MapType) Pos() int    { return n.Line }
+func (n *TupleType) Pos() int  { return n.Line }
+func (n *ChanType) Pos() int   { return n.Line }
+func (n *StreamType) Pos() int { return n.Line }
 
 // TopLevelDecl is a top-level declaration: *FuncDecl or *ConstDecl.
 // AmiFL forbids top-level `let` (amifl-spec.md section 4, principle 5) —

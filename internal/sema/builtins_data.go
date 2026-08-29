@@ -74,8 +74,9 @@ func arityError(v *ast.CallExpr, want int) error {
 }
 
 // resolveLen type-checks `len(x) -> Int` (amifl-spec.md section 13.4) —
-// the Lenable capability: String, List, Array, Map, Set (Chan arrives in
-// step 12 alongside Chan[T] itself).
+// the Lenable capability: String, List, Array, Map, Set, Chan (step 12).
+// Bytes needs no separate case: it canonicalizes straight to List(UInt8)
+// (types.go's canonicalType), already covered by isListType.
 func resolveLen(fc *funcChecker, v *ast.CallExpr) (string, error) {
 	if len(v.Args) != 1 {
 		return "", arityError(v, 1)
@@ -84,8 +85,9 @@ func resolveLen(fc *funcChecker, v *ast.CallExpr) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !(t == "String" || isListType(t) || isArrayType(t) || isMapType(t) || isSetType(t)) {
-		return "", fmt.Errorf("line %d: len: unsupported type %s (must be String, List, Array, Map, or Set)", v.Line, t)
+	_, isChan := chanElemType(t)
+	if !(t == "String" || isListType(t) || isArrayType(t) || isMapType(t) || isSetType(t) || isChan) {
+		return "", fmt.Errorf("line %d: len: unsupported type %s (must be String, List, Array, Map, Set, or Chan)", v.Line, t)
 	}
 	v.ArgTypes = []string{t}
 	return "Int64", nil
@@ -100,7 +102,13 @@ func resolveLen(fc *funcChecker, v *ast.CallExpr) (string, error) {
 // here (principle 7, "可変長引数無し・名前付き引数無し"; the sugar's own
 // `_` is a parser-level token, never a real AmiFL value — ast.SliceExpr's
 // doc comment), so a user wanting an open-ended bound uses `x[a:]`/`x[:b]`
-// instead of this function.
+// instead of this function. Stream[T] (step 12) is included, unlike the
+// x[a:b] sugar (ast.SliceExpr stays List/Array/String-only, never Stream —
+// AMIVM's own SLICE instruction only ever generates Go's native `x[from:
+// to]` syntax, which a channel can't use at all): codegen's
+// genSliceBuiltinValue instead composes it from skip+take (chan.go), which
+// this named-function form's "all 3 bounds always given" contract makes
+// straightforward and the sugar's `_`-omittable-bound one doesn't.
 func resolveSlice(fc *funcChecker, v *ast.CallExpr) (string, error) {
 	if len(v.Args) != 3 {
 		return "", arityError(v, 3)
@@ -122,7 +130,10 @@ func resolveSlice(fc *funcChecker, v *ast.CallExpr) (string, error) {
 	if elem, ok := elementType(xTyp); ok {
 		return makeListType(elem), nil
 	}
-	return "", fmt.Errorf("line %d: slice: unsupported type %s (must be String, List, or Array)", v.Line, xTyp)
+	if elem, ok := streamElemType(xTyp); ok {
+		return makeStreamType(elem), nil
+	}
+	return "", fmt.Errorf("line %d: slice: unsupported type %s (must be String, List, Array, or Stream)", v.Line, xTyp)
 }
 
 // resolveAt type-checks `at(x, i) -> T` (amifl-spec.md section 13.4) —

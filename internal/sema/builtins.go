@@ -78,29 +78,32 @@ func init() {
 		"unwrap": notYetImplemented("this step's later phase (11d)", "amifl-spec.md section 13.9"),
 		"okOr":   notYetImplemented("this step's later phase (11d)", "amifl-spec.md section 13.9"),
 
-		// 13.8 チャネル・ストリーム・並列
-		"chan":     notYetImplemented("step 12", "requires Chan[T]/goroutines"),
-		"send":     notYetImplemented("step 12", "requires Chan[T]/goroutines"),
-		"recv":     notYetImplemented("step 12", "requires Chan[T]/goroutines"),
-		"spawn":    notYetImplemented("step 12", "requires Chan[T]/goroutines"),
-		"parallel": notYetImplemented("step 12", "requires Chan[T]/goroutines"),
-		"collect":  notYetImplemented("step 12", "requires Stream[T]"),
-		"take":     notYetImplemented("step 12", "requires Stream[T]"),
-		"skip":     notYetImplemented("step 12", "requires Stream[T]"),
-		"tap":      notYetImplemented("step 12", "requires Stream[T]/pipeline DX"),
-		"peek":     notYetImplemented("step 12", "requires Stream[T]/pipeline DX"),
+		// 13.8 チャネル・ストリーム・並列 (wired up in step 12; tap/peek are
+		// design issue 8's pipeline-DX features, explicitly deferred to
+		// step 15 by CLAUDE.md's implementation plan table despite living in
+		// this same spec section)
+		"chan":     resolveChan,
+		"send":     resolveSend,
+		"recv":     resolveRecv,
+		"spawn":    resolveSpawn,
+		"parallel": resolveParallel,
+		"collect":  resolveCollect,
+		"take":     resolveTakeSkip("take"),
+		"skip":     resolveTakeSkip("skip"),
+		"tap":      notYetImplemented("step 15", "amifl-spec.md design issue 8, pipeline DX"),
+		"peek":     notYetImplemented("step 15", "amifl-spec.md design issue 8, pipeline DX"),
 
-		// 13.10 ファイルI/O
-		"open":     notYetImplemented("step 12", "requires File"),
-		"close":    notYetImplemented("step 12", "requires File"),
-		"read":     notYetImplemented("step 12", "requires File"),
-		"readAll":  notYetImplemented("step 12", "requires File"),
-		"readLine": notYetImplemented("step 12", "requires File"),
-		"lines":    notYetImplemented("step 12", "requires File/Stream[T]"),
-		"write":    notYetImplemented("step 12", "requires File"),
-		"stdin":    notYetImplemented("step 12", "requires File"),
-		"stdout":   notYetImplemented("step 12", "requires File"),
-		"stderr":   notYetImplemented("step 12", "requires File"),
+		// 13.10 ファイルI/O (wired up in step 12)
+		"open":     resolveOpen,
+		"close":    resolveClose,
+		"read":     resolveRead,
+		"readAll":  resolveReadAll,
+		"readLine": resolveReadLine,
+		"lines":    resolveLines,
+		"write":    resolveWrite,
+		"stdin":    resolveStdFile,
+		"stdout":   resolveStdFile,
+		"stderr":   resolveStdFile,
 	}
 }
 

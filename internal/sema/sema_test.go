@@ -2916,3 +2916,253 @@ func TestCheck_UnwrapRejectsNonTuple2Arg(t *testing.T) {
 		t.Fatal("expected an error: unwrap(Int) — Int isn't Tuple2[T,Error]")
 	}
 }
+
+// --- step 12: Chan[T]/Stream[T]/File built-ins ---
+
+func chanIntLit(buf int) *ast.CallExpr {
+	return &ast.CallExpr{Callee: "chan", TypeArg: nt("Int"), Args: []ast.Expr{&ast.IntLit{Value: uint64(buf)}}}
+}
+
+func TestCheck_ChanLitResolvesToChanType(t *testing.T) {
+	call := chanIntLit(0)
+	f := mainFile(&ast.LetExpr{Name: "ch", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Chan(Int64)" {
+		t.Fatalf("got ResolvedType %q, want Chan(Int64)", call.ResolvedType)
+	}
+}
+
+func TestCheck_ChanWithoutTypeArgIsAnError(t *testing.T) {
+	call := &ast.CallExpr{Callee: "chan", Args: []ast.Expr{&ast.IntLit{Value: 0}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for chan(...) with no bracketed type argument")
+	}
+}
+
+func TestCheck_SendRequiresMatchingElemType(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "ch", Value: chanIntLit(0)},
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "send", Args: []ast.Expr{
+			&ast.IdentExpr{Name: "ch"}, &ast.StringLit{Value: "nope"},
+		}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: send(Chan[Int], String) — elem type mismatch")
+	}
+}
+
+func TestCheck_RecvReturnsTuple2OfElemAndBool(t *testing.T) {
+	call := &ast.CallExpr{Callee: "recv", Args: []ast.Expr{&ast.IdentExpr{Name: "ch"}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "ch", Value: chanIntLit(0)},
+		&ast.LetExpr{Name: "r", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Tuple(Int64,Bool)" {
+		t.Fatalf("got ResolvedType %q, want Tuple(Int64,Bool)", call.ResolvedType)
+	}
+}
+
+func TestCheck_RecvNonChanArgIsAnError(t *testing.T) {
+	call := &ast.CallExpr{Callee: "recv", Args: []ast.Expr{&ast.IntLit{Value: 1}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: recv(Int) — Int isn't a Chan[T]")
+	}
+}
+
+func TestCheck_SpawnRequiresZeroArgUnitClosure(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "f", Value: &ast.ClosureLit{
+			Params:     []ast.Param{{Name: "x", Type: nt("Int")}},
+			ReturnType: nt("Unit"),
+			Body:       &ast.Block{Exprs: []ast.Expr{printStr("x")}},
+		}},
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "spawn", Args: []ast.Expr{&ast.IdentExpr{Name: "f"}}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: spawn requires fn() -> Unit, got fn(Int) -> Unit")
+	}
+}
+
+func TestCheck_SpawnAcceptsZeroArgUnitClosure(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "f", Value: &ast.ClosureLit{
+			ReturnType: nt("Unit"),
+			Body:       &ast.Block{Exprs: []ast.Expr{printStr("x")}},
+		}},
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "spawn", Args: []ast.Expr{&ast.IdentExpr{Name: "f"}}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func linesOfStdin() *ast.CallExpr {
+	return &ast.CallExpr{Callee: "lines", Args: []ast.Expr{&ast.CallExpr{Callee: "stdin"}}}
+}
+
+func TestCheck_LinesReturnsStreamString(t *testing.T) {
+	call := linesOfStdin()
+	f := mainFile(&ast.LetExpr{Name: "s", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Stream(String)" {
+		t.Fatalf("got ResolvedType %q, want Stream(String)", call.ResolvedType)
+	}
+}
+
+func TestCheck_ParallelRequiresStreamArg(t *testing.T) {
+	call := &ast.CallExpr{Callee: "parallel", Args: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: parallel(Int, Int) — first argument isn't a Stream[T]")
+	}
+}
+
+func TestCheck_ParallelReturnsSameStreamType(t *testing.T) {
+	call := &ast.CallExpr{Callee: "parallel", Args: []ast.Expr{linesOfStdin(), &ast.IntLit{Value: 4}}}
+	f := mainFile(&ast.LetExpr{Name: "ps", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Stream(String)" {
+		t.Fatalf("got ResolvedType %q, want Stream(String)", call.ResolvedType)
+	}
+}
+
+func TestCheck_CollectReturnsListOfStreamElem(t *testing.T) {
+	call := &ast.CallExpr{Callee: "collect", Args: []ast.Expr{linesOfStdin()}}
+	f := mainFile(&ast.LetExpr{Name: "xs", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "List(String)" {
+		t.Fatalf("got ResolvedType %q, want List(String)", call.ResolvedType)
+	}
+}
+
+func TestCheck_TakeSkipReturnStreamType(t *testing.T) {
+	for _, name := range []string{"take", "skip"} {
+		call := &ast.CallExpr{Callee: name, Args: []ast.Expr{linesOfStdin(), &ast.IntLit{Value: 2}}}
+		f := mainFile(&ast.LetExpr{Name: "s2", Value: call}, &ast.IntLit{Value: 0})
+		if err := Check(f); err != nil {
+			t.Fatalf("Check() error for %s: %v", name, err)
+		}
+		if call.ResolvedType != "Stream(String)" {
+			t.Fatalf("%s: got ResolvedType %q, want Stream(String)", name, call.ResolvedType)
+		}
+	}
+}
+
+func TestCheck_OpenReturnsTuple2FileError(t *testing.T) {
+	call := &ast.CallExpr{Callee: "open", Args: []ast.Expr{&ast.StringLit{Value: "/tmp/x"}, &ast.StringLit{Value: "r"}}}
+	f := mainFile(&ast.LetExpr{Name: "r", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Tuple(File,Error)" {
+		t.Fatalf("got ResolvedType %q, want Tuple(File,Error)", call.ResolvedType)
+	}
+}
+
+func TestCheck_CloseReturnsError(t *testing.T) {
+	call := &ast.CallExpr{Callee: "close", Args: []ast.Expr{&ast.CallExpr{Callee: "stdin"}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Error" {
+		t.Fatalf("got ResolvedType %q, want Error", call.ResolvedType)
+	}
+}
+
+func TestCheck_WriteRequiresBytesArg(t *testing.T) {
+	call := &ast.CallExpr{Callee: "write", Args: []ast.Expr{&ast.CallExpr{Callee: "stdout"}, &ast.StringLit{Value: "nope"}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: write(File, String) — data must be Bytes (List[UInt8])")
+	}
+}
+
+func TestCheck_WriteAcceptsBytesAnnotatedListLit(t *testing.T) {
+	call := &ast.CallExpr{Callee: "write", Args: []ast.Expr{&ast.CallExpr{Callee: "stdout"}, &ast.IdentExpr{Name: "data"}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "data", Type: nt("Bytes"), Value: &ast.ListLit{Elems: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}}}},
+		&ast.LetExpr{Name: "r", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Tuple(Int64,Error)" {
+		t.Fatalf("got ResolvedType %q, want Tuple(Int64,Error)", call.ResolvedType)
+	}
+}
+
+func TestCheck_LenAcceptsChan(t *testing.T) {
+	call := &ast.CallExpr{Callee: "len", Args: []ast.Expr{&ast.IdentExpr{Name: "ch"}}}
+	f := mainFile(
+		&ast.LetExpr{Name: "ch", Value: chanIntLit(0)},
+		&ast.LetExpr{Name: "n", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_SliceOnStreamReturnsStream(t *testing.T) {
+	call := &ast.CallExpr{Callee: "slice", Args: []ast.Expr{linesOfStdin(), &ast.IntLit{Value: 0}, &ast.IntLit{Value: 2}}}
+	f := mainFile(&ast.LetExpr{Name: "s2", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Stream(String)" {
+		t.Fatalf("got ResolvedType %q, want Stream(String)", call.ResolvedType)
+	}
+}
+
+func TestCheck_ForOverStreamBindsElemType(t *testing.T) {
+	forExpr := &ast.ForExpr{
+		Var:   "line",
+		Items: &ast.IdentExpr{Name: "s"},
+		Body:  &ast.Block{Exprs: []ast.Expr{&ast.DiscardExpr{Value: &ast.IdentExpr{Name: "line"}}}},
+	}
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: linesOfStdin()},
+		forExpr,
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if forExpr.ElemType != "String" {
+		t.Fatalf("got ElemType %q, want String", forExpr.ElemType)
+	}
+}
+
+func TestCheck_ForYieldOverStreamIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Value: linesOfStdin()},
+		&ast.DiscardExpr{Value: &ast.ForExpr{
+			Var:   "line",
+			Items: &ast.IdentExpr{Name: "s"},
+			Yield: &ast.IdentExpr{Name: "line"},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: `for ... yield ...` over a Stream[T] isn't supported")
+	}
+}

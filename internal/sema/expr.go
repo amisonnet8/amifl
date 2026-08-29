@@ -1415,7 +1415,9 @@ func (fc *funcChecker) resolveSliceExpr(v *ast.SliceExpr) (string, error) {
 // form (ast.ForExpr.Var2 set — Map[K,V] iteration, Body only; see Var2's
 // doc comment for why Yield is never combined with it — the parser
 // already rejects that combination outright, so it's never seen here).
-// Single-variable Items must be a List, Array, or (step 10) Set
+// Single-variable Items must be a List, Array, (step 10) Set, or (step 12)
+// Stream[T] — a Stream is Body-form only, Yield form rejected below since it
+// has no statically-known length to preallocate a resulting List with
 // (forIterableElemType); two-variable Items must be a Map[K,V]
 // (mapKeyValueTypes) — Var binds the key, Var2 the value. Var/Var2 are
 // declared as non-reassignable bindings in their own child scope,
@@ -1457,10 +1459,22 @@ func (fc *funcChecker) resolveForExpr(v *ast.ForExpr, expected string) (string, 
 		v.Var2Type = valTyp
 		v.Var2Token = token2
 	} else {
-		elemTyp, ok := forIterableElemType(itemsTyp)
-		if !ok {
-			fc.popScope()
-			return "", fmt.Errorf("line %d: `for` requires a List, Array, or Set, got %s", v.Line, itemsTyp)
+		var elemTyp string
+		if e, ok := streamElemType(itemsTyp); ok {
+			// Stream[T] (step 12) is Body-form only — see the Yield check
+			// just below, which rejects it before ever reaching
+			// genForYieldValue's List-preallocating codegen (a Stream has no
+			// statically-known length to preallocate with, and no `?len`
+			// equivalent to even compute one at runtime — CLAUDE.md's
+			// step-12 "確定した設計判断").
+			elemTyp = e
+		} else {
+			var ok bool
+			elemTyp, ok = forIterableElemType(itemsTyp)
+			if !ok {
+				fc.popScope()
+				return "", fmt.Errorf("line %d: `for` requires a List, Array, Set, or Stream, got %s", v.Line, itemsTyp)
+			}
 		}
 		token := "%" + fc.freshInternalName(v.Var)
 		if err := fc.declare(v.Var, &binding{typ: elemTyp, token: token}); err != nil {
@@ -1472,6 +1486,10 @@ func (fc *funcChecker) resolveForExpr(v *ast.ForExpr, expected string) (string, 
 	}
 
 	if v.Yield != nil {
+		if isStreamType(itemsTyp) {
+			fc.popScope()
+			return "", fmt.Errorf("line %d: `for ... yield ...` doesn't support Stream[T] (forward-only, no known length to preallocate) — use the Body form, or collect(...)/take/skip instead", v.Line)
+		}
 		// break/continue are legal only in the Body form (amifl-spec.md
 		// section 7, "break/continueはyield無し形のみで使用可") — suppressing
 		// loopDepth here, exactly like a closure body does (resolveClosureLit),
@@ -1592,6 +1610,18 @@ func (fc *funcChecker) resolveTypeExpr(te ast.TypeExpr) (string, error) {
 			elemTypes[i] = et
 		}
 		return makeTupleType(elemTypes), nil
+	case *ast.ChanType:
+		elem, err := fc.resolveTypeExpr(t.Elem)
+		if err != nil {
+			return "", err
+		}
+		return makeChanType(elem), nil
+	case *ast.StreamType:
+		elem, err := fc.resolveTypeExpr(t.Elem)
+		if err != nil {
+			return "", err
+		}
+		return makeStreamType(elem), nil
 	default:
 		return "", fmt.Errorf("sema: unsupported type expression %T", te)
 	}

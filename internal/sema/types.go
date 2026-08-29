@@ -30,6 +30,10 @@ var scalarTypes = map[string]bool{
 	"Bool": true, "String": true,
 	// Error (amifl-spec.md section 2.2, step 11) — see isErrorType.
 	"Error": true,
+	// File (amifl-spec.md section 2.2, step 12) — an opaque handle, never
+	// constructed except via 13.10's built-ins (open/stdin/stdout/stderr).
+	// codegen's goTypeNames maps it straight to *amiflrt.FileHandle.
+	"File": true,
 }
 
 // unitType is the implicit type of a `let`/`const`/assignment/discard
@@ -47,6 +51,17 @@ const unitType = "Unit"
 // particular file — step 2 through step 5 had no such state and could get
 // away with a package-level function, but step 6's struct names can't.
 func (c *checker) canonicalType(name string) (string, bool) {
+	// Bytes (amifl-spec.md section 2.1: "可変長バイト列、List[Byte]と同じ
+	// 内部表現") isn't a scalar at all — it canonicalizes straight to
+	// List[UInt8] (makeListType below), so every capability List[T] already
+	// has (Lenable/Sliceable/Concatenable, len/slice/concat/+, and step 7's
+	// x[i]/x[i]=v/x[a:b] sugar) "just works" for Bytes too, with zero extra
+	// codegen — unlike typeAliases' scalar-to-scalar aliasing (Int -> Int64
+	// etc.), this alias target is itself a composite canonical string, so it
+	// can't live in that map and is special-cased here instead.
+	if name == "Bytes" {
+		return makeListType("UInt8"), true
+	}
 	if alias, ok := typeAliases[name]; ok {
 		name = alias
 	}
@@ -286,6 +301,49 @@ func mapKeyValueTypes(t string) (key, val string, ok bool) {
 		}
 	}
 	return "", "", false
+}
+
+// makeChanType/isChanType/chanElemType encode Chan[T] (amifl-spec.md
+// sections 2.2/11/13.8) as "Chan(T)" — T already-canonical, mirroring
+// List's identical single-element encoding convention (makeListType). No
+// comparability restriction, unlike Set[T]/Map[K,_] (isComparableKeyType) —
+// a channel's element type carries no such requirement in Go either.
+func makeChanType(elem string) string {
+	return "Chan(" + elem + ")"
+}
+
+func isChanType(t string) bool {
+	return strings.HasPrefix(t, "Chan(") && strings.HasSuffix(t, ")")
+}
+
+func chanElemType(t string) (string, bool) {
+	if !isChanType(t) {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(t, "Chan("), ")"), true
+}
+
+// makeStreamType/isStreamType/streamElemType encode Stream[T] (amifl-spec.md
+// sections 2.2/13.8) as "Stream(T)" — deliberately its own encoding rather
+// than reusing Chan(T) even though both ultimately compile to the same Go
+// channel shape (CLAUDE.md's "確定した設計判断" for step 12): amifl-spec.md
+// section 17.2#4 treats Stream[T]/Chan[T] as distinct types with no implicit
+// conversion between them, mirroring Set[T]/Map[T,Bool]'s step-10 precedent
+// (setGoTypeName's doc comment) of two AmiFL types sharing one Go
+// representation but never sharing one canonical string or CHTYPE.
+func makeStreamType(elem string) string {
+	return "Stream(" + elem + ")"
+}
+
+func isStreamType(t string) bool {
+	return strings.HasPrefix(t, "Stream(") && strings.HasSuffix(t, ")")
+}
+
+func streamElemType(t string) (string, bool) {
+	if !isStreamType(t) {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(t, "Stream("), ")"), true
 }
 
 // forIterableElemType is elementType (List/Array) plus Set (step 10) —

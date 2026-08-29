@@ -251,6 +251,10 @@ func (p *parser) parseTypeExpr() (ast.TypeExpr, error) {
 		return p.parseMapType(nameTok)
 	case "Tuple2", "Tuple3", "Tuple4", "Tuple5", "Tuple6", "Tuple7", "Tuple8":
 		return p.parseTupleType(nameTok)
+	case "Chan":
+		return p.parseChanType(nameTok)
+	case "Stream":
+		return p.parseStreamType(nameTok)
 	default:
 		return &ast.NamedType{Name: nameTok.Value, Line: nameTok.Line}, nil
 	}
@@ -326,6 +330,38 @@ func (p *parser) parseMapType(nameTok lexer.Token) (ast.TypeExpr, error) {
 		return nil, err
 	}
 	return &ast.MapType{Key: key, Value: val, Line: nameTok.Line}, nil
+}
+
+// parseChanType parses `Chan[Elem]` (amifl-spec.md sections 2.2/11/13.8) —
+// step 12.
+func (p *parser) parseChanType(nameTok lexer.Token) (ast.TypeExpr, error) {
+	if _, err := p.expect(lexer.LBracket); err != nil {
+		return nil, err
+	}
+	elem, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RBracket); err != nil {
+		return nil, err
+	}
+	return &ast.ChanType{Elem: elem, Line: nameTok.Line}, nil
+}
+
+// parseStreamType parses `Stream[Elem]` (amifl-spec.md section 2.2/13.8) —
+// step 12.
+func (p *parser) parseStreamType(nameTok lexer.Token) (ast.TypeExpr, error) {
+	if _, err := p.expect(lexer.LBracket); err != nil {
+		return nil, err
+	}
+	elem, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RBracket); err != nil {
+		return nil, err
+	}
+	return &ast.StreamType{Elem: elem, Line: nameTok.Line}, nil
 }
 
 func (p *parser) parseListType(nameTok lexer.Token) (ast.TypeExpr, error) {
@@ -1650,13 +1686,16 @@ func (p *parser) parseIdentOrCall() (ast.Expr, error) {
 }
 
 // genericBuiltinNames is the fixed set of reserved built-in names that take
-// a bracketed type argument (amifl-spec.md sections 13.3/13.9): `cast[T]`/
-// `parse[T]`/`unwrap[T]`/`okOr[T]`. Recognized only for these four reserved
-// names — see ast.CallExpr.TypeArg's doc comment for why this isn't a
-// general user-facing generics grammar. Any other identifier followed by
-// `[` is ordinary indexing (parsePostfixExpr), untouched.
+// a bracketed type argument (amifl-spec.md sections 13.3/13.8/13.9):
+// `cast[T]`/`parse[T]`/`unwrap[T]`/`okOr[T]`/`chan[T]`. Recognized only for
+// these five reserved names — see ast.CallExpr.TypeArg's doc comment for why
+// this isn't a general user-facing generics grammar. Any other identifier
+// followed by `[` is ordinary indexing (parsePostfixExpr), untouched.
+// `chan[T]` needs the bracket (unlike, say, `collect`/`take`/`skip`/
+// `parallel`) because its only argument is a plain Int buffer size — T has
+// no argument to infer from, exactly like cast[T]/parse[T].
 var genericBuiltinNames = map[string]bool{
-	"cast": true, "parse": true, "unwrap": true, "okOr": true,
+	"cast": true, "parse": true, "unwrap": true, "okOr": true, "chan": true,
 }
 
 // parseGenericTypeArgBracket consumes an optional `[Type]` immediately

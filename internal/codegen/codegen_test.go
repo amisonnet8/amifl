@@ -1905,3 +1905,234 @@ func TestGenerate_OkOrPicksDefaultOnError(t *testing.T) {
 		t.Errorf("okOr should never panic (that's unwrap's job); got:\n%s", ir)
 	}
 }
+
+// --- step 12: Chan[T]/Stream[T]/File built-ins ---
+
+func TestGenerate_ChanEmitsChtypeAndChmake(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "chan", Builtin: "chan", ResolvedType: "Chan(Int64)",
+		Args: []ast.Expr{&ast.IntLit{Value: 0}},
+	}
+	f := mainFile(&ast.LetExpr{Name: "ch", Token: "%ch_1", ResolvedType: "Chan(Int64)", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"CHTYPE\t^AmiflChan1\t^int64",
+		"VAR\t%amifl_tmp1\t^AmiflChan1",
+		"CHMAKE\t%amifl_tmp1\t^AmiflChan1\t0",
+		"SET\t%ch_1\t%amifl_tmp1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_SendEmitsChsend(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "send", Builtin: "send", ResolvedType: "Unit",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "ch", ResolvedType: "Chan(Int64)", Token: "%ch_1"}, &ast.IntLit{Value: 7}},
+		ArgTypes: []string{"Chan(Int64)", "Int64"},
+	}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := "CHSEND\t%ch_1\t7"; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+	}
+}
+
+func TestGenerate_RecvEmitsChrecvAndAssemblesTuple2(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "recv", Builtin: "recv", ResolvedType: "Tuple(Int64,Bool)",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "ch", ResolvedType: "Chan(Int64)", Token: "%ch_1"}},
+		ArgTypes: []string{"Chan(Int64)"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "r", Token: "%r_1", ResolvedType: "Tuple(Int64,Bool)", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"VAR\t%amifl_tmp1\t^int64",
+		"VAR\t%amifl_tmp2\t^bool",
+		"CHRECV\t%amifl_tmp1\t%amifl_tmp2\t%ch_1",
+		"FSET\t%amifl_tmp3\t>F0\t%amifl_tmp1",
+		"FSET\t%amifl_tmp3\t>F1\t%amifl_tmp2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_SpawnEmitsBareSpawnOfClosureToken(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "spawn", Builtin: "spawn", ResolvedType: "Unit",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "f", ResolvedType: "fn()->Unit", Token: "%f_1"}},
+		ArgTypes: []string{"fn()->Unit"},
+	}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := "SPAWN\t%f_1"; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+	}
+}
+
+func TestGenerate_TakeEmitsDeferCloseRelayClosure(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "take", Builtin: "take", ResolvedType: "Stream(String)",
+		Args: []ast.Expr{
+			&ast.IdentExpr{Name: "s", ResolvedType: "Stream(String)", Token: "%s_1"},
+			&ast.IntLit{Value: 2},
+		},
+		ArgTypes: []string{"Stream(String)", "Int64"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "tk", Token: "%tk_1", ResolvedType: "Stream(String)", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"CHTYPE\t^AmiflStream1\t^string",
+		"CHMAKE\t%amifl_tmp1\t^AmiflStream1\t0",
+		"FNTYPE\t^AmiflFunc1\t:",
+		"CLOS\t%amifl_tmp2\t:",
+		"DEFER\t?close\t%amifl_tmp1",
+		"GTE\t%amifl_tmp4\t%amifl_tmp3\t2",
+		"CHRECV\t%amifl_tmp5\t%amifl_tmp6\t%s_1",
+		"NOT\t%amifl_tmp7\t%amifl_tmp6",
+		"CHSEND\t%amifl_tmp1\t%amifl_tmp5",
+		"RET\n\tENDCLOS\n\tSPAWN\t%amifl_tmp2",
+		"SET\t%tk_1\t%amifl_tmp1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_CollectEmitsChrecvLoopWithPush(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "collect", Builtin: "collect", ResolvedType: "List(String)",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "s", ResolvedType: "Stream(String)", Token: "%s_1"}},
+		ArgTypes: []string{"Stream(String)"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "xs", Token: "%xs_1", ResolvedType: "List(String)", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"SLMAKE\t%amifl_tmp1\t^AmiflList1\t0",
+		"CHRECV\t%amifl_tmp2\t%amifl_tmp3\t%s_1",
+		"NOT\t%amifl_tmp4\t%amifl_tmp3",
+		"CALL\t%amifl_tmp1\t:\t?amiflrt.Push\t^string\t:\t%amifl_tmp1\t%amifl_tmp2",
+		"SET\t%xs_1\t%amifl_tmp1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_OpenAssemblesTuple2FromOpenFileCall(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "open", Builtin: "open", ResolvedType: "Tuple(File,Error)",
+		Args:     []ast.Expr{&ast.StringLit{Value: "/tmp/x"}, &ast.StringLit{Value: "r"}},
+		ArgTypes: []string{"String", "String"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "o", Token: "%o_1", ResolvedType: "Tuple(File,Error)", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"VAR\t%amifl_tmp1\t^*amiflrt.FileHandle",
+		"VAR\t%amifl_tmp2\t^error",
+		"CALL\t%amifl_tmp1\t%amifl_tmp2\t:\t?amiflrt.OpenFile\t\"/tmp/x\"\t\"r\"",
+		"FSET\t%amifl_tmp3\t>F0\t%amifl_tmp1",
+		"FSET\t%amifl_tmp3\t>F1\t%amifl_tmp2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_LinesEmitsRelayClosureCallingReadLineFile(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "lines", Builtin: "lines", ResolvedType: "Stream(String)",
+		Args:     []ast.Expr{&ast.IdentExpr{Name: "f", ResolvedType: "File", Token: "%f_1"}},
+		ArgTypes: []string{"File"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "s6", Token: "%s6_1", ResolvedType: "Stream(String)", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"CHTYPE\t^AmiflStream1\t^string",
+		"DEFER\t?close\t%amifl_tmp1",
+		"CALL\t%amifl_tmp3\t%amifl_tmp4\t:\t?amiflrt.ReadLineFile\t%f_1",
+		"NEQ\t%amifl_tmp5\t%amifl_tmp4\tnil",
+		"CHSEND\t%amifl_tmp1\t%amifl_tmp3",
+		"SPAWN\t%amifl_tmp2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_ForOverStreamEmitsChrecvLoop(t *testing.T) {
+	forExpr := &ast.ForExpr{
+		Var: "line", VarToken: "%line_2", ElemType: "String", ItemsType: "Stream(String)",
+		Items: &ast.IdentExpr{Name: "s", ResolvedType: "Stream(String)", Token: "%s_1"},
+		Body: &ast.Block{Exprs: []ast.Expr{
+			&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.IdentExpr{Name: "line", ResolvedType: "String", Token: "%line_2"}}},
+		}},
+	}
+	f := mainFile(forExpr, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"VAR\t%line_2\t^string",
+		"CHRECV\t%line_2\t%amifl_tmp1\t%s_1",
+		"NOT\t%amifl_tmp2\t%amifl_tmp1",
+		"IF\t%amifl_tmp2\n\tBREAK\n\tENDIF",
+		"CALL\t:\t?fmt.Println\t%line_2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_WriteAssemblesTuple2FromWriteFileCall(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "write", Builtin: "write", ResolvedType: "Tuple(Int64,Error)",
+		Args: []ast.Expr{
+			&ast.IdentExpr{Name: "f", ResolvedType: "File", Token: "%f_1"},
+			&ast.IdentExpr{Name: "data", ResolvedType: "List(UInt8)", Token: "%data_2"},
+		},
+		ArgTypes: []string{"File", "List(UInt8)"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "wr", Token: "%wr_1", ResolvedType: "Tuple(Int64,Error)", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := "CALL\t%amifl_tmp1\t%amifl_tmp2\t:\t?amiflrt.WriteFile\t%f_1\t%data_2"; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+	}
+}

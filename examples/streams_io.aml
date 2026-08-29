@@ -1,0 +1,66 @@
+fn main() -> Int {
+    let ch = chan[Int](0)
+    let worker = fn() -> Unit {
+        send(ch, 1)
+        send(ch, 2)
+        send(ch, 3)
+    }
+    spawn(worker)
+    let r1 = recv(ch)
+    let r2 = recv(ch)
+    let r3 = recv(ch)
+    let chanTotal = r1.0 + r2.0 + r3.0
+
+    let path = "/tmp/amifl_step12_test.txt"
+    let content: Bytes = [97, 98, 10, 99, 100, 10, 101, 102, 10]
+    let wf = open(path, "w")
+    let writeResult = write(wf.0, content)
+    let writtenN = writeResult.0
+    _ = close(wf.0)
+
+    let rf = open(path, "r")
+    let s = lines(rf.0)
+    let taken = take(s, 2)
+    let firstTwo = collect(taken)
+    let l0 = len(firstTwo[0])
+    let l1 = len(firstTwo[1])
+    _ = close(rf.0)
+
+    let rfSkip = open(path, "r")
+    let sSkip = lines(rfSkip.0)
+    let skipped = skip(sSkip, 1)
+    let rest = collect(skipped)
+    let l2 = len(rest[0]) + len(rest[1])
+    _ = close(rfSkip.0)
+
+    let path2 = "/tmp/amifl_step12_test2.txt"
+    let content2: Bytes = [120, 10, 121, 121, 10, 122, 122, 122, 10]
+    let wf2 = open(path2, "w")
+    _ = write(wf2.0, content2)
+    _ = close(wf2.0)
+
+    let rf2 = open(path2, "r")
+    let s2 = lines(rf2.0)
+    let ps = parallel(s2, 2)
+    let collected2 = collect(ps)
+    let parallelTotal = 0
+    for line in collected2 {
+        parallelTotal = parallelTotal + len(line)
+    }
+    _ = close(rf2.0)
+
+    let rf3 = open(path2, "r")
+    let s3 = lines(rf3.0)
+    let forStreamTotal = 0
+    for line in s3 {
+        forStreamTotal = forStreamTotal + len(line)
+    }
+    _ = close(rf3.0)
+
+    let out = stdout()
+    let msg: Bytes = [111, 107, 10]
+    let outResult = write(out, msg)
+    let outN = outResult.0
+
+    chanTotal + writtenN + l0 + l1 + l2 + parallelTotal + forStreamTotal + outN
+}

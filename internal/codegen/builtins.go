@@ -115,6 +115,34 @@ func (g *gen) genBuiltinValue(c *ast.CallExpr) (string, error) {
 		return g.genUnwrapValue(c)
 	case "okOr":
 		return g.genOkOrValue(c)
+	case "chan":
+		return g.genChanValue(c)
+	case "recv":
+		return g.genRecvValue(c)
+	case "parallel":
+		return g.genParallelValue(c)
+	case "collect":
+		return g.genCollectValue(c)
+	case "take":
+		return g.genTakeValue(c)
+	case "skip":
+		return g.genSkipValue(c)
+	case "open":
+		return g.genOpenValue(c)
+	case "close":
+		return g.genCloseValue(c)
+	case "read":
+		return g.genReadValue(c)
+	case "readAll":
+		return g.genReadAllValue(c)
+	case "readLine":
+		return g.genReadLineValue(c)
+	case "lines":
+		return g.genLinesValue(c)
+	case "write":
+		return g.genWriteValue(c)
+	case "stdin", "stdout", "stderr":
+		return g.genStdFileValue(c)
 	default:
 		return "", fmt.Errorf("codegen: built-in %q has no value-position codegen yet", c.Builtin)
 	}
@@ -140,6 +168,10 @@ func (g *gen) genBuiltinStmt(c *ast.CallExpr) error {
 		return g.genMapSetStmt(c)
 	case "delete":
 		return g.genMapDeleteStmt(c)
+	case "send":
+		return g.genSendStmt(c)
+	case "spawn":
+		return g.genSpawnStmt(c)
 	}
 	_, err := g.genBuiltinValue(c)
 	return err

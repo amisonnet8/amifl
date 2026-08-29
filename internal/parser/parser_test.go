@@ -1457,3 +1457,58 @@ func TestParse_TupleTypeArityMismatchIsAnError(t *testing.T) {
 		t.Fatal("expected an error for Tuple2[...] given 3 type arguments")
 	}
 }
+
+func TestParse_ChanTypeAnnotation(t *testing.T) {
+	src := "fn main() -> Int {\n    let ch = chan[Int](0)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	call, ok := let.Value.(*ast.CallExpr)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.CallExpr", let.Value)
+	}
+	if call.Callee != "chan" {
+		t.Fatalf("got Callee %q, want \"chan\"", call.Callee)
+	}
+	named, ok := call.TypeArg.(*ast.NamedType)
+	if !ok || named.Name != "Int" {
+		t.Fatalf("got TypeArg %#v, want *ast.NamedType{Name: \"Int\"}", call.TypeArg)
+	}
+	if len(call.Args) != 1 {
+		t.Fatalf("got %d args, want 1", len(call.Args))
+	}
+}
+
+func TestParse_StreamTypeAnnotationParsesAsNestedBracket(t *testing.T) {
+	src := "fn main() -> Int {\n    let s: Stream[String] = lines(f)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	st, ok := let.Type.(*ast.StreamType)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.StreamType", let.Type)
+	}
+	if named, ok := st.Elem.(*ast.NamedType); !ok || named.Name != "String" {
+		t.Fatalf("got Elem %#v, want NamedType{Name: \"String\"}", st.Elem)
+	}
+}
+
+func TestParse_ChanElemTypeAnnotation(t *testing.T) {
+	src := "fn main() -> Int {\n    let ch: Chan[Int] = chan[Int](0)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	ct, ok := let.Type.(*ast.ChanType)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.ChanType", let.Type)
+	}
+	if named, ok := ct.Elem.(*ast.NamedType); !ok || named.Name != "Int" {
+		t.Fatalf("got Elem %#v, want NamedType{Name: \"Int\"}", ct.Elem)
+	}
+}

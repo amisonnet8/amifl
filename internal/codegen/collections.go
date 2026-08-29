@@ -318,6 +318,9 @@ func (g *gen) genForStmt(v *ast.ForExpr) error {
 	if v.Var2 != "" {
 		return g.genForMapStmt(v, itemsVal)
 	}
+	if isStreamType(v.ItemsType) {
+		return g.genForStreamStmt(v, itemsVal)
+	}
 
 	iterVal, lenTmp := g.prepareForIteration(v, itemsVal)
 	idxTmp := g.emitIndexLoopHeader(lenTmp)
@@ -325,6 +328,29 @@ func (g *gen) genForStmt(v *ast.ForExpr) error {
 	elemGoType := g.prog.resolveGoType(v.ElemType)
 	fmt.Fprintf(g.b, "\tVAR\t%s\t^%s\n", v.VarToken, elemGoType)
 	fmt.Fprintf(g.b, "\tAGET\t%s\t%s\t%%%s\n", v.VarToken, iterVal, idxTmp)
+
+	if err := g.genStmtBlock(v.Body.Exprs); err != nil {
+		return err
+	}
+	g.b.WriteString("\tENDLOOP\n")
+	return nil
+}
+
+// genForStreamStmt lowers `for x in stream { ... }` (step 12, ast.ForExpr
+// over a Stream[T]) into a CHRECV-based drain loop — chan.go's
+// emitChanRecv/emitBreakUnlessOk, the same value+ok pair `recv`/take/skip/
+// collect all consume, rather than the index-based AGET loop every other
+// `for` shape (List/Array/Set/Map) uses (prepareForIteration/
+// emitIndexLoopHeader): a Stream has no length to index into at all.
+func (g *gen) genForStreamStmt(v *ast.ForExpr, itemsVal string) error {
+	elemGoType := g.prog.resolveGoType(v.ElemType)
+	okTmp := g.newTemp()
+
+	g.b.WriteString("\tLOOP\n")
+	fmt.Fprintf(g.b, "\tVAR\t%s\t^%s\n", v.VarToken, elemGoType)
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^bool\n", okTmp)
+	fmt.Fprintf(g.b, "\tCHRECV\t%s\t%%%s\t%s\n", v.VarToken, okTmp, itemsVal)
+	g.emitBreakUnlessOk("%" + okTmp)
 
 	if err := g.genStmtBlock(v.Body.Exprs); err != nil {
 		return err

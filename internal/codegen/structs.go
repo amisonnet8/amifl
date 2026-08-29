@@ -58,6 +58,12 @@ func (p *program) resolveGoType(t string) string {
 	if isMapType(t) {
 		return p.mapGoTypeName(t)
 	}
+	if isChanType(t) {
+		return p.chanGoTypeName(t)
+	}
+	if isStreamType(t) {
+		return p.streamGoTypeName(t)
+	}
 	if goType, ok := goTypeNames[t]; ok {
 		return goType
 	}

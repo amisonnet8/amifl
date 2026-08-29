@@ -57,6 +57,18 @@ type program struct {
 	setSeq   int
 	mapTypes map[string]string
 	mapSeq   int
+
+	// chanTypes/chanSeq and streamTypes/streamSeq back chan.go's
+	// chanGoTypeName/streamGoTypeName — step 12's Chan[T]/Stream[T], minted
+	// and reused the same deduplicated-per-shape way Set/Map are, each via
+	// its own CHTYPE (Chan[T] and a structurally-identical Stream[T] mint
+	// two separate CHTYPE declarations rather than sharing one — see
+	// streamGoTypeName's doc comment, mirroring setGoTypeName's step-10
+	// precedent for why that's fine).
+	chanTypes   map[string]string
+	chanSeq     int
+	streamTypes map[string]string
+	streamSeq   int
 }
 
 // newFuncTypeDecl emits one FNTYPE line for a closure shaped by

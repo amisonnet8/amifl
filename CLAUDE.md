@@ -204,7 +204,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 9 ✅ | パイプ演算子`|>` | `_`プレースホルダー、`for...yield`糖衣、`|>`の優先順位（最低） | （新規命令無し。糖衣構文） | 設計課題7（下記「確定した設計判断」参照） |
 | 10 ✅ | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5（下記「確定した設計判断」参照） |
 | 11 ✅ | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開。フェーズ分割で実施：11a✅（`Error`型・`?`演算子・`cast[T]`/`parse[T]`ブラケット構文・`isError`・組み込み関数dispatch基盤）→11b✅（13.4節データ操作28関数）→11c✅（13.5/13.6節Set/Map専用）→11d✅（13.7節数値・`unwrap`/`okOr`） | （`amiflrt`+ネイティブ命令の混在） | 設計課題6（capability多相の実装方式、下記「確定した設計判断」参照） |
-| 12 | ファイルI/O・`Stream[T]`・並列処理 | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣、`spawn`/`send`/`recv`/`parallel` | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` `SPAWN` `SEL` `CASESEND` `CASERECV` `DEFAULT` `ENDSEL` `DEFER` | — |
+| 12 ✅ | ファイルI/O・`Stream[T]`・並列処理 | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣、`spawn`/`send`/`recv`/`parallel` | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` `SPAWN` `DEFER`（`SEL`系は結局不要だった——下記「確定した設計判断」参照） | — |
 | 13 | `extern`機構 | Go資産バインド（15.1〜15.4節）、`Any`型境界の実装方式確定 | `ASSERT`（要否は設計課題1による） | **設計課題1（先例無し・最大の山場の1つ）** |
 | 14 | モジュール | `import`/エイリアス/可視性/循環禁止（12節） | — | — |
 | 15 | パイプラインDX機能・CLI・配布 | `tap`/`peek`、ステージ番号付き型エラー表示、CLI（16.2節）実装、`amiflrt`の`go:embed`配布、CI | — | 設計課題8 |
@@ -603,6 +603,40 @@ Step 11着手時にユーザーと合意した設計方針（capability多相は
 **Step 11のスコープ外に残ったもの**：13.1節の`eprint`/`format`/`formatWith`/`exit`（`print`の一般化と合わせて後日まとめて実装する方針、`sema/builtins.go`にNYIプレースホルダーとして予約済み）、`typeName`（`Any`/`extern`境界が無いと実装できない、Step 13待ち）、13.8節のChan/Stream関連・13.10節のファイルI/O（Step 12待ち）。
 
 **実地検証（`amivm`→`go build`→実行）で確認した項目**：`examples/numeric_ops.aml`——`min`/`max`/`abs`/`clamp`、`Float`の`round`/`floor`/`ceil`/`sqrt`/`pow`、`parse[Int]`の成功結果を`unwrap`（ブラケット省略形）、失敗結果を`okOr[Int]`（ブラケット明示形）で処理。生成されたIRを目視確認し、`clamp`が`min`+`max`相当の2段`IF`/`ELSE`に、`pow`（Float32入力での往復キャストケースは別途codegenテストで確認）が想定どおりのCALL列に下がっていることを確認。実行結果は終了コード90（POSIXの256モジュロ込みで手計算した1114と一致：`part1=34`＋`part2=15`＋`part3=1065`）を確認。加えて、`unwrap`が実際にエラーケースで`panic`することを別の使い捨てサンプルで確認した（`panic: strconv.ParseInt: parsing "not a number": invalid syntax`、終了コード2）。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。**これでStep 11（組み込み関数・`capability`多相・`?`演算子/エラー処理）を完了した。**
+
+### `Chan[T]`と`Stream[T]`は同じ実行時表現（Goのネイティブchannel）を持つが、AMIVM側の型（`CHTYPE`宣言）としては最後まで別物として扱う（Step 12で確定）
+
+Step 10のSet[T]/Map[T,Bool]（構造的に同じGo mapだが別々の`MPTYPE`を発行する）の前例をそのまま踏襲した。`internal/sema/types.go`の`makeChanType`/`makeStreamType`はそれぞれ独立した正規化文字列（`"Chan(T)"` / `"Stream(T)"`）を発行し、`internal/codegen/chan.go`の`chanGoTypeName`/`streamGoTypeName`もそれぞれ独立した`program.chanTypes`/`program.streamTypes`キャッシュ経由で別々の`CHTYPE`を発行する——`amifl-spec.md` 17.2節#4が「`Stream[T]`と`Chan[T]`の間の暗黙変換は許可しない方向」としていることの直接の帰結で、Set/Mapのときと同じ理由（`resolveGoType`の「1つのAmiFL正規型文字列につき1つのGo型」という契約を崩さない）で一貫性を保った。`toStream(ch)`のような明示変換関数は17.2節が「未決事項・提案」として書いているだけで13節の組み込み関数一覧には無いため、実装していない。
+
+### `send`/`recv`/`chan[T]`はChan[T]専用、`take`/`skip`/`collect`/`parallel`/`lines`はStream[T]専用——両者の組み込み関数群を意図的に交差させなかった（Step 12で確定）
+
+`amifl-spec.md` 13.8節の表だけを見ると`send`/`recv`がStream[T]にも使えるように読めなくもないが、11節の文言（「`send(ch, v)` / `recv(ch)`：チャネル送受信」）が明確に「チャネル」と言っている点を根拠に、`send`/`recv`/`chan[T]`はChan[T]限定とした。副次的な理由として、**AmiFLの組み込み関数一覧に「チャネルを閉じる」ための関数が存在しない**（13.10節の`close`はFile専用）ため、ユーザーが`chan[T]`で作った生のChanは原理的に閉じられない——`recv`の`ok`フラグで終了を検出する設計が成立するのは、`lines`/`take`/`skip`/`parallel`のようにコンパイラ自身が内部的にチャネルを作り、コンパイラ自身の判断で閉じる（`DEFER ?close`）Stream[T]の関数群だけである。この非対称性を踏まえ、Stream[T]の値を`recv`で直接読もうとすると型エラーになるよう意図的に制限した——`examples/streams_io.aml`の設計時に「`take`で一部だけ消費したStreamを`recv`で覗く」というテストを最初に考えたが、この制約により実現できないと気づき、代わりに`skip`で同じ検証を行う設計に切り替えた。
+
+### `parallel(s, workers)`はNワーカーによる「ただの中継」として実装した——変換関数を取らない以上、fan-out自体の並行実行に意味がある場面（受信自体がブロッキングI/O等で重い場合）でのみ効果を持つ、という限定的な解釈で仕様の文言をそのまま実装した（Step 12で確定・仕様のグレーゾーン）
+
+`amifl-spec.md`の`parallel(s: Stream[T], workers: Int) -> Stream[T]`は変換関数を引数に取らないため、「何をNワーカーに分配するのか」が仕様の文言（「内部でN個のgoroutineへ分配する」）だけでは一意に定まらない。`amiflrt.ParallelStream[T]`（`amiflrt/streams.go`）は文字通り「N個のgoroutineがそれぞれ`in`から受信して`out`へ転送するだけ」の中継として実装した——`sync.WaitGroup`で全ワーカーの完了を待ってから`out`を閉じる、Cascadeの並行パイプライン実装が確立した定番の完了同期パターンをそのまま使った。AMIVMには同期プリミティブ（atomic/mutex相当の命令）が無いため、`parallel`だけはCLOS手組みではなくamiflrtへ切り出す必要があった（CLAUDE.md「AMIVM本体への機能要求の判断基準」基準2の直接の適用）。
+
+### Stream[T]の`take`/`skip`/`lines`はamiflrtを介さず、CLOS+DEFER+SPAWNで直接IRを手組みした——Cascadeの「関数本体先頭で無条件に`DEFER ?close`」パターンがそのまま通用した（Step 12で確定）
+
+`collect`（同期的にドレインするだけ、goroutine不要）を除く3つのStream生成系組み込み関数は、いずれも「新しいチャネルを作り、別goroutineで中継し、終わったら閉じる」という同じ形をしている。この中継ロジックをamiflrtのGo関数として書く案（`parallel`と同じ扱い）も検討したが、**AMIVMの`CLOS`はコンパイラが内部的に合成するクロージャーをIRとして直接書き出す用途にも普通に使える**（ユーザーの`ast.ClosureLit`を経由する必要が無い）と気づき、`CHRECV`/`CHSEND`/`LOOP`/`BREAK`/`DEFER`という既存命令だけで実装できた——新しいamiflrt関数もAMIVM本体への機能要求も不要だった。`chan.go`の`beginRelayClosure`/`endRelayClosure`ヘルパーがこのパターン（`DEFER ?close`を先頭に無条件発行→本体ループ→`RET`+`ENDCLOS`+`SPAWN`）を共通化している。`skip(s, n)`だけは「n個読み捨ててから残りを転送する」という2フェーズの都合上、AMIVMの`LOOP`/`BREAK`を2つ使う素直な実装になった（`exhaustedTmp`フラグで、スキップ中にsが閉じた場合に2つ目のループを丸ごとスキップする）。
+
+### `slice(s, from, to)`（Stream[T]版）は`skip`+`take`の合成として実装し、`x[a:b]`構文糖衣（`ast.SliceExpr`）はStream非対応のまま据え置いた（Step 12で確定）
+
+`amifl-spec.md` 2.3節のSliceable capability表はStream[T]を含んでいるが、AMIVMの`SLICE`命令はGoのネイティブ`x[from:to]`構文しか生成できず、チャネルには適用できない。名前付き関数形の`slice(x,from,to)`（13.4節）は3引数を常に取る契約（`_`省略形が無い）なので、`internal/codegen/builtins_data.go`の`genSliceBuiltinValue`が`isStreamType`分岐で`chan.go`の`genSkipStream`→`genTakeStream`を直接呼び出す形で合成できた。一方`x[a:b]`糖衣（Step 7で確立、SLICE命令に直結）はStream対応に拡張しなかった——専用ASTノード`ast.SliceExpr`のsemaリゾルバは引き続きList/Array/Stringのみを受理する。理由は実装コストの問題ではなく、`x[a:b]`という記法が「ランダムアクセス可能なコレクションの部分列」という直感を強く持つのに対し、Streamは前方一方向・遅延という別の性質を持つため、`slice(s,a,b)`という明示的な関数呼び出しの方が「これは`skip`+`take`の糖衣である」という実態を正しく示せる、という判断による。
+
+### `for x in stream { ... }`はBody形のみ対応、`for x in stream yield ...`はコンパイルエラーにした（Step 12で確定）
+
+`for...yield`（Step 9）の既存実装は`?len`で事前に長さを取得してから`SLMAKE`で結果Listを事前確保する設計だが、Streamには静的に既知の長さが無い（`Chan[T]`のLenable capabilityが返すのは「現在バッファされている個数」であって「残り総数」ではない）。`internal/sema/expr.go`の`resolveForExpr`は、Items型がStream[T]の場合にBody形（`ast.ForExpr.Body`）は許可しつつ、Yield形（`ast.ForExpr.Yield`）は明示的なエラーメッセージで拒否する——動的な再確保（`amiflrt.Push`をループ内で呼ぶ）で実現すること自体は可能だが、`collect(s) |> map(...)`という既存の組み合わせで同じことができるため、`for...yield`をStreamにまで一般化する具体的な必要性が無いと判断し、意図的なスコープ限定とした（Step 6のネストしたTupleカット等と同種の判断）。Body形のcodegen（`internal/codegen/collections.go`の`genForStreamStmt`）は、List/Array/Set/Map用のインデックスベースループ（`prepareForIteration`/`emitIndexLoopHeader`）とは別の、`CHRECV`+`NOT`+`IF`+`BREAK`によるチャネル終了検出ループとして実装した。
+
+### `Bytes`はStep 11で予約だけされていた型名を、`List[UInt8]`への完全なエイリアスとして実装した——実行時表現・組み込み関数対応のいずれにも専用コードを一切追加していない（Step 12で確定）
+
+`amifl-spec.md` 2.1節の「Bytes（可変長バイト列、List[Byte]と同じ内部表現）」という文言を字義通りに取り、`internal/sema/types.go`の`canonicalType`が識別子`"Bytes"`を`makeListType("UInt8")`へ直接読み替える（`Int`→`Int64`のようなスカラーエイリアス表`typeAliases`とは別の特別扱い——エイリアス先がスカラーではなく複合型のため）。この結果、`len`/`slice`/`concat`/`+`（Concatenable）・`x[i]`/`x[a:b]`糖衣など、List[T]が既に持っている全ての機能が`Bytes`へも無償で及ぶ——`resolveGoType`/`isListType`ベースの分岐にBytesを特別扱いする条件を1つも追加していない。トレードオフとして、AmiFLの型エラーメッセージに`Bytes`ではなく`List(UInt8)`と表示される場面がある（ユーザー体験上はやや理想的でないが、実害は無いと判断し許容した）。String→Bytesの変換関数は13節の組み込み関数一覧に無いため実装していない（`write`へ渡す`Bytes`値は、目的のバイト列をリテラルの数値並びとして`List[UInt8]`型注釈付きで書くしかない——実用上の制約として残るが、仕様が要求する範囲を超えるため先送りした）。
+
+### `File`は`*amiflrt.FileHandle`という不透明ポインタ型として実装した——構造体のフィールドをAmiFLへ一切公開しない（Step 12で確定）
+
+`amifl-spec.md` 2.2節の「不透明なファイルハンドル、フィールド・メソッド無し」という制約を、`internal/codegen/codegen.go`の`goTypeNames["File"] = "*amiflrt.FileHandle"`という1行の追加で満たした——`File`はStep6のstruct等とは異なり`STTYPE`/`FIELD`をAmiFL側で発行しない（`amiflrt/file.go`が定義する、AmiFLからは中身の見えないGo構造体をそのままポインタとして持ち回るだけ）。`FileHandle`は`*os.File`と遅延初期化の`*bufio.Reader`を持ち、`readLine`/`lines`のバッファリング読み取りに使う。`readLine`/`lines`の行末処理は`\n`（と、CRLFファイル対応で末尾の`\r`も）を毎回トリムする——「行の値そのものに終端記号は含まれない」という一般的な行指向読み取りの直感に合わせた。
+
+**実地検証（`amivm`→`go build`→実行、`-race`ビルドでの複数回実行も含む）で確認した項目**：`examples/streams_io.aml`——`chan[Int]`+`send`/`recv`+`spawn`によるgoroutine間の値の受け渡し、`open`/`write`/`close`によるファイル書き込み、`lines`でStream化したファイルを`take`で先頭2行だけ取り出し`collect`でListへ、別途`skip`で残りを読み飛ばして`collect`、`parallel`によるNワーカー中継後の`collect`（要素順序に依存しない集計方法で検証）、`for line in stream { ... }`（Body形）、`write(stdout(), ...)`。生成されたIRを目視確認し、`take`/`skip`/`lines`がいずれも`CLOS`+`DEFER ?close`+`SPAWN`の中継として、`collect`が`amiflrt.Push`を使う同期ループとして、`parallel`が`amiflrt.ParallelStream`への単純なCALLとして下がっていることを確認。実行結果は終了コード38（`chanTotal(6)+writtenN(9)+l0+l1(4)+l2(4)+parallelTotal(6)+forStreamTotal(6)+outN(3)=38`という手計算と一致）を、通常ビルドと`go build -race`ビルドの両方で5回ずつ実行し、常に同じ終了コード・データ競合の報告無しで再現することを確認した。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。**これでStep 12（ファイルI/O・`Stream[T]`・並列処理）を完了した。**
 
 ## 開発の進め方
 
