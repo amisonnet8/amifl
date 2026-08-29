@@ -60,50 +60,100 @@ var goTypeNames = map[string]string{
 	"Any": "any",
 }
 
-// Generate lowers a sema-checked AmiFL file into AMIVM-IR text. Step 5
-// generalizes this from "compile the single `fn main`" to "compile every
-// top-level `fn`" — each becomes its own FUNC/ENDFUNC block (main's own
-// under its internal entryFunc name, same as before), in file order.
+// Unit is one package's own merged top-level declarations plus the
+// mechanical rename prefix (amifl-spec.md section 12.4) codegen must give
+// every one of them — step 14. "" for the root package, whose own
+// declarations are never renamed ("ルートパッケージ自身の宣言には、この
+// 名前の書き換えを行わない"); any other package's own canonical alias plus
+// "_" otherwise (see ast.ImportDecl's doc comment on how that alias is
+// chosen). Decls is every file in that package concatenated (section
+// 12.1's "同じディレクトリに置かれた.amlファイル群は…1つのパッケージ" —
+// files within one package share a flat namespace with no import needed,
+// so there is nothing left for codegen to tell them apart by the time they
+// reach this point).
+type Unit struct {
+	Prefix string
+	Decls  []ast.TopLevelDecl
+}
+
+// Generate lowers a single sema-checked AmiFL file into AMIVM-IR text —
+// the step 1-13 entry point, kept exactly as every existing caller (and
+// the whole codegen_test.go suite) already uses it: a single-file program
+// is just GenerateProgram's one-Unit, empty-prefix case.
 func Generate(f *ast.File) (string, error) {
-	main := findMain(f)
-	if main == nil {
-		return "", fmt.Errorf("codegen: no fn main (sema should have rejected this)")
+	return GenerateProgram([]Unit{{Decls: f.Decls}})
+}
+
+// GenerateProgram is Generate generalized to step 14's multi-package
+// programs (amifl-spec.md section 12.4: "複数ファイル・複数パッケージは…
+// 1つのプログラムへ静的に統合される") — every Unit compiles into one shared
+// AMIVM-IR output, sharing one `program`'s synthesized shape-keyed type
+// caches (tupleTypes etc.) across all of them so a List[Int]/Tuple2[...]/
+// etc. flowing across a step-14 qualified call still resolves to the same
+// Go type on both ends (program's own pkgPrefix doc comment) — only
+// user-declared struct/enum/fn names are ever prefixed per-unit. Exactly
+// one Unit must have Prefix == "" (the root package) and must itself
+// contain `fn main` — modloader.Load/sema.CheckPackage are what guarantee
+// this by construction before Generate ever runs.
+func GenerateProgram(units []Unit) (string, error) {
+	rootIdx := -1
+	for i, u := range units {
+		if u.Prefix == "" {
+			rootIdx = i
+			break
+		}
+	}
+	if rootIdx < 0 || findMain(units[rootIdx].Decls) == nil {
+		return "", fmt.Errorf("codegen: no fn main in the root package (sema should have rejected this)")
 	}
 
 	prog := &program{}
-	// User `struct`/`enum` declarations are emitted first, ahead of every
-	// function body — see genStructDecl's/genEnumDecl's doc comments. Every
-	// extern `type Name` (step 13) is registered into prog.externTypes here
-	// too — resolveGoType consults it before falling back to goTypeNames,
-	// mapping the AmiFL name straight to "alias.Name" with no STTYPE/FNTYPE
-	// of its own to emit (an opaque Go-native type needs no AMIVM type
-	// declaration at all, unlike every other case resolveGoType handles).
-	for _, decl := range f.Decls {
-		switch d := decl.(type) {
-		case *ast.StructDecl:
-			genStructDecl(prog, d)
-		case *ast.EnumDecl:
-			genEnumDecl(prog, d)
-		case *ast.ExternDecl:
-			for _, t := range d.Types {
-				if prog.externTypes == nil {
-					prog.externTypes = map[string]string{}
+	var funcsBuf strings.Builder
+	for _, u := range units {
+		prog.pkgPrefix = u.Prefix
+		// User `struct`/`enum` declarations are emitted first, ahead of
+		// every function body in the *same* unit — see genStructDecl's/
+		// genEnumDecl's doc comments. Every extern `type Name` (step 13) is
+		// registered into prog.externTypes here too — resolveGoType
+		// consults it before falling back to goTypeNames, mapping the
+		// AmiFL name straight to "alias.Name" with no STTYPE/FNTYPE of its
+		// own to emit (an opaque Go-native type needs no AMIVM type
+		// declaration at all, unlike every other case resolveGoType
+		// handles). A second, different package independently declaring an
+		// extern type under the same AmiFL name is a genuine step-14 edge
+		// case with no natural resolution (unlike struct/enum, an extern
+		// type carries no pkgPrefix of its own to disambiguate it by) — so
+		// this is flagged as an explicit error rather than one package's
+		// mapping silently winning.
+		for _, decl := range u.Decls {
+			switch d := decl.(type) {
+			case *ast.StructDecl:
+				genStructDecl(prog, d)
+			case *ast.EnumDecl:
+				genEnumDecl(prog, d)
+			case *ast.ExternDecl:
+				for _, t := range d.Types {
+					if prog.externTypes == nil {
+						prog.externTypes = map[string]string{}
+					}
+					goName := d.Alias + "." + t.Name
+					if existing, exists := prog.externTypes[t.Name]; exists && existing != goName {
+						return "", fmt.Errorf("codegen: extern type %q is declared as both %q and %q across different packages", t.Name, existing, goName)
+					}
+					prog.externTypes[t.Name] = goName
 				}
-				prog.externTypes[t.Name] = d.Alias + "." + t.Name
 			}
 		}
-	}
-
-	var funcsBuf strings.Builder
-	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok {
-			continue
+		for _, decl := range u.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			if err := genFuncDecl(prog, &funcsBuf, fn); err != nil {
+				return "", err
+			}
+			funcsBuf.WriteString("\n")
 		}
-		if err := genFuncDecl(prog, &funcsBuf, fn); err != nil {
-			return "", err
-		}
-		funcsBuf.WriteString("\n")
 	}
 
 	var b strings.Builder
@@ -136,16 +186,17 @@ func Generate(f *ast.File) (string, error) {
 }
 
 // ExternImportMappings returns one amivm `-i alias=path` mapping string
-// (CLAUDE.md's "amivmのインストール・呼び出し方") per extern block in f —
-// cmd/amifl/build.go appends these to the fixed amiflrt mapping it always
-// passes, so every `?alias.Xxx`/METHVAL callname genExternCallValue/
-// genExternCallStmt emit resolves deterministically regardless of whether
-// alias happens to already match the target package's own name (sema's
-// registerExternTypes has already rejected a colliding or reserved alias
-// by the time codegen ever runs, so no validation is needed here).
-func ExternImportMappings(f *ast.File) []string {
+// (CLAUDE.md's "amivmのインストール・呼び出し方") per extern block among
+// decls — cmd/amifl/build.go appends these (one call per package in the
+// program, step 14) to the fixed amiflrt mapping it always passes, so
+// every `?alias.Xxx`/METHVAL callname genExternCallValue/genExternCallStmt
+// emit resolves deterministically regardless of whether alias happens to
+// already match the target package's own name (sema's registerExternTypes
+// has already rejected a colliding or reserved alias by the time codegen
+// ever runs, so no validation is needed here).
+func ExternImportMappings(decls []ast.TopLevelDecl) []string {
 	var mappings []string
-	for _, decl := range f.Decls {
+	for _, decl := range decls {
 		if ext, ok := decl.(*ast.ExternDecl); ok {
 			mappings = append(mappings, ext.Alias+"="+ext.Path)
 		}
@@ -153,8 +204,8 @@ func ExternImportMappings(f *ast.File) []string {
 	return mappings
 }
 
-func findMain(f *ast.File) *ast.FuncDecl {
-	for _, decl := range f.Decls {
+func findMain(decls []ast.TopLevelDecl) *ast.FuncDecl {
+	for _, decl := range decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name == "main" {
 			return fn
 		}
@@ -163,17 +214,20 @@ func findMain(f *ast.File) *ast.FuncDecl {
 }
 
 // genFuncDecl emits one top-level `fn` as `FUNC !name paramType1 ... :
-// [retType] ... ENDFUNC` into out, using name (fn.Name, or entryFunc for
-// the user's own `fn main` — see entryFunc's doc comment). A Unit-
-// returning function has no result type at all in its FUNC header (Go's
-// own "func f(...) { ... }" with no result list) and its body runs
-// entirely for effect (genStmtBlock, exactly like a while body) followed
-// by a bare RET (amifl-spec.md section 2.2, Unit has no runtime value to
-// return) — every other function keeps step 1's genBlock (tail expression
-// becomes RET's operand).
+// [retType] ... ENDFUNC` into out, using name (prog.pkgPrefix+fn.Name, or
+// entryFunc for the root package's own `fn main` — see entryFunc's/
+// program.pkgPrefix's doc comments; a *non-root* package's own `main`, if
+// it has one, is just an ordinary function name like any other, mangled
+// the same way — amifl-spec.md section 12.3). A Unit-returning function
+// has no result type at all in its FUNC header (Go's own "func f(...) {
+// ... }" with no result list) and its body runs entirely for effect
+// (genStmtBlock, exactly like a while body) followed by a bare RET
+// (amifl-spec.md section 2.2, Unit has no runtime value to return) — every
+// other function keeps step 1's genBlock (tail expression becomes RET's
+// operand).
 func genFuncDecl(prog *program, out *strings.Builder, fn *ast.FuncDecl) error {
-	name := fn.Name
-	if name == "main" {
+	name := prog.pkgPrefix + fn.Name
+	if prog.pkgPrefix == "" && fn.Name == "main" {
 		name = entryFunc
 	}
 
@@ -356,7 +410,22 @@ func (g *gen) genStmt(e ast.Expr) error {
 		// sema), but a discarded non-Unit expression's tail can — e.g. the
 		// `2` ending the else-branch in the doc comment's example above.
 		return nil
-	case *ast.TupleLit, *ast.StructLit, *ast.FieldExpr,
+	case *ast.FieldExpr:
+		// Step 14's qualified function call (`alias.Name(...)`) needs its
+		// own statement-form path, exactly like genCallStmt/genCallValue's
+		// own split: a Unit-returning call has no result operand at all
+		// (amifl-spec.md section 2.2, Unit has no runtime representation),
+		// so it can never be routed through genValue, whose contract always
+		// hands back a value token. Every other FieldExpr kind (tuple/
+		// struct field access, enum variant construction, a qualified
+		// *const* reference) is never Unit-typed, so the shared genValue
+		// path below handles those exactly as it always has.
+		if v.IsQualifiedCall {
+			return g.genQualifiedCallStmt(v)
+		}
+		_, err := g.genValue(v)
+		return err
+	case *ast.TupleLit, *ast.StructLit,
 		*ast.ListLit, *ast.SetOrMapLit, *ast.IndexExpr, *ast.SliceExpr,
 		*ast.TryExpr:
 		// Unlike the pure-value kinds above, these may themselves contain
@@ -444,8 +513,8 @@ func (g *gen) calleeToken(c *ast.CallExpr) (string, error) {
 	if c.CalleeToken != "" {
 		return c.CalleeToken, nil
 	}
-	name := c.Callee
-	if name == "main" {
+	name := g.prog.pkgPrefix + c.Callee
+	if g.prog.pkgPrefix == "" && c.Callee == "main" {
 		name = entryFunc
 	}
 	return "!" + name, nil

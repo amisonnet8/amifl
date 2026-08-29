@@ -3383,3 +3383,158 @@ func TestCheck_TypeNameWrongArgCountIsAnError(t *testing.T) {
 		t.Fatal("expected an error: typeName takes exactly 1 argument")
 	}
 }
+
+// --- step 14: modules ---
+
+// qualifiedCall builds `alias.field(args...)` (amifl-spec.md section
+// 12.2) — Args is always non-nil (a zero-length slice for a zero-arg
+// call), matching what parseFieldCallArgs itself always produces (see
+// ast.FieldExpr's own doc comment on why nil vs empty distinguishes "no
+// trailing (...) at all" from "an empty one").
+func qualifiedCall(alias, field string, args ...ast.Expr) *ast.FieldExpr {
+	sArgs := make([]ast.StructLitField, len(args))
+	for i, a := range args {
+		sArgs[i] = ast.StructLitField{Value: a}
+	}
+	return &ast.FieldExpr{Target: &ast.IdentExpr{Name: alias}, Field: field, Args: sArgs}
+}
+
+// qualifiedRef builds `alias.field` with no trailing call at all.
+func qualifiedRef(alias, field string) *ast.FieldExpr {
+	return &ast.FieldExpr{Target: &ast.IdentExpr{Name: alias}, Field: field}
+}
+
+func TestCheckPackage_BuildsExportsForCapitalizedFuncsAndConstsOnly(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{Name: "Clamp", Params: []ast.Param{{Name: "v", Type: nt("Int")}}, ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IdentExpr{Name: "v"}}}},
+		&ast.FuncDecl{Name: "helper", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}}},
+		&ast.ConstDecl{Name: "MaxClamp", Type: nt("Int"), Value: &ast.IntLit{Value: 100}},
+		&ast.ConstDecl{Name: "minClamp", Type: nt("Int"), Value: &ast.IntLit{Value: 0}},
+	}}
+	exports, err := CheckPackage([]*ast.File{f}, "mathutil_", nil)
+	if err != nil {
+		t.Fatalf("CheckPackage() error: %v", err)
+	}
+	fn, ok := exports.Funcs["Clamp"]
+	if !ok {
+		t.Fatal("expected Clamp to be exported")
+	}
+	if fn.Token != "!mathutil_Clamp" {
+		t.Fatalf("got Token %q, want \"!mathutil_Clamp\"", fn.Token)
+	}
+	if _, ok := exports.Funcs["helper"]; ok {
+		t.Fatal("did not expect lowercase helper to be exported")
+	}
+	if _, ok := exports.Consts["MaxClamp"]; !ok {
+		t.Fatal("expected MaxClamp to be exported")
+	}
+	if _, ok := exports.Consts["minClamp"]; ok {
+		t.Fatal("did not expect lowercase minClamp to be exported")
+	}
+}
+
+func TestCheckPackage_QualifiedCallResolvesToImportedFunc(t *testing.T) {
+	imports := map[string]Exports{
+		"mathutil": {Funcs: map[string]ExportedFunc{
+			"Clamp": {Params: []string{"Int64", "Int64", "Int64"}, Ret: "Int64", Token: "!mathutil_Clamp"},
+		}},
+	}
+	call := qualifiedCall("mathutil", "Clamp", &ast.IntLit{Value: 15}, &ast.IntLit{Value: 0}, &ast.IntLit{Value: 10})
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err != nil {
+		t.Fatalf("CheckPackage() error: %v", err)
+	}
+	if !call.IsQualifiedCall || call.QualifiedCallee != "!mathutil_Clamp" {
+		t.Fatalf("got IsQualifiedCall=%v QualifiedCallee=%q, want true/\"!mathutil_Clamp\"", call.IsQualifiedCall, call.QualifiedCallee)
+	}
+	if call.ResolvedType != "Int64" {
+		t.Fatalf("got ResolvedType %q, want \"Int64\"", call.ResolvedType)
+	}
+}
+
+func TestCheckPackage_QualifiedCallArityMismatchIsAnError(t *testing.T) {
+	imports := map[string]Exports{
+		"util": {Funcs: map[string]ExportedFunc{"F": {Params: []string{"Int64"}, Ret: "Int64", Token: "!util_F"}}},
+	}
+	call := qualifiedCall("util", "F", &ast.IntLit{Value: 1}, &ast.IntLit{Value: 2})
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err == nil {
+		t.Fatal("expected an arity-mismatch error")
+	}
+}
+
+func TestCheckPackage_QualifiedCallNamedArgumentIsAnError(t *testing.T) {
+	imports := map[string]Exports{
+		"util": {Funcs: map[string]ExportedFunc{"F": {Params: []string{"Int64"}, Ret: "Int64", Token: "!util_F"}}},
+	}
+	call := &ast.FieldExpr{Target: &ast.IdentExpr{Name: "util"}, Field: "F", Args: []ast.StructLitField{{Name: "x", Value: &ast.IntLit{Value: 1}}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err == nil {
+		t.Fatal("expected an error: qualified calls take positional arguments only")
+	}
+}
+
+func TestCheckPackage_UnexportedOrUnknownNameIsAnError(t *testing.T) {
+	imports := map[string]Exports{"util": {Funcs: map[string]ExportedFunc{}, Consts: map[string]ExportedConst{}}}
+	call := qualifiedCall("util", "hidden")
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err == nil {
+		t.Fatal("expected an error for an unexported/unknown qualified name")
+	}
+}
+
+func TestCheckPackage_QualifiedConstReferenceInlinesExportedValue(t *testing.T) {
+	imports := map[string]Exports{
+		"util": {Consts: map[string]ExportedConst{"Max": {Typ: "Int64", Value: &ast.IntLit{Value: 100}}}},
+	}
+	ref := qualifiedRef("util", "Max")
+	f := mainFile(ref)
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err != nil {
+		t.Fatalf("CheckPackage() error: %v", err)
+	}
+	if ref.ResolvedType != "Int64" {
+		t.Fatalf("got ResolvedType %q, want \"Int64\"", ref.ResolvedType)
+	}
+	lit, ok := ref.QualifiedConstValue.(*ast.IntLit)
+	if !ok || lit.Value != 100 {
+		t.Fatalf("got QualifiedConstValue %#v, want IntLit{100}", ref.QualifiedConstValue)
+	}
+}
+
+func TestCheckPackage_ConstCalledAsFunctionIsAnError(t *testing.T) {
+	imports := map[string]Exports{
+		"util": {Consts: map[string]ExportedConst{"Answer": {Typ: "Int64", Value: &ast.IntLit{Value: 42}}}},
+	}
+	call := qualifiedCall("util", "Answer", &ast.IntLit{Value: 1})
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err == nil {
+		t.Fatal("expected an error: a const isn't callable")
+	}
+}
+
+func TestCheckPackage_NonRootPackageOwnMainIsNotValidatedAsEntryPoint(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{Name: "main", ReturnType: nt("Bool"), Body: &ast.Block{Exprs: []ast.Expr{&ast.BoolLit{Value: true}}}},
+	}}
+	if _, err := CheckPackage([]*ast.File{f}, "util_", nil); err != nil {
+		t.Fatalf("CheckPackage() error: %v (a non-root package's own main should be an ordinary function)", err)
+	}
+}
+
+func TestCheckPackage_RootPackageStillRequiresValidMain(t *testing.T) {
+	if _, err := CheckPackage([]*ast.File{{}}, "", nil); err == nil {
+		t.Fatal("expected an error for a root package missing fn main")
+	}
+}
+
+func TestCheckPackage_MultipleFilesShareOneNamespaceWithNoImportNeeded(t *testing.T) {
+	f1 := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{Name: "main", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.CallExpr{Callee: "helper"}}}},
+	}}
+	f2 := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{Name: "helper", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}}},
+	}}
+	if _, err := CheckPackage([]*ast.File{f1, f2}, "", nil); err != nil {
+		t.Fatalf("CheckPackage() error: %v", err)
+	}
+}

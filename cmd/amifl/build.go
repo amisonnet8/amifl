@@ -5,10 +5,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/amisonnet8/amifl/amiflrt"
+	"github.com/amisonnet8/amifl/internal/ast"
 	"github.com/amisonnet8/amifl/internal/codegen"
-	"github.com/amisonnet8/amifl/internal/parser"
+	"github.com/amisonnet8/amifl/internal/modloader"
 	"github.com/amisonnet8/amifl/internal/sema"
 )
 
@@ -52,30 +55,68 @@ func copyAmiflrt(dir string) error {
 	return nil
 }
 
-// compileToIR reads and compiles srcPath down to AMIVM-IR text, plus one
-// amivm `-i alias=path` mapping string per `extern` block the source
-// declares (codegen.ExternImportMappings, step 13) — compileToGo appends
-// these to the fixed amiflrt mapping it always passes, so every generated
-// `?alias.Xxx`/METHVAL callname resolves deterministically. Step 1 only
-// accepts a single .aml file — package directories and .amlz archives
-// arrive with modules (see CLAUDE.md's implementation step plan).
+// compileToIR loads and compiles srcPath down to AMIVM-IR text, plus one
+// amivm `-i alias=path` mapping string per distinct extern alias declared
+// anywhere in the program (codegen.ExternImportMappings, step 13) —
+// compileToGo appends these to the fixed amiflrt mapping it always passes,
+// so every generated `?alias.Xxx`/METHVAL callname resolves
+// deterministically. srcPath is a directory (amifl-spec.md section 12.1's
+// package) or a single .aml file (its own independent one-file package);
+// modloader.Load resolves every `import` it (transitively) declares into
+// the full package DAG, in dependency order — sema.CheckPackage then runs
+// once per package, left to right, so each import's Exports (step 14) are
+// always ready by the time its importer needs them, and codegen.
+// GenerateProgram compiles every package's own declarations into one
+// combined AMIVM-IR program (section 12.4).
 func compileToIR(srcPath string) (ir string, externImports []string, err error) {
-	src, err := os.ReadFile(srcPath)
+	_, order, err := modloader.Load(srcPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("read %s: %w", srcPath, err)
+		return "", nil, err
 	}
-	file, err := parser.Parse(string(src))
+
+	exportsByKey := map[string]sema.Exports{}
+	var units []codegen.Unit
+	externMap := map[string]string{}
+	for _, pkg := range order {
+		imports := map[string]sema.Exports{}
+		for alias, key := range pkg.Imports {
+			imports[alias] = exportsByKey[key]
+		}
+		exports, err := sema.CheckPackage(pkg.Files, pkg.Prefix, imports)
+		if err != nil {
+			return "", nil, fmt.Errorf("%s: %w", pkg.Dir, err)
+		}
+		exportsByKey[pkg.Key] = exports
+
+		var decls []ast.TopLevelDecl
+		for _, f := range pkg.Files {
+			decls = append(decls, f.Decls...)
+		}
+		units = append(units, codegen.Unit{Prefix: pkg.Prefix, Decls: decls})
+
+		for _, mapping := range codegen.ExternImportMappings(decls) {
+			alias, path, _ := strings.Cut(mapping, "=")
+			if existing, ok := externMap[alias]; ok && existing != path {
+				return "", nil, fmt.Errorf("extern alias %q is bound to both %q and %q across different packages", alias, existing, path)
+			}
+			externMap[alias] = path
+		}
+	}
+
+	ir, err = codegen.GenerateProgram(units)
 	if err != nil {
-		return "", nil, fmt.Errorf("%s: %w", srcPath, err)
+		return "", nil, err
 	}
-	if err := sema.Check(file); err != nil {
-		return "", nil, fmt.Errorf("%s: %w", srcPath, err)
+
+	aliases := make([]string, 0, len(externMap))
+	for alias := range externMap {
+		aliases = append(aliases, alias)
 	}
-	ir, err = codegen.Generate(file)
-	if err != nil {
-		return "", nil, fmt.Errorf("%s: %w", srcPath, err)
+	sort.Strings(aliases)
+	for _, alias := range aliases {
+		externImports = append(externImports, alias+"="+externMap[alias])
 	}
-	return ir, codegen.ExternImportMappings(file), nil
+	return ir, externImports, nil
 }
 
 // compileToGo runs compileToIR and then the external amivm CLI, returning

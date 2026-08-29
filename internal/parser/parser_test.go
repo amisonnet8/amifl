@@ -1606,3 +1606,96 @@ func TestParse_ChanElemTypeAnnotation(t *testing.T) {
 		t.Fatalf("got Elem %#v, want NamedType{Name: \"Int\"}", ct.Elem)
 	}
 }
+
+// --- step 14: import / qualified references ---
+
+func TestParse_ImportDecl(t *testing.T) {
+	src := "import mathutil \"./mathutil\"\nfn main() -> Int {\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	var imp *ast.ImportDecl
+	for _, decl := range f.Decls {
+		if d, ok := decl.(*ast.ImportDecl); ok {
+			imp = d
+		}
+	}
+	if imp == nil {
+		t.Fatal("no ImportDecl found")
+	}
+	if imp.Alias != "mathutil" || imp.Path != "./mathutil" {
+		t.Fatalf("got Alias=%q Path=%q, want Alias=\"mathutil\" Path=\"./mathutil\"", imp.Alias, imp.Path)
+	}
+}
+
+func TestParse_ImportRequiresStringPath(t *testing.T) {
+	src := "import mathutil mathutil\nfn main() -> Int {\n    0\n}\n"
+	if _, err := Parse(src); err == nil {
+		t.Fatal("expected an error for an import path that isn't a string literal")
+	}
+}
+
+// TestParse_QualifiedCallParsesPositionalArgs is the parser-level half of
+// step 14's `alias.Name(args...)` (amifl-spec.md section 12.2): unlike
+// enum variant construction's `EnumType.Variant(field: v, ...)`, every
+// argument here is a plain positional value, with no leading `name:`
+// label — parseFieldCallArgs's own doc comment explains how each argument
+// tells the two shapes apart with no lookahead beyond parsing itself.
+func TestParse_QualifiedCallParsesPositionalArgs(t *testing.T) {
+	src := "fn main() -> Int {\n    mathutil.clamp(15, 0, 10)\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	fe, ok := parseFuncMain(t, f).Body.Exprs[0].(*ast.FieldExpr)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.FieldExpr", parseFuncMain(t, f).Body.Exprs[0])
+	}
+	if fe.Field != "clamp" {
+		t.Fatalf("got Field %q, want \"clamp\"", fe.Field)
+	}
+	if len(fe.Args) != 3 {
+		t.Fatalf("got %d args, want 3", len(fe.Args))
+	}
+	for i, a := range fe.Args {
+		if a.Name != "" {
+			t.Fatalf("arg %d: got Name %q, want \"\" (positional)", i, a.Name)
+		}
+	}
+}
+
+func TestParse_QualifiedZeroArgCallParsesEmptyArgs(t *testing.T) {
+	src := "fn main() -> Int {\n    util.Reset()\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	fe, ok := parseFuncMain(t, f).Body.Exprs[0].(*ast.FieldExpr)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.FieldExpr", parseFuncMain(t, f).Body.Exprs[0])
+	}
+	if fe.Args == nil || len(fe.Args) != 0 {
+		t.Fatalf("got Args %#v, want a non-nil, zero-length slice", fe.Args)
+	}
+}
+
+// TestParse_EnumVariantNamedArgsStillParseAfterUnification is a regression
+// check for parseFieldCallArgs's unification (this parser used to have a
+// dedicated parseEnumVariantArgs that only ever accepted the named-field
+// form) — enum variant construction's own named-argument syntax must keep
+// working exactly as before.
+func TestParse_EnumVariantNamedArgsStillParseAfterUnification(t *testing.T) {
+	src := "enum Status {\n    Retry(delay: Int)\n}\nfn main() -> Int {\n    Status.Retry(delay: 5)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	fe, ok := parseFuncMain(t, f).Body.Exprs[0].(*ast.FieldExpr)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.FieldExpr", parseFuncMain(t, f).Body.Exprs[0])
+	}
+	if len(fe.Args) != 1 || fe.Args[0].Name != "delay" {
+		t.Fatalf("got Args %#v, want one named arg \"delay\"", fe.Args)
+	}
+}

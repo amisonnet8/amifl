@@ -206,7 +206,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 11 ✅ | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開。フェーズ分割で実施：11a✅（`Error`型・`?`演算子・`cast[T]`/`parse[T]`ブラケット構文・`isError`・組み込み関数dispatch基盤）→11b✅（13.4節データ操作28関数）→11c✅（13.5/13.6節Set/Map専用）→11d✅（13.7節数値・`unwrap`/`okOr`） | （`amiflrt`+ネイティブ命令の混在） | 設計課題6（capability多相の実装方式、下記「確定した設計判断」参照） |
 | 12 ✅ | ファイルI/O・`Stream[T]`・並列処理 | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣、`spawn`/`send`/`recv`/`parallel` | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` `SPAWN` `DEFER`（`SEL`系は結局不要だった——下記「確定した設計判断」参照） | — |
 | 13 ✅ | `extern`機構 | Go資産バインド（15.1〜15.4節）、`Any`型境界の実装方式確定 | `METHVAL`（`ASSERT`は結局不要だった——下記「確定した設計判断」参照） | 設計課題1（`Any`/externの値境界、下記「確定した設計判断」参照） |
-| 14 | モジュール | `import`/エイリアス/可視性/循環禁止（12節） | — | — |
+| 14 ✅ | モジュール | `import`/エイリアス/可視性/循環禁止（12節） | — | — |
 | 15 | パイプラインDX機能・CLI・配布 | `tap`/`peek`、ステージ番号付き型エラー表示、CLI（16.2節）実装、`amiflrt`の`go:embed`配布、CI | — | 設計課題8 |
 
 **統合の理由**（当初18項目からの調整）:
@@ -686,6 +686,42 @@ amivmの`-i alias=path`は生成コードの先頭に**明示的な**`import ali
 ### 実地検証（`amivm`→`go build`→実行）で確認した項目（Step 13）
 
 `examples/extern.aml`で以下を確認済み：`extern "time" as time { type Time  bind Now() -> Time  bind TimeUnix(t: Time) -> Int as Time.Unix  bind TimeFormat(t: Time, layout: String) -> String as Time.Format }`（`amifl-spec.md` 15.2節の例そのもの、`METHVAL`経由のメソッドbind2種）、`extern "strings" as strs { bind Contains2(s, substr) -> Bool as Contains }`（プレーン関数のリネームbind）、`extern "encoding/json" as json2 { bind Marshal2(v: Any) -> Tuple2[Bytes, Error] as Marshal }`（`Any`引数・Tuple2ネイティブ複数戻り値の組み立て、`String`と`struct`両方をAnyへ渡すケース）、`typeName(5)`/`typeName(now)`（リテラルboxing対策・extern型の動的型名取得）。生成されたIRを目視確認し、`METHVAL`+`CALL`のペア・`?json2.Marshal`への複数戻り値`CALL`+`FSET`によるTuple2組み立て・`?fmt.Sprintf "%T"`によるtypeName実装が想定どおりであることを確認。実行結果は終了コード12（`unixOk(1)+formattedLen(4)+hasFooVal(1)+bytesLen(4)+hasErrVal(0)+tn1(1)+tn2(1)=12`という手計算と一致）を確認。加えて、予約エイリアス衝突・エイリアス重複宣言・メソッドbindのレシーバー型不一致・`Any`値の具体型への暗黙狭窄化（拒否されるべき方向）をそれぞれ手動でCLIから確認し、いずれも期待どおりコンパイルエラーになることを確認した。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。**これでStep 13（`extern`機構）を完了した——Step 8（enum）・Step 11（capability多相）と並んで「先例無し」と警戒されていた3領域が全て完了し、コア言語機能はモジュール（Step 14）とDX/配布（Step 15）を残すのみとなった。**
+
+### Step 14のスコープ確定：`alias.Name(...)`（fn呼び出し）・`alias.NAME`（const参照）のみ対応、`alias.Point{...}`（struct）・`alias.Status.Variant(...)`（enum）は先送り（意図的なスコープ限定）
+
+`amifl-spec.md` 12.2節は「他パッケージから参照できるのは...値の種類（fn／struct／enum／const）は問わない」と規定するが、実装を検討した結果、**構文面でこの4種類を均等に扱うコストが全く異なる**ことが分かった——`fn`/`const`の参照はどちらも`alias.Name`という「ドット1つ」の形（既存の`EnumType.Variant`と全く同じ`.`ポストフィックス構文）に収まるのに対し、`struct`のクロスパッケージ構築（`alias.Point{...}`）には「ドットの後にコンポジットリテラル構文が続く」という新しい曖昧性回避ロジックが要り、`enum`のクロスパッケージ構築（`alias.Status.Variant(...)`）には「ドット2つ」の新しい構文チェーンが要る——どちらもStep 6/8が確立した既存の構文機構に単純に乗せられない。仕様の唯一の実例（`mathutil.clamp(15,0,10)`、関数呼び出し）を満たす最小のスコープとして、**Step 14は`fn`と`const`のクロスパッケージ参照のみ実装し、`struct`/`enum`は「同じパッケージ内でのみ使える」という制約を維持したまま先送りした**——Step 6のネストしたTuple・Step 9のパイプ右辺インラインクロージャー等と同種の、「具体的な必要が出るまで先送りする」という繰り返し使われてきた判断基準の適用。
+
+### `alias.Name`は既存の`ast.FieldExpr`（`EnumType.Variant`と同じノード）を再利用し、新しいASTノードを作らなかった
+
+`alias.Name(args...)`（関数呼び出し）も`alias.NAME`（const参照）も、構文的には`ast.FieldExpr`が元々表現していた`target.field[(...)]`の形にそのまま収まる——パーサーは`alias`が本当にimportエイリアスなのか、tuple/structのフィールドアクセスなのか、enumバリアント構築なのかを一切区別せず、sema側（`resolveFieldExpr`）が「`Target`が既知のenum型名かどうか」（Step 8で確立済み）に続けて「`Target`が既知のimportエイリアスかどうか」を追加でチェックする、という設計にした——Step 8のenum判定パターンをそのまま踏襲した形。`FieldExpr`に`IsQualifiedCall`/`QualifiedCallee`/`QualifiedArgTypes`（関数呼び出し用）・`QualifiedConstValue`（const参照用、`ast.IdentExpr.ConstValue`と全く同じインライン展開規約）という新しいsema算出フィールドを追加しただけで、`CallExpr`のような専用の呼び出しノードは一切増やしていない。
+
+### パーサーの`(...)`引数リストを「先頭にコロンがあるかどうかで名前付き/位置引数を自動判定する」形へ一般化し、新しいトークン先読みバッファを追加せずに済ませた
+
+`EnumType.Variant(field: v, ...)`（既存、名前付き引数のみ）と`alias.Name(15, 0, 10)`（Step 14新規、位置引数のみ）は構文的に同じ`(...)`の位置に現れるが、前者は`name: value`、後者は裸の`value`という異なる形を取る。パーサーが「今どちらの形を読んでいるか」を事前に知るには2トークン先読みが要るように見えたが（`(`の次のトークンが`Ident`で、さらにその次が`:`かどうか）、実際には**1トークン先読みのまま解決できる**ことに気づいた——各引数を「まず普通の式としてパースしてみる」（`delay`のような裸の識別子は、後に`:`が続いても`parsePipeExpr`は`:`を式の続きとして解釈しないため、`*ast.IdentExpr{Name:"delay"}`という1個の式として素直にパースが完了する）、その直後に`p.cur.Kind == lexer.Colon`かどうかだけを見て、名前付きラベルだったのか（`:`の後をもう一度パースして実際の値を得る）、それとも位置引数の値そのものだったのか（そのまま採用）を判定する、という「まず一般形としてパースしてから、余った1トークンで後付け判定する」手法——Step 7が代入検出用の先読みバッファを撤去した際に確立した「式としてパースしてから残ったトークンを見る」パターンの直接の応用。この判定はAmiFLの文法上安全（`:`は式の継続として一度も使われない——三項演算子も無ければ、`[...]`外でのスライス境界コロンも無い）。既存の`parseEnumVariantArgs`はこの一般化された`parseFieldCallArgs`へ差し替えたが、名前付き引数（enumバリアント構築）の既存の挙動は一切変えていない（回帰テストで確認済み）。
+
+### `import`のエイリアスは「プログラム全体で一意」——CLAUDE.mdの文言どおり厳格に解釈し、`modloader`にグローバルなエイリアス→パッケージ表を持たせた
+
+`amifl-spec.md` 12.4節「同じエイリアスを2つの異なるパッケージへ割り当てようとすると、コンパイルエラーになる...別々のパッケージがそれぞれ独立に同じエイリアス名を選んでしまった場合も...拒否される」を文字通りに実装した——1ファイル内はもちろん、プログラム全体のどのパッケージがどのエイリアスを使っていても、同じエイリアス文字列が2つの異なるパッケージを指すことは許されない（`internal/modloader`の`loader.aliasOwner map[string]string`、エイリアス→パッケージKeyのグローバル表）。
+
+一方、仕様が明記していない逆のケース——**同じパッケージが、異なる2つの非ルートパッケージからそれぞれ違うエイリアスで`import`された場合**（例: パッケージAが`import shared1 "../shared"`、パッケージBが（Aとは無関係に）`import shared2 "../shared"`——同じ`shared`パッケージを指すが別名）——について、仕様は何も述べていない。この場合の「そのパッケージ自身の宣言をリネームする際に使う、たった1つの正規プレフィックス」をどう決めるかが未規定だったため、**「そのパッケージへ最初に到達した際に使われたエイリアスを正規プレフィックスとして採用し、以降は他の`import`がどんな別名を使ってもそのプレフィックスをそのまま使い続ける」**という決定的な解決策を採った（`loader.packagePrefix map[string]string`、パッケージKey→プレフィックスの表、`aliasOwner`とは別に保持——前者は「1エイリアスにつき1パッケージ」を強制する検証用、後者は「1パッケージにつき正規プレフィックスは1つ」を実現する採番用で、キーの向きが逆であるため2つの別マップが必要だった）。ファイル探索順序（ディレクトリ内はファイル名の辞書順）・ファイル内のimport宣言順序を固定することで、この「最初に見つかったエイリアスが勝つ」という規則は再現可能（deterministic）になっている。
+
+### 循環検出は「訪問中集合のチェック」を「ロード済みキャッシュのチェック」より先に行う必要がある——順序を逆にすると、まさに循環を構成するパッケージそのものがキャッシュヒットしてしまい検出できない（実装時に自己発見・Step14固有の新しい罠）
+
+`internal/modloader`の`loader.load`は、あるパッケージを2回目以降ロードしようとした際に「(a) 現在ロード中（スタック上にある）なら循環エラー」「(b) 既にロード完了済みならキャッシュを返す」という2つの分岐を持つ。最初の実装ではこの順序を逆にしていた（`byKey`のキャッシュヒットを先にチェック）——その結果、`root → a → b → a`という循環を持つプログラムをテストしたところ、**エラーにならず素通りしてしまう**バグを実地に発見した。原因はシンプルで、パッケージ`a`は「ロード開始直後、まだ自分自身のimportすら解決していない段階」で`l.byKey[aKey]`へ登録される（`b`がロードされている間、`a`はまだ`byKey`に載っているが、その中身はimport解決前の未完成な`*Package`）——`b`が`a`を再度importしようとした時点で、`byKey`のキャッシュチェックが先に走ると「あ、もうロード済みだ」と誤認してそのまま（未完成な）`a`を返してしまい、循環が発生した事実そのものが握りつぶされる。対策は単純に2つのチェックの順序を入れ替えるだけ（`visiting`集合のチェックを`byKey`キャッシュのチェックより先に行う）——ただしこれは「ロジック上正しそうに見えるだけで次のステップへ進まない」というCLAUDE.mdの原則が実際に効いた具体例で、ユニットテスト（`TestLoad_ImportCycleIsAnError`）を書いて初めて発覚した。`amifl_implementation_notes.md`にも記録する。
+
+### パッケージのリネームは「AST文字列の書き換え」ではなく「codegenが宣言名を書き出す瞬間にプレフィックスを足す」方式にした——sema側は最後まで生のバレ名だけを扱う
+
+`amifl-spec.md` 12.4節の「非ルートパッケージの宣言は全て一意な名前へ機械的に置き換えられる」を実現する方法として、(a) パース後・sema実行前にASTを歩いて`FuncDecl.Name`等をリネームし、同じパッケージ内の全参照サイトも連動して書き換える案と、(b) sema・codegenは生のバレ名のまま扱い、codegenが実際にAMIVM識別子（`FUNC`の宣言名、`CALL`の呼び出し名等）を書き出す最後の瞬間にだけプレフィックスを足す案を検討し、**(b)を採用した**。(a)は「あるバレ名が同一パッケージ内のトップレベル宣言への参照なのか、ローカル変数/引数なのか」をリネーム時点で判定する必要があり、これはsemaのスコープ解決そのものを先取りすることになってしまう（本末転倒）。(b)なら、**パッケージ内の視点では従来（Step 1〜13）と何も変わらない**——sema（`CheckPackage`）は常に生のバレ名だけで動作し（`c.funcs["Clamp"]`のようにバレ名で登録・参照）、codegen（`GenerateProgram`）だけが「今どのパッケージのUnitを処理しているか」を`program.pkgPrefix`という1つのフィールドで把握し、`FUNC`宣言名・同一パッケージ内の無修飾呼び出し先（`calleeToken`）・`STTYPE`宣言名の3箇所でこれを一律に前置する。ルートパッケージは`pkgPrefix == ""`なので、この変更はルートパッケージの生成結果を1バイトも変えない（既存の`codegen_test.go`全件が無修正でgreenだったことで確認済み）。
+
+**この設計が安全に成立する前提は、Step 14のスコープ限定（struct/enumのクロスパッケージ参照が構文上到達不能）そのもの**——`resolveGoType`が裸の型名を「今処理中のパッケージ自身のstruct/enum名にきっと違いない」と決め打ちしてプレフィックスを足せるのは、他パッケージのstruct/enum型名を裸のまま参照する構文が存在しないためで、将来この制約を外す場合はこの前提から見直す必要がある。
+
+### `Tuple[T]`/`List[T]`等の合成型はパッケージをまたいで共有し、struct/enumだけをパッケージごとに独立させた
+
+`program`（`internal/codegen/closure.go`）が持つ`tupleTypes`/`listTypes`/`arrayTypes`/`setTypes`/`mapTypes`/`chanTypes`/`streamTypes`のようなシェイプごとの合成Go型キャッシュは、**Step 14でも複数パッケージ間で共有したまま**にした（`pkgPrefix`を一切適用しない）——`List[Int]`はどのパッケージで書かれても同じGo型（`AmiflList1`等）にコンパイルされる必要がある（さもないと、パッケージ境界をまたいで値を受け渡す際にGoの型不一致になってしまう）。一方struct/enumの`STTYPE`宣言名だけは`pkgPrefix`で個別化する——この非対称性はGo自身のstruct型が「フィールド構成が同じでも別名なら別の型」という名前的型付け（nominal typing）を持つのに対し、List/Tuple等の合成型はAmiFL側であらかじめ「シェイプが同じなら同じGo型」という規約（Step 6以来）を敷いていることの直接の帰結。
+
+### 実地検証（`amivm`→`go build`→実行）で確認した項目（Step 14）
+
+`examples/modules/`ディレクトリ（`main.aml`・同じルートパッケージの2つ目のファイル`helper.aml`・`import`先の`mathutil/mathutil.aml`）で以下を確認済み：ディレクトリ丸ごとの複数ファイル統合（`main.aml`が`import`無しで`helper.aml`の`helperSum`を呼び出す、12.1節）、`import mathutil "./mathutil"`によるクロスパッケージ関数呼び出し（`mathutil.Clamp(15,0,10)`・`mathutil.DoubleClamped(3,0,10)`、後者は内部で非公開関数`double`を同一パッケージ内の無修飾呼び出しとして使う）、クロスパッケージconst参照（`mathutil.MaxClamp`、参照箇所へのインライン展開）。生成されたIRを目視確認し、`mathutil`パッケージの宣言が`mathutil_double`/`mathutil_Clamp`/`mathutil_DoubleClamped`という一意な名前へ、ルートパッケージの`helperSum`は無修飾のまま、`mathutil.MaxClamp`は`100`という生リテラルへ正しく変換されていることを確認。実行結果は終了コード132（`a(10)+b(6)+c(100)+d(16)=132`という手計算と一致）を確認。加えて、非公開名への参照拒否・循環import検出（直接循環・自己循環）・同一エイリアスの異なるパッケージへの二重割り当て拒否・named引数を渡したクロスパッケージ呼び出しの拒否・constを関数として呼ぶ誤用の拒否・非ルートパッケージ自身の`main`（シグネチャ任意、エントリーポイントとして扱われない）・Unit型を返すクロスパッケージ呼び出し（`CALL`に結果オペランド無し）を、それぞれ手動でCLIから、または`internal/modloader`/`internal/sema`/`internal/codegen`の新規ユニットテストから確認した。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。**これでStep 14（モジュール）を完了した——残るはStep 15（パイプラインDX機能・CLI・配布）のみとなった。**
 
 ## 開発の進め方
 

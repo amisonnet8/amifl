@@ -926,13 +926,16 @@ func (fc *funcChecker) resolveStructLit(v *ast.StructLit) (string, error) {
 
 // resolveFieldExpr type-checks postfix `target.field` (amifl-spec.md
 // section 3.2/2.2) — tuple index sugar when Target's type is a Tuple,
-// ordinary struct field access when it's a struct, or (step 8) enum
-// variant construction when Target is a bare identifier naming a declared
-// enum type (checked *first*, before Target is ever resolved as a value —
-// an enum type name was never a valid variable reference to begin with, so
-// there's nothing lost by not trying checkExpr(Target) in that case, and
-// trying it first would just fail with a confusing "undefined name"
-// instead of resolving correctly). Every other case computes and stores
+// ordinary struct field access when it's a struct, (step 8) enum variant
+// construction when Target is a bare identifier naming a declared enum
+// type, or (step 14) a cross-package qualified reference
+// (resolveQualifiedReference, module.go) when Target is a bare identifier
+// naming a known `import` alias instead — both of these last two are
+// checked *first*, before Target is ever resolved as a value: an enum type
+// name or an import alias was never a valid variable reference to begin
+// with, so there's nothing lost by not trying checkExpr(Target) in either
+// case, and trying it first would just fail with a confusing "undefined
+// name" instead of resolving correctly. Every other case computes and stores
 // AmivmField, the exact string codegen writes after FGET's `>` prefix
 // (ast.FieldExpr's doc comment) — a synthesized "F0"/"F1"/... for a tuple
 // index (Go struct fields can't be named with a bare digit) or Field
@@ -944,9 +947,12 @@ func (fc *funcChecker) resolveFieldExpr(v *ast.FieldExpr) (string, error) {
 		if info, isEnum := fc.enums[ident.Name]; isEnum {
 			return fc.resolveEnumVariantConstruction(v, ident.Name, info)
 		}
+		if pkg, isAlias := fc.imports[ident.Name]; isAlias {
+			return fc.resolveQualifiedReference(v, ident.Name, pkg)
+		}
 	}
 	if v.Args != nil {
-		return "", fmt.Errorf("line %d: '.'-call syntax (`X.Y(...)`) is only valid for enum variant construction (`EnumType.Variant(...)`)", v.Line)
+		return "", fmt.Errorf("line %d: '.'-call syntax (`X.Y(...)`) is only valid for enum variant construction (`EnumType.Variant(...)`) or a step-14 qualified package call (`alias.Name(...)`)", v.Line)
 	}
 
 	targetTyp, err := fc.checkExpr(v.Target, "")

@@ -144,6 +144,12 @@ type checker struct {
 	// claimed in this file — see reservedExternAliases's doc comment for
 	// why alias collisions matter beyond ordinary name-shadowing.
 	externAliases map[string]string
+	// imports maps each `import alias "path"` this package's own files
+	// declare (amifl-spec.md section 12.2, step 14) to that alias's
+	// already-computed Exports — nil for a package with no imports at all
+	// (Check's own single-file, prefix-less call always passes nil).
+	// resolveFieldExpr's qualified-reference branch is the sole reader.
+	imports map[string]Exports
 }
 
 // scope is one lexical block's bindings, chained to its enclosing scope

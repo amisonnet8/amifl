@@ -33,6 +33,7 @@ const (
 	KwAs
 	KwBind
 	KwType
+	KwImport
 	LParen
 	RParen
 	LBrace
@@ -132,6 +133,8 @@ func (k Kind) String() string {
 		return "'bind'"
 	case KwType:
 		return "'type'"
+	case KwImport:
+		return "'import'"
 	case LParen:
 		return "'('"
 	case RParen:

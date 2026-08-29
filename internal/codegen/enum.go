@@ -48,7 +48,7 @@ func genEnumDecl(prog *program, d *ast.EnumDecl) {
 			})
 		}
 	}
-	fmt.Fprintf(&prog.typeHeader, "STTYPE\t^%s\n", d.Name)
+	fmt.Fprintf(&prog.typeHeader, "STTYPE\t^%s%s\n", prog.pkgPrefix, d.Name)
 	prog.typeHeader.WriteString("\tFIELD\t>Tag\t^int\n")
 	for _, fe := range fields {
 		fmt.Fprintf(&prog.typeHeader, "\tFIELD\t>%s\t^%s\n", fe.name, fe.goType)
@@ -65,7 +65,7 @@ func genEnumDecl(prog *program, d *ast.EnumDecl) {
 // ambiguity sema resolves).
 func (g *gen) genEnumVariantValue(v *ast.FieldExpr) (string, error) {
 	tmp := g.newTemp()
-	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, v.ResolvedType)
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, g.prog.resolveGoType(v.ResolvedType))
 	fmt.Fprintf(g.b, "\tFSET\t%%%s\t>Tag\t%d\n", tmp, v.VariantIndex)
 	for _, a := range v.Args {
 		val, err := g.genValue(a.Value)

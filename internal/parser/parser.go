@@ -109,9 +109,32 @@ func (p *parser) parseTopLevelDecl() (ast.TopLevelDecl, error) {
 		return p.parseEnumDecl()
 	case lexer.KwExtern:
 		return p.parseExternDecl()
+	case lexer.KwImport:
+		return p.parseImportDecl()
 	default:
-		return nil, p.errorf("expected 'fn', 'const', 'struct', 'enum', or 'extern' at top level, got %s", p.cur.Kind)
+		return nil, p.errorf("expected 'fn', 'const', 'struct', 'enum', 'extern', or 'import' at top level, got %s", p.cur.Kind)
 	}
+}
+
+// parseImportDecl parses `import alias "path"` (amifl-spec.md section
+// 12.2) — step 14. Unlike parseExternDecl, there's no block body: a single
+// alias and a single string-literal path, always resolved at compile time
+// by internal/modloader (never by the parser itself, which has no
+// filesystem access and no notion of "the current file's directory").
+func (p *parser) parseImportDecl() (*ast.ImportDecl, error) {
+	kwTok, err := p.expect(lexer.KwImport)
+	if err != nil {
+		return nil, err
+	}
+	aliasTok, err := p.expect(lexer.Ident)
+	if err != nil {
+		return nil, err
+	}
+	pathTok, err := p.expect(lexer.String)
+	if err != nil {
+		return nil, err
+	}
+	return &ast.ImportDecl{Alias: aliasTok.Value, Path: pathTok.Value, Line: kwTok.Line}, nil
 }
 
 // parseExternDecl parses `extern "path" as alias { type Name ... bind
@@ -992,7 +1015,7 @@ func (p *parser) parsePostfixExpr() (ast.Expr, error) {
 			}
 			var args []ast.StructLitField
 			if p.cur.Kind == lexer.LParen {
-				args, err = p.parseEnumVariantArgs()
+				args, err = p.parseFieldCallArgs()
 				if err != nil {
 					return nil, err
 				}
@@ -1017,14 +1040,31 @@ func (p *parser) parsePostfixExpr() (ast.Expr, error) {
 	}
 }
 
-// parseEnumVariantArgs parses `(field1: v1, field2: v2, ...)` right after a
-// postfix `.Variant` (amifl-spec.md section 2.2, "Status.Retry(delay: 5)")
-// — the same named-field convention parseStructLit uses, reusing
-// ast.StructLitField for each entry. Always returns a non-nil slice (empty
-// for `()`), which is what tells FieldExpr.Args apart from a plain
-// `.field` access with no trailing call at all (nil) — see FieldExpr's doc
-// comment.
-func (p *parser) parseEnumVariantArgs() ([]ast.StructLitField, error) {
+// parseFieldCallArgs parses `(arg1, arg2, ...)` right after a postfix
+// `.Field` — the single grammar that serves both of the two meanings this
+// shape can have (sema's resolveFieldExpr is what tells them apart, not the
+// parser): enum variant construction (amifl-spec.md section 2.2,
+// "Status.Retry(delay: 5)"), where every argument is a `name: value` pair,
+// or (step 14) a cross-package qualified function call (amifl-spec.md
+// section 12.2, "mathutil.clamp(15, 0, 10)"), where every argument is a
+// plain positional value. Each argument decides its own shape independently
+// with no lookahead beyond the single token parsePostfixExpr already uses
+// elsewhere in this parser: parse it as an ordinary expression first (a
+// bare field-name label like `delay` parses trivially as *ast.IdentExpr,
+// since nothing in AmiFL's expression grammar ever continues past a bare
+// identifier with a `:` — no ternary, no slice bounds outside `[...]`, no
+// map-literal colon outside `{...}`) and, only when that expression turned
+// out to be a bare identifier immediately followed by `:`, reinterpret it
+// as a name label and parse the real value after the colon. This is safe
+// precisely because AmiFL's grammar never lets `:` legally follow a
+// positional argument's own bare-identifier value (mirrors how step 7
+// removed its old assignment-detection peek buffer by relying on the
+// identical "parse as an expression, inspect what's left over" trick).
+//
+// Always returns a non-nil slice (empty for `()`), which is what tells
+// FieldExpr.Args apart from a plain `.field` access with no trailing call
+// at all (nil) — see FieldExpr's doc comment.
+func (p *parser) parseFieldCallArgs() ([]ast.StructLitField, error) {
 	if _, err := p.expect(lexer.LParen); err != nil {
 		return nil, err
 	}
@@ -1035,18 +1075,24 @@ func (p *parser) parseEnumVariantArgs() ([]ast.StructLitField, error) {
 	args := []ast.StructLitField{}
 	if p.cur.Kind != lexer.RParen {
 		for {
-			fieldNameTok, err := p.expect(lexer.Ident)
+			argLine := p.cur.Line
+			first, err := p.parsePipeExpr()
 			if err != nil {
 				return nil, err
 			}
-			if _, err := p.expect(lexer.Colon); err != nil {
-				return nil, err
+			var name string
+			value := first
+			if ident, ok := first.(*ast.IdentExpr); ok && p.cur.Kind == lexer.Colon {
+				if err := p.advance(); err != nil {
+					return nil, err
+				}
+				name = ident.Name
+				value, err = p.parsePipeExpr()
+				if err != nil {
+					return nil, err
+				}
 			}
-			val, err := p.parsePipeExpr()
-			if err != nil {
-				return nil, err
-			}
-			args = append(args, ast.StructLitField{Name: fieldNameTok.Value, Value: val, Line: fieldNameTok.Line})
+			args = append(args, ast.StructLitField{Name: name, Value: value, Line: argLine})
 			if p.cur.Kind != lexer.Comma {
 				break
 			}

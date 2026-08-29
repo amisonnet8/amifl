@@ -70,7 +70,13 @@ func (p *program) resolveGoType(t string) string {
 	if goType, ok := goTypeNames[t]; ok {
 		return goType
 	}
-	return t
+	// Only a user struct/enum's own bare AmiFL name ever reaches this
+	// fallback (every other shape is handled by one of the branches above)
+	// — step 14's pkgPrefix (program's own doc comment) is what keeps two
+	// different packages' same-named structs/enums from colliding as Go
+	// identifiers once GenerateProgram compiles them into one combined
+	// output; "" for the root package leaves this exactly as it always was.
+	return p.pkgPrefix + t
 }
 
 // tupleGoTypeName mints (or reuses) the synthesized Go/AMIVM struct type
@@ -134,7 +140,7 @@ func genStructDecl(prog *program, d *ast.StructDecl) {
 	for i, f := range d.Fields {
 		goTypes[i] = prog.resolveGoType(f.ResolvedType)
 	}
-	fmt.Fprintf(&prog.typeHeader, "STTYPE\t^%s\n", d.Name)
+	fmt.Fprintf(&prog.typeHeader, "STTYPE\t^%s%s\n", prog.pkgPrefix, d.Name)
 	for i, f := range d.Fields {
 		fmt.Fprintf(&prog.typeHeader, "\tFIELD\t>%s\t^%s\n", f.Name, goTypes[i])
 	}
@@ -164,7 +170,7 @@ func (g *gen) genTupleLitValue(v *ast.TupleLit) (string, error) {
 // assignment semantics).
 func (g *gen) genStructLitValue(v *ast.StructLit) (string, error) {
 	tmp := g.newTemp()
-	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, v.ResolvedType)
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, g.prog.resolveGoType(v.ResolvedType))
 	for _, f := range v.Fields {
 		val, err := g.genValue(f.Value)
 		if err != nil {
@@ -189,6 +195,19 @@ func (g *gen) genStructLitValue(v *ast.StructLit) (string, error) {
 func (g *gen) genFieldValue(v *ast.FieldExpr) (string, error) {
 	if v.IsEnumVariant {
 		return g.genEnumVariantValue(v)
+	}
+	// Step 14's two qualified-reference cases (module.go's own doc comment)
+	// — a const reference inlines exactly like ast.IdentExpr.ConstValue
+	// already does (genValue's own *ast.IdentExpr case), and a qualified
+	// call gets its own dedicated path since its callee token is already
+	// fully resolved (no v.Target to FGET from at all — Target only ever
+	// names the import alias, a compile-time-only reference, never a
+	// runtime value).
+	if v.QualifiedConstValue != nil {
+		return g.genValue(v.QualifiedConstValue)
+	}
+	if v.IsQualifiedCall {
+		return g.genQualifiedCallValue(v)
 	}
 	targetVal, err := g.genValue(v.Target)
 	if err != nil {

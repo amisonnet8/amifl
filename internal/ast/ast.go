@@ -284,6 +284,32 @@ type ExternBindDecl struct {
 	ResolvedReturnType string // filled by sema, mirrors FuncDecl's own field
 }
 
+// ImportDecl is a top-level `import alias "path"` declaration (amifl-spec.md
+// section 12.2) — step 14's cross-package reference mechanism. Path is a
+// relative path (from the *importing file's own* directory — amifl-spec.md's
+// own wording, "パスは参照元ファイル自身のディレクトリからの相対パス";
+// files sharing one package directory therefore always resolve identically)
+// resolved by internal/modloader at load time, never by sema/codegen
+// themselves (mirroring ExternDecl.Path, resolved by amivm's own `-i`
+// mapping rather than sema/codegen). Alias plays the identical dual role
+// ExternDecl.Alias does: the lookup key sema uses to resolve `alias.Name`
+// (FieldExpr's qualified-reference branch, resolveFieldExpr) and the
+// mechanical rename prefix (`<alias>_<Name>`, amifl-spec.md section 12.4)
+// codegen gives every one of the imported package's own top-level
+// declarations — chosen by whichever import first brings a given package
+// into the program (modloader's alias registry), since amifl-spec.md 12.4
+// requires one alias to map to at most one package program-wide (assigning
+// the same alias to two *different* packages is a compile error; two
+// different files independently importing the *same* package need not
+// agree on an alias — the first one seen wins as that package's canonical
+// rename prefix, and every subsequent importer's own alias remains valid
+// purely as its own file-local lookup key).
+type ImportDecl struct {
+	Alias string
+	Path  string
+	Line  int
+}
+
 // ConstDecl is a `const` declaration (amifl-spec.md section 4): a
 // compile-time-only binding that is inlined at every reference site
 // rather than compiled to a runtime variable. It doubles as both a
@@ -594,6 +620,39 @@ type FieldExpr struct {
 	// `Tag` value codegen writes (see EnumDecl's doc comment).
 	IsEnumVariant bool
 	VariantIndex  int
+
+	// IsQualifiedCall, QualifiedCallee, and QualifiedArgTypes are filled by
+	// sema exactly when this FieldExpr resolves to step 14's cross-package
+	// function call `alias.Name(args...)` (amifl-spec.md section 12.2) —
+	// Target a bare identifier naming a known `import` alias (never an enum
+	// — that check runs first in resolveFieldExpr) and Field naming an
+	// exported (capitalized) function or extern-bind in that package. Every
+	// Args entry's Name must be "" (positional-only, principle 7 — "名前付
+	// き引数無し"; resolveFieldExpr rejects a mix with enum-style named
+	// entries as a clear error rather than silently misreading one for the
+	// other). QualifiedCallee is the full AMIVM callname token the imported
+	// package's own codegen pass minted for that declaration (e.g.
+	// "!mathutil_Clamp" — see ImportDecl's doc comment on the rename
+	// scheme), already resolved by the time the *importing* package is
+	// checked (modloader processes packages in dependency order, leaves
+	// first). QualifiedArgTypes mirrors CallExpr.ArgTypes's role for a
+	// builtin call — each Args[i].Value's own resolved type, parallel to
+	// Args — purely so codegen never has to re-derive an argument's type
+	// from the AST itself.
+	IsQualifiedCall   bool
+	QualifiedCallee   string
+	QualifiedArgTypes []string
+
+	// QualifiedConstValue is filled by sema exactly when this FieldExpr
+	// resolves to step 14's cross-package const reference `alias.NAME`
+	// (Args == nil, Target a known import alias, Field naming an exported
+	// const) — the exporting package's own already-resolved ConstValue
+	// expression (ast.IdentExpr.ConstValue's identical inlining convention,
+	// amifl-spec.md section 4: a const has no runtime storage, so every
+	// reference — same-package or cross-package — is replaced by the
+	// literal it stands for). ResolvedType is still set to the const's own
+	// type, exactly like every other FieldExpr case.
+	QualifiedConstValue Expr
 }
 
 // ListLit is `[v1, v2, ...]` (amifl-spec.md sections 2.2/3.1) — the one
@@ -941,6 +1000,7 @@ func (*ConstDecl) topLevelDeclNode()  {}
 func (*StructDecl) topLevelDeclNode() {}
 func (*EnumDecl) topLevelDeclNode()   {}
 func (*ExternDecl) topLevelDeclNode() {}
+func (*ImportDecl) topLevelDeclNode() {}
 
 func (*ConstDecl) exprNode()       {}
 func (*LetExpr) exprNode()         {}

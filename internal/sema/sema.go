@@ -16,18 +16,44 @@ import (
 // reservation for its own `cascade_main`.
 const reservedMainName = "amifl_main"
 
-// Check performs semantic validation: scalar type checking, let/const
-// scope resolution (with const inlining), operators (step 3), if/elif/
-// else/while/switch and their lexical scoping (step 4), top-level `fn`
-// declarations (any number, any parameter list, callable in any order —
-// forward references and mutual/self recursion all just work, since every
-// signature is registered in one pass before any body is checked) and
-// local closures with their own `Func` type (step 5), and the
-// expression-oriented "every non-final expression in a block must be
-// Unit-typed" rule (amifl-spec.md principle 1). AmiFL's full type system
-// (structs, enums, collections, capability resolution, ...) grows across
-// later steps — see CLAUDE.md's implementation step plan.
+// Check performs semantic validation on a single-file, single-package
+// program — steps 1-13's entry point, kept exactly as every existing
+// caller (and the whole sema_test.go suite) already uses it: a single file
+// is just CheckPackage's one-file, root-package (prefix "", no imports)
+// case.
 func Check(f *ast.File) error {
+	_, err := CheckPackage([]*ast.File{f}, "", nil)
+	return err
+}
+
+// CheckPackage is Check generalized to step 14's multi-file package
+// (amifl-spec.md section 12.1) and cross-package import (12.2) support:
+// scalar type checking, let/const scope resolution (with const inlining),
+// operators (step 3), if/elif/else/while/switch and their lexical scoping
+// (step 4), top-level `fn` declarations (any number, any parameter list,
+// callable in any order — forward references and mutual/self recursion all
+// just work, since every signature is registered in one pass before any
+// body is checked) and local closures with their own `Func` type (step 5),
+// the expression-oriented "every non-final expression in a block must be
+// Unit-typed" rule (amifl-spec.md principle 1), and every later step's own
+// type-system growth (structs, enums, collections, capability resolution,
+// extern binds, ...).
+//
+// files are every .aml file making up one package, sharing one flat
+// namespace exactly like Check's own single file always did — no import
+// needed between files in the same package (12.1's "同じディレクトリに
+// 置かれた.amlファイル群は…1つの共有スコープにあるかのようにコンパイル
+// される"). prefix is "" for the root package, whose own declarations are
+// never mangled and whose `fn main` is validated as the program's entry
+// point (12.3 — a non-root package's own `main`, if it declares one, is
+// just an ordinary function, not validated as an entry point at all); any
+// other package's own canonical rename prefix otherwise (ast.ImportDecl's
+// doc comment on how that's chosen). imports maps each `import alias
+// "..."` this package's own files declare to that alias's already-computed
+// Exports — internal/modloader.Load processes the package DAG leaves-
+// first, so every dependency's Exports are ready by the time its importer
+// is checked here.
+func CheckPackage(files []*ast.File, prefix string, imports map[string]Exports) (Exports, error) {
 	c := &checker{
 		globals:       map[string]*binding{},
 		funcs:         map[string]funcSig{},
@@ -35,6 +61,7 @@ func Check(f *ast.File) error {
 		enums:         map[string]*enumInfo{},
 		externTypes:   map[string]bool{},
 		externAliases: map[string]string{},
+		imports:       imports,
 	}
 
 	var consts []*ast.ConstDecl
@@ -42,20 +69,29 @@ func Check(f *ast.File) error {
 	var structs []*ast.StructDecl
 	var enums []*ast.EnumDecl
 	var externs []*ast.ExternDecl
-	for _, decl := range f.Decls {
-		switch d := decl.(type) {
-		case *ast.ConstDecl:
-			consts = append(consts, d)
-		case *ast.FuncDecl:
-			funcs = append(funcs, d)
-		case *ast.StructDecl:
-			structs = append(structs, d)
-		case *ast.EnumDecl:
-			enums = append(enums, d)
-		case *ast.ExternDecl:
-			externs = append(externs, d)
-		default:
-			return fmt.Errorf("sema: unknown top-level declaration %T", decl)
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.ConstDecl:
+				consts = append(consts, d)
+			case *ast.FuncDecl:
+				funcs = append(funcs, d)
+			case *ast.StructDecl:
+				structs = append(structs, d)
+			case *ast.EnumDecl:
+				enums = append(enums, d)
+			case *ast.ExternDecl:
+				externs = append(externs, d)
+			case *ast.ImportDecl:
+				// Resolved entirely by internal/modloader before
+				// CheckPackage ever runs (path resolution, cycle
+				// detection, the global alias-uniqueness rule) — nothing
+				// left to check here beyond what fc.imports lookups
+				// already validate at each qualified-reference use site
+				// (resolveFieldExpr's resolveQualifiedReference).
+			default:
+				return Exports{}, fmt.Errorf("sema: unknown top-level declaration %T", decl)
+			}
 		}
 	}
 
@@ -72,27 +108,27 @@ func Check(f *ast.File) error {
 	// is caught regardless of which of the three comes first in the file.
 	for _, ext := range externs {
 		if err := c.registerExternTypes(ext); err != nil {
-			return err
+			return Exports{}, err
 		}
 	}
 	for _, st := range structs {
 		if err := c.registerStructName(st); err != nil {
-			return err
+			return Exports{}, err
 		}
 	}
 	for _, en := range enums {
 		if err := c.registerEnumName(en); err != nil {
-			return err
+			return Exports{}, err
 		}
 	}
 	for _, st := range structs {
 		if err := c.registerStructFields(st); err != nil {
-			return err
+			return Exports{}, err
 		}
 	}
 	for _, en := range enums {
 		if err := c.registerEnumVariants(en); err != nil {
-			return err
+			return Exports{}, err
 		}
 	}
 
@@ -103,7 +139,7 @@ func Check(f *ast.File) error {
 	// struct type declared anywhere in the file.
 	for _, d := range consts {
 		if err := c.checkTopLevelConst(d); err != nil {
-			return err
+			return Exports{}, err
 		}
 	}
 
@@ -117,29 +153,36 @@ func Check(f *ast.File) error {
 	// would call another `fn`.
 	for _, fn := range funcs {
 		if err := c.registerFuncSig(fn); err != nil {
-			return err
+			return Exports{}, err
 		}
 	}
 	for _, ext := range externs {
 		for bi := range ext.Binds {
 			if err := c.registerExternBind(ext.Alias, &ext.Binds[bi]); err != nil {
-				return err
+				return Exports{}, err
 			}
 		}
 	}
 
-	if _, err := findAndValidateMain(funcs); err != nil {
-		return err
+	// Only the root package's own `main` is ever validated as the
+	// program's entry point (amifl-spec.md section 12.3) — a non-root
+	// package's own `main`, if it declares one, is checked as an ordinary
+	// function like any other (Pass 2 below still type-checks its body
+	// regardless), just never singled out or required.
+	if prefix == "" {
+		if _, err := findAndValidateMain(funcs); err != nil {
+			return Exports{}, err
+		}
 	}
 
 	// Pass 2: check every body, now that every signature (including a
 	// forward or mutually-recursive reference) is already known.
 	for _, fn := range funcs {
 		if err := c.checkFunc(fn); err != nil {
-			return err
+			return Exports{}, err
 		}
 	}
-	return nil
+	return c.buildExports(prefix), nil
 }
 
 // findAndValidateMain locates `fn main` among funcs (whose signatures

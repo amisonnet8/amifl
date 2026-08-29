@@ -1,0 +1,13 @@
+const MaxClamp: Int = 100
+
+fn double(x: Int) -> Int {
+    x * 2
+}
+
+fn Clamp(v: Int, lo: Int, hi: Int) -> Int {
+    if v < lo { lo } elif v > hi { hi } else { v }
+}
+
+fn DoubleClamped(v: Int, lo: Int, hi: Int) -> Int {
+    Clamp(double(v), lo, hi)
+}

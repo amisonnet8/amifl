@@ -1,0 +1,10 @@
+import mathutil "./mathutil"
+
+fn main() -> Int {
+    let a = mathutil.Clamp(15, 0, 10)
+    let b = mathutil.DoubleClamped(3, 0, 10)
+    let c = mathutil.MaxClamp
+    let d = helperSum(a, b)
+    print("modules ok")
+    a + b + c + d
+}

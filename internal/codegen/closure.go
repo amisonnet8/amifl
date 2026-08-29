@@ -78,6 +78,26 @@ type program struct {
 	// Go type to deduplicate here at all: the Go type already exists,
 	// verbatim, in the target package.
 	externTypes map[string]string
+
+	// pkgPrefix is step 14's mechanical rename prefix (amifl-spec.md
+	// section 12.4) for whichever package's own declarations are currently
+	// being generated — "" for the root package, else that package's own
+	// canonical alias plus "_" (see ast.ImportDecl's doc comment).
+	// GenerateProgram sets this once per Unit, held constant across that
+	// whole unit's own struct/enum declarations and function bodies, which
+	// is always the correct context: a bare struct/enum type name or an
+	// unqualified function call can only ever refer to a declaration in the
+	// *same* package (step 14's deliberate scope cut — see CLAUDE.md's
+	// "確定した設計判断" — never reaches another package's struct/enum, and
+	// a cross-package function call goes through ast.FieldExpr.
+	// QualifiedCallee instead, already fully resolved by sema with the
+	// *target* package's own prefix baked in, never consulting this field
+	// at all). Every synthesized shape-keyed type (tuple/list/array/set/
+	// map/chan/stream/closure) deliberately ignores this — those are shared
+	// program-wide by construction (resolveGoType's own doc comment), so a
+	// List[Int] flowing across a qualified call still compiles to the same
+	// Go type on both sides.
+	pkgPrefix string
 }
 
 // newFuncTypeDecl emits one FNTYPE line for a closure shaped by

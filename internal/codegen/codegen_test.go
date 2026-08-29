@@ -2338,3 +2338,97 @@ func TestGenerate_ExternTypeResolvesToAliasQualifiedGoType(t *testing.T) {
 		t.Errorf("generated IR missing %q; got:\n%s", want, ir)
 	}
 }
+
+// --- step 14: modules ---
+
+func TestGenerateProgram_NonRootFuncAndStructNamesGetPrefixed(t *testing.T) {
+	util := Unit{
+		Prefix: "util_",
+		Decls: []ast.TopLevelDecl{
+			&ast.StructDecl{Name: "Point", Fields: []ast.Param{{Name: "x", ResolvedType: "Int64"}}},
+			&ast.FuncDecl{
+				Name: "Helper", ReturnType: nt("Int"), ResolvedReturnType: "Int64",
+				Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
+			},
+		},
+	}
+	root := Unit{Decls: mainFile(
+		&ast.FieldExpr{
+			Target: &ast.IdentExpr{Name: "util"}, Field: "Helper",
+			Args: []ast.StructLitField{}, IsQualifiedCall: true,
+			QualifiedCallee: "!util_Helper", ResolvedType: "Int64",
+		},
+	).Decls}
+
+	ir, err := GenerateProgram([]Unit{util, root})
+	if err != nil {
+		t.Fatalf("GenerateProgram() error: %v", err)
+	}
+	for _, want := range []string{
+		"STTYPE\t^util_Point",
+		"FUNC\t!util_Helper",
+		"CALL\t%amifl_tmp1\t:\t!util_Helper",
+		"FUNC\t!amifl_main\t:\t^int64",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerateProgram_NonRootPackageOwnMainIsNotEntryPoint(t *testing.T) {
+	util := Unit{
+		Prefix: "util_",
+		Decls: []ast.TopLevelDecl{
+			&ast.FuncDecl{
+				Name: "main", ReturnType: nt("Bool"), ResolvedReturnType: "Bool",
+				Body: &ast.Block{Exprs: []ast.Expr{&ast.BoolLit{Value: true}}},
+			},
+		},
+	}
+	root := Unit{Decls: mainFile(&ast.IntLit{Value: 0}).Decls}
+
+	ir, err := GenerateProgram([]Unit{util, root})
+	if err != nil {
+		t.Fatalf("GenerateProgram() error: %v", err)
+	}
+	if want := "FUNC\t!util_main\t:\t^bool"; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q (non-root package's own main should just be prefixed like any other fn); got:\n%s", want, ir)
+	}
+	if strings.Contains(ir, "!main\t:\t^bool") {
+		t.Errorf("a non-root package's own `main` must never become the program's entry point; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_QualifiedConstReferenceInlinesLiteral(t *testing.T) {
+	f := mainFile(&ast.FieldExpr{
+		Target: &ast.IdentExpr{Name: "util"}, Field: "Max",
+		ResolvedType: "Int64", QualifiedConstValue: &ast.IntLit{Value: 100},
+	})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := "RET\t100"; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q (a qualified const reference should inline its literal, no FGET); got:\n%s", want, ir)
+	}
+	if strings.Contains(ir, "FGET") {
+		t.Errorf("didn't expect FGET for a qualified const reference; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_QualifiedUnitCallEmitsCallWithNoResultOperand(t *testing.T) {
+	call := &ast.FieldExpr{
+		Target: &ast.IdentExpr{Name: "util"}, Field: "Log",
+		Args:            []ast.StructLitField{{Value: &ast.StringLit{Value: "hi"}}},
+		IsQualifiedCall: true, QualifiedCallee: "!util_Log", ResolvedType: unitType,
+	}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := "CALL\t:\t!util_Log\t\"hi\""; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q (a Unit-returning qualified call has no result operand); got:\n%s", want, ir)
+	}
+}
