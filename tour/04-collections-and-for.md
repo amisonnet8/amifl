@@ -71,7 +71,9 @@ fn main() -> Int {
 fn main() -> Int {
     let xs: List[Int] = [1, 2, 3, 4]
     let doubled = for x in xs yield x * 2
-    print(len(doubled))   // 4
+    for d in doubled {
+        print(d)   // 2, 4, 6, 8
+    }
     0
 }
 ```
