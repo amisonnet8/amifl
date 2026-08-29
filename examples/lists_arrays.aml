@@ -15,7 +15,15 @@ fn sumArray(xs: Array[Int;5]) -> Int {
 }
 
 fn main() -> Int {
-    let xs: List[Int] = [1, 2, 3, 4, 5]
+    // ex8: a list literal may be laid out one element per line, with an
+    // optional trailing comma before the closing `]` (amifl-spec.md section 5).
+    let xs: List[Int] = [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
     let s1 = sumList(xs)
 
     let arr: Array[Int;5] = [10, 20, 30, 40, 50]

@@ -2057,3 +2057,116 @@ func TestParse_MalformedDigitForBaseIsAnError(t *testing.T) {
 		t.Fatal("expected an error: 8 isn't a valid octal digit")
 	}
 }
+
+// TestParse_ListLitSpansMultipleLinesWithTrailingComma (ex8, amifl-spec.md
+// section 5) confirms a list literal may be laid out one element per line,
+// including a trailing comma right before the closing `]`.
+func TestParse_ListLitSpansMultipleLinesWithTrailingComma(t *testing.T) {
+	f, err := Parse("fn main() -> Int {\n    let xs = [\n        1,\n        2,\n        3,\n    ]\n    0\n}\n")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let, ok := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	if !ok {
+		t.Fatalf("body[0]: got %T, want *ast.LetExpr", parseFuncMain(t, f).Body.Exprs[0])
+	}
+	lit, ok := let.Value.(*ast.ListLit)
+	if !ok {
+		t.Fatalf("let value: got %T, want *ast.ListLit", let.Value)
+	}
+	if len(lit.Elems) != 3 {
+		t.Fatalf("got %d elems, want 3", len(lit.Elems))
+	}
+}
+
+// TestParse_CallArgsSpanMultipleLinesWithTrailingComma (ex8) confirms the
+// same multi-line/trailing-comma tolerance for an ordinary call's argument
+// list.
+func TestParse_CallArgsSpanMultipleLinesWithTrailingComma(t *testing.T) {
+	f, err := Parse("fn add3(a: Int, b: Int, c: Int) -> Int { a + b + c }\n" +
+		"fn main() -> Int {\n    add3(\n        1,\n        2,\n        3,\n    )\n}\n")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	call, ok := parseFuncMain(t, f).Body.Exprs[0].(*ast.CallExpr)
+	if !ok {
+		t.Fatalf("body[0]: got %T, want *ast.CallExpr", parseFuncMain(t, f).Body.Exprs[0])
+	}
+	if len(call.Args) != 3 {
+		t.Fatalf("got %d args, want 3", len(call.Args))
+	}
+}
+
+// TestParse_PipeChainContinuesOntoNextLine (ex8) confirms a `|>` may lead
+// the next line, continuing the previous line's chain rather than being
+// read as a separate (invalid) statement — the one case ex8's newline
+// tolerance can't handle via bracket-depth tracking alone, since it happens
+// at statement level with no enclosing delimiter (see parsePipeExpr's
+// pipeContinues helper).
+func TestParse_PipeChainContinuesOntoNextLine(t *testing.T) {
+	f, err := Parse("fn double(x: Int) -> Int { x * 2 }\n" +
+		"fn main() -> Int {\n    5\n        |> double\n        |> double\n}\n")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	body := parseFuncMain(t, f).Body.Exprs
+	if len(body) != 1 {
+		t.Fatalf("got %d body exprs, want 1 (the whole chain as one expression), body: %#v", len(body), body)
+	}
+	outer, ok := body[0].(*ast.CallExpr)
+	if !ok {
+		t.Fatalf("body[0]: got %T, want *ast.CallExpr", body[0])
+	}
+	if outer.Callee != "double" || outer.PipeStage != 2 {
+		t.Fatalf("got CallExpr{Callee: %q, PipeStage: %d}, want the second stage of a 2-stage chain", outer.Callee, outer.PipeStage)
+	}
+	inner, ok := outer.Args[outer.PipeArgIndex].(*ast.CallExpr)
+	if !ok || inner.Callee != "double" || inner.PipeStage != 1 {
+		t.Fatalf("got inner stage %#v, want the chain's first `double` stage", outer.Args[outer.PipeArgIndex])
+	}
+}
+
+// TestParse_PipeChainDoesNotSwallowUnrelatedNextStatement confirms the
+// newline-tolerance above is narrowly scoped: a statement that merely
+// starts on the next line (not with `|>`) still ends the previous one
+// normally, so parseBlock still sees two separate expressions.
+func TestParse_PipeChainDoesNotSwallowUnrelatedNextStatement(t *testing.T) {
+	f, err := Parse("fn main() -> Int {\n    let x = 5\n    x\n}\n")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	body := parseFuncMain(t, f).Body.Exprs
+	if len(body) != 2 {
+		t.Fatalf("got %d body exprs, want 2 (let, then x)", len(body))
+	}
+}
+
+// TestParse_TupleAndStructLitSpanMultipleLinesWithTrailingComma (ex8)
+// exercises the same tolerance for the two remaining comma-list literal
+// forms parseCommaList didn't already cover via a shared call site
+// (parseParenOrTupleExpr and parseStructLit each keep their own loop for
+// reasons documented on parseParenOrTupleExpr).
+func TestParse_TupleAndStructLitSpanMultipleLinesWithTrailingComma(t *testing.T) {
+	f, err := Parse("struct Point {\n    x: Int,\n    y: Int,\n}\n" +
+		"fn main() -> Int {\n    let t = (\n        1,\n        2,\n    )\n    let p = Point{\n        x: 1,\n        y: 2,\n    }\n    0\n}\n")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	body := parseFuncMain(t, f).Body.Exprs
+	tLet, ok := body[0].(*ast.LetExpr)
+	if !ok {
+		t.Fatalf("body[0]: got %T, want *ast.LetExpr", body[0])
+	}
+	tuple, ok := tLet.Value.(*ast.TupleLit)
+	if !ok || len(tuple.Elems) != 2 {
+		t.Fatalf("let t value: got %#v, want a 2-element *ast.TupleLit", tLet.Value)
+	}
+	pLet, ok := body[1].(*ast.LetExpr)
+	if !ok {
+		t.Fatalf("body[1]: got %T, want *ast.LetExpr", body[1])
+	}
+	structLit, ok := pLet.Value.(*ast.StructLit)
+	if !ok || len(structLit.Fields) != 2 {
+		t.Fatalf("let p value: got %#v, want a 2-field *ast.StructLit", pLet.Value)
+	}
+}

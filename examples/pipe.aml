@@ -46,5 +46,11 @@ fn main() -> Int {
     // position, not the block's final expression).
     3 |> fn(v: Int) -> Unit { print("inline pipe closure saw a value") }
 
-    a + b + c + s1 + s2 + tapped + peeked + d + e + s3
+    // ex8: a `|>` chain may continue onto the next line — recognized purely
+    // because the next line starts with `|>` (amifl-spec.md section 5).
+    let f = 5
+        |> double
+        |> fn(x: Int) -> Int { x + 1 }
+
+    a + b + c + s1 + s2 + tapped + peeked + d + e + s3 + f
 }
