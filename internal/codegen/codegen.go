@@ -415,6 +415,8 @@ func (g *gen) genStmt(e ast.Expr) error {
 		return g.genForExprStmt(v)
 	case *ast.IndexAssignExpr:
 		return g.genIndexAssignStmt(v)
+	case *ast.FieldAssignExpr:
+		return g.genFieldAssignStmt(v)
 	case *ast.SwitchExpr:
 		return g.genSwitchStmt(v)
 	case *ast.BreakExpr:

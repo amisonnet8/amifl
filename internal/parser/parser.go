@@ -868,11 +868,14 @@ func (p *parser) parseExpr() (ast.Expr, error) {
 }
 
 // finishAssignExpr consumes the `=` parseExpr just found after target and
-// builds the appropriate assignment node. Only a bare identifier
-// (ast.AssignExpr) or an index expression (ast.IndexAssignExpr) are valid
-// targets — a field (`t.x = v`) remains unsupported (step 6's deliberate
-// scope cut, ast.FieldExpr's doc comment), and anything else (a call, a
-// literal, a binary expression, ...) is simply not assignable.
+// builds the appropriate assignment node. A bare identifier
+// (ast.AssignExpr), an index expression (ast.IndexAssignExpr), or — since
+// ex10 — a plain `.field` access with no trailing call (ast.FieldAssignExpr)
+// are valid targets; anything else (a call, an enum-variant construction, a
+// literal, a binary expression, ...) is simply not assignable. A FieldExpr
+// with Args != nil (`p.Field(...)` — enum construction or a qualified call)
+// is rejected the same way, since assigning to a call's result makes no
+// sense.
 func (p *parser) finishAssignExpr(target ast.Expr) (ast.Expr, error) {
 	eqLine := p.cur.Line
 	if err := p.advance(); err != nil { // consume '='
@@ -887,6 +890,11 @@ func (p *parser) finishAssignExpr(target ast.Expr) (ast.Expr, error) {
 		return &ast.AssignExpr{Name: t.Name, Value: value, Line: t.Line}, nil
 	case *ast.IndexExpr:
 		return &ast.IndexAssignExpr{Target: t.Target, Index: t.Index, Value: value, Line: t.Line}, nil
+	case *ast.FieldExpr:
+		if t.Args != nil {
+			return nil, fmt.Errorf("line %d: invalid assignment target (cannot assign to a call)", eqLine)
+		}
+		return &ast.FieldAssignExpr{Target: t.Target, Field: t.Field, Value: value, Line: t.Line}, nil
 	default:
 		return nil, fmt.Errorf("line %d: invalid assignment target", eqLine)
 	}

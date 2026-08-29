@@ -1492,6 +1492,160 @@ func TestGenerate_ChainedIndexAssignEmitsReadModifyWriteBack(t *testing.T) {
 	}
 }
 
+// TestGenerate_FieldAssignEmitsFset (ex10) mirrors
+// TestGenerate_IndexAssignEmitsAset above: a plain `p.x = 9` writes
+// directly into %p_1 (no copy for a plain identifier target).
+func TestGenerate_FieldAssignEmitsFset(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Token: "%p_1", ResolvedType: "Point", Value: pointStructLit(1, 2)},
+		&ast.FieldAssignExpr{
+			Target:     &ast.IdentExpr{Name: "p", ResolvedType: "Point", Token: "%p_1"},
+			Field:      "x",
+			Value:      &ast.IntLit{Value: 9},
+			AmivmField: "x",
+		},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, &ast.StructDecl{
+		Name: "Point",
+		Fields: []ast.Param{
+			{Name: "x", Type: nt("Int"), ResolvedType: "Int64"},
+			{Name: "y", Type: nt("Int"), ResolvedType: "Int64"},
+		},
+	})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "FSET\t%p_1\t>x\t9") {
+		t.Errorf("expected FSET writing p.x=9 directly into %%p_1 (no copy for a plain identifier target); got:\n%s", ir)
+	}
+}
+
+// TestGenerate_ChainedFieldAssignEmitsReadModifyWriteBack (ex10) checks
+// `line.to.x = 9` (Line{to: Point}) — the FieldAssignExpr analogue of
+// TestGenerate_ChainedIndexAssignEmitsReadModifyWriteBack above.
+func TestGenerate_ChainedFieldAssignEmitsReadModifyWriteBack(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "line", Token: "%line_1", ResolvedType: "Line", Value: &ast.StructLit{
+			TypeName: "Line", ResolvedType: "Line",
+			Fields: []ast.StructLitField{{Name: "to", Value: pointStructLit(1, 2)}},
+		}},
+		&ast.FieldAssignExpr{
+			Target: &ast.FieldExpr{
+				Target:       &ast.IdentExpr{Name: "line", ResolvedType: "Line", Token: "%line_1"},
+				Field:        "to",
+				ResolvedType: "Point",
+				AmivmField:   "to",
+			},
+			Field:      "x",
+			Value:      &ast.IntLit{Value: 9},
+			AmivmField: "x",
+		},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls,
+		&ast.StructDecl{Name: "Line", Fields: []ast.Param{{Name: "to", Type: nt("Point"), ResolvedType: "Point"}}},
+		&ast.StructDecl{Name: "Point", Fields: []ast.Param{
+			{Name: "x", Type: nt("Int"), ResolvedType: "Int64"},
+			{Name: "y", Type: nt("Int"), ResolvedType: "Int64"},
+		}},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	// Reads line.to into a temp, FSETs 9 into that temp's x field, then
+	// writes the mutated temp back into line.to.
+	for _, want := range []string{
+		"FGET\t%amifl_tmp3\t%line_1\t>to",
+		"FSET\t%amifl_tmp3\t>x\t9",
+		"FSET\t%line_1\t>to\t%amifl_tmp3",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+// TestGenerate_IndexThroughFieldAssignEmitsReadModifyWriteBack (ex10)
+// checks `p.xs[0] = 9` where p: Bag{xs: List[Int]} — an IndexAssignExpr
+// whose own Target is a FieldExpr, exercising readAssignableContainer's
+// FGET-then-ASET-then-FSET mixed path.
+func TestGenerate_IndexThroughFieldAssignEmitsReadModifyWriteBack(t *testing.T) {
+	listType := "List(Int64)"
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Token: "%p_1", ResolvedType: "Bag", Value: &ast.StructLit{
+			TypeName: "Bag", ResolvedType: "Bag",
+			Fields: []ast.StructLitField{{Name: "xs", Value: &ast.ListLit{ResolvedType: listType, Elems: []ast.Expr{&ast.IntLit{Value: 1}}}}},
+		}},
+		&ast.IndexAssignExpr{
+			Target: &ast.FieldExpr{
+				Target:       &ast.IdentExpr{Name: "p", ResolvedType: "Bag", Token: "%p_1"},
+				Field:        "xs",
+				ResolvedType: listType,
+				AmivmField:   "xs",
+			},
+			Index: &ast.IntLit{Value: 0},
+			Value: &ast.IntLit{Value: 9},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, &ast.StructDecl{Name: "Bag", Fields: []ast.Param{{Name: "xs", Type: &ast.ListType{Elem: nt("Int")}, ResolvedType: listType}}})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"FGET\t%amifl_tmp3\t%p_1\t>xs",
+		"ASET\t%amifl_tmp3\t0\t9",
+		"FSET\t%p_1\t>xs\t%amifl_tmp3",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+// TestGenerate_FieldThroughIndexAssignEmitsReadModifyWriteBack (ex10)
+// checks `xs[0].x = 9` where xs: List[Point] — the mirror image of the
+// index-through-field test above (a FieldAssignExpr whose own Target is an
+// IndexExpr).
+func TestGenerate_FieldThroughIndexAssignEmitsReadModifyWriteBack(t *testing.T) {
+	listType := "List(Point)"
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Token: "%xs_1", ResolvedType: listType, Value: &ast.ListLit{ResolvedType: listType, Elems: []ast.Expr{pointStructLit(1, 2)}}},
+		&ast.FieldAssignExpr{
+			Target: &ast.IndexExpr{
+				Target:       &ast.IdentExpr{Name: "xs", ResolvedType: listType, Token: "%xs_1"},
+				Index:        &ast.IntLit{Value: 0},
+				ResolvedType: "Point",
+			},
+			Field:      "x",
+			Value:      &ast.IntLit{Value: 9},
+			AmivmField: "x",
+		},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, &ast.StructDecl{Name: "Point", Fields: []ast.Param{
+		{Name: "x", Type: nt("Int"), ResolvedType: "Int64"},
+		{Name: "y", Type: nt("Int"), ResolvedType: "Int64"},
+	}})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"AGET\t%amifl_tmp3\t%xs_1\t0",
+		"FSET\t%amifl_tmp3\t>x\t9",
+		"ASET\t%xs_1\t0\t%amifl_tmp3",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
 func TestGenerate_SliceExprOmittedBoundsEmitUnderscore(t *testing.T) {
 	listType := "List(Int64)"
 	f := mainFile(

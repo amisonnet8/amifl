@@ -154,6 +154,8 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 		return fc.resolveIndexExpr(v)
 	case *ast.IndexAssignExpr:
 		return fc.resolveIndexAssignExpr(v)
+	case *ast.FieldAssignExpr:
+		return fc.resolveFieldAssignExpr(v)
 	case *ast.SliceExpr:
 		return fc.resolveSliceExpr(v)
 	case *ast.ForExpr:
@@ -1590,22 +1592,21 @@ func (fc *funcChecker) resolveIndexExpr(v *ast.IndexExpr) (string, error) {
 }
 
 // resolveIndexAssignExpr type-checks `target[index] = value` (amifl-
-// spec.md section 3.2, "x[i] = v"). Target must be a plain identifier or
-// a chain of IndexExprs bottoming out in one — never a struct field or
-// other compound expression — a deliberate scope cut mirroring step 6's
-// "no field assignment" one, for the identical underlying reason:
-// codegen's write-back (collections.go's emitIndexAssign) only has to
-// unwind through IndexExpr layers, never worry about whether an
-// intermediate FGET-read copy aliases its original storage (a struct
-// field holding an Array would silently not, exactly the hazard step 6
-// sidestepped altogether by not letting `p.x = v` exist at all). Note
+// spec.md section 3.2, "x[i] = v"). Target must be a plain identifier or a
+// chain of IndexExpr/FieldExpr layers bottoming out in one
+// (isAssignableTarget, shared with resolveFieldAssignExpr below) —
+// codegen's write-back (collections.go's readAssignableContainer) walks
+// exactly this shape, reading each intermediate layer into a fresh temp and
+// writing it back outward (never assuming an intermediate FGET/AGET-read
+// copy aliases its original storage — a struct field holding an Array
+// wouldn't, CLAUDE.md's "過去に踏まれた地雷" #8's identical concern). Note
 // Target's own binding doesn't need to be *reassignable* (unlike
-// AssignExpr) — mutating an element never rebinds the variable itself,
-// so even a non-reassignable List/Array-typed parameter can have its
-// elements written through this, exactly as Go itself allows.
+// AssignExpr) — mutating an element never rebinds the variable itself, so
+// even a non-reassignable List/Array-typed parameter can have its elements
+// written through this, exactly as Go itself allows.
 func (fc *funcChecker) resolveIndexAssignExpr(v *ast.IndexAssignExpr) (string, error) {
-	if !isAssignableIndexTarget(v.Target) {
-		return "", fmt.Errorf("line %d: assignment target must be a plain variable or a chain of index expressions over one (not a struct field or other compound expression)", v.Line)
+	if !isAssignableTarget(v.Target) {
+		return "", fmt.Errorf("line %d: assignment target must be a plain variable or a chain of index/field expressions over one", v.Line)
 	}
 	targetTyp, err := fc.checkExpr(v.Target, "")
 	if err != nil {
@@ -1624,12 +1625,52 @@ func (fc *funcChecker) resolveIndexAssignExpr(v *ast.IndexAssignExpr) (string, e
 	return unitType, nil
 }
 
-func isAssignableIndexTarget(e ast.Expr) bool {
+// resolveFieldAssignExpr type-checks `target.field = value` (amifl-spec.md
+// section 3.2, "p.x = 5", ex10) — struct fields only (never a tuple's
+// `.0`-style numeric access: a tuple is meant as an immutable value,
+// unlike a struct, so there's deliberately no way to rebind one of its
+// elements in place). Target must satisfy isAssignableTarget, exactly like
+// resolveIndexAssignExpr above (the two share both the check and codegen's
+// write-back, so a target may freely mix Index/Field layers —
+// `p.points[i].y = v`, `xs[i].total = v`, ...).
+func (fc *funcChecker) resolveFieldAssignExpr(v *ast.FieldAssignExpr) (string, error) {
+	if !isAssignableTarget(v.Target) {
+		return "", fmt.Errorf("line %d: assignment target must be a plain variable or a chain of index/field expressions over one", v.Line)
+	}
+	targetTyp, err := fc.checkExpr(v.Target, "")
+	if err != nil {
+		return "", err
+	}
+	info, ok := fc.structs[targetTyp]
+	if !ok {
+		return "", fmt.Errorf("line %d: cannot field-assign into type %s (must be a struct)", v.Line, targetTyp)
+	}
+	fieldTyp, ok := info.fieldType(v.Field)
+	if !ok {
+		return "", fmt.Errorf("line %d: struct %s has no field %q", v.Line, targetTyp, v.Field)
+	}
+	if _, err := fc.checkExpr(v.Value, fieldTyp); err != nil {
+		return "", err
+	}
+	v.AmivmField = v.Field
+	return unitType, nil
+}
+
+// isAssignableTarget reports whether e is a valid assignment target base: a
+// plain identifier, or a chain of IndexExpr/FieldExpr layers (a FieldExpr
+// layer only counts when it's a plain `.field` access, Args == nil — never
+// a call/enum-construction/qualified-call shape) bottoming out in one.
+// Shared by resolveIndexAssignExpr and resolveFieldAssignExpr; codegen's
+// write-back (collections.go's readAssignableContainer) walks the identical
+// shape, so any change here must stay in sync with it.
+func isAssignableTarget(e ast.Expr) bool {
 	switch v := e.(type) {
 	case *ast.IdentExpr:
 		return true
 	case *ast.IndexExpr:
-		return isAssignableIndexTarget(v.Target)
+		return isAssignableTarget(v.Target)
+	case *ast.FieldExpr:
+		return v.Args == nil && isAssignableTarget(v.Target)
 	default:
 		return false
 	}

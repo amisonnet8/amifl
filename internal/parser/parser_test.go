@@ -884,6 +884,50 @@ func TestParse_InvalidAssignmentTargetIsAnError(t *testing.T) {
 	}
 }
 
+// TestParse_FieldAssignExpr (ex10) confirms `p.x = 5` parses to
+// ast.FieldAssignExpr, not the plain FieldExpr read `p.x` would.
+func TestParse_FieldAssignExpr(t *testing.T) {
+	assign := parseStmtExpr(t, "p.x = 5").(*ast.FieldAssignExpr)
+	target, ok := assign.Target.(*ast.IdentExpr)
+	if !ok || target.Name != "p" {
+		t.Fatalf("got Target %#v, want IdentExpr{Name: \"p\"}", assign.Target)
+	}
+	if assign.Field != "x" {
+		t.Fatalf("got Field %q, want \"x\"", assign.Field)
+	}
+	val, ok := assign.Value.(*ast.IntLit)
+	if !ok || val.Value != 5 {
+		t.Fatalf("got Value %#v, want IntLit{Value: 5}", assign.Value)
+	}
+}
+
+// TestParse_ChainedFieldAssignExpr confirms `line.to.x = 5` nests correctly
+// — the FieldAssignExpr's own Target is itself a FieldExpr.
+func TestParse_ChainedFieldAssignExpr(t *testing.T) {
+	assign := parseStmtExpr(t, "line.to.x = 5").(*ast.FieldAssignExpr)
+	if assign.Field != "x" {
+		t.Fatalf("got Field %q, want \"x\"", assign.Field)
+	}
+	inner, ok := assign.Target.(*ast.FieldExpr)
+	if !ok || inner.Field != "to" {
+		t.Fatalf("got Target %#v, want FieldExpr{Field: \"to\"}", assign.Target)
+	}
+	base, ok := inner.Target.(*ast.IdentExpr)
+	if !ok || base.Name != "line" {
+		t.Fatalf("got innermost Target %#v, want IdentExpr{Name: \"line\"}", inner.Target)
+	}
+}
+
+// TestParse_AssignToFieldCallIsAnError confirms `p.f(...) = v` — a
+// FieldExpr with a trailing call (enum construction / a qualified call) —
+// is rejected as an assignment target, since assigning to a call's result
+// makes no sense.
+func TestParse_AssignToFieldCallIsAnError(t *testing.T) {
+	if _, err := Parse("fn main() -> Int {\n    p.f(1) = 5\n    0\n}\n"); err == nil {
+		t.Fatal("expected an error assigning to a field-call's result")
+	}
+}
+
 func TestParse_SliceExprBothBounds(t *testing.T) {
 	sl := parseExprSrc(t, "xs[1:3]").(*ast.SliceExpr)
 	from, ok := sl.From.(*ast.IntLit)

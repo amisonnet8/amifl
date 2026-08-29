@@ -877,6 +877,21 @@ type IndexAssignExpr struct {
 	Line   int
 }
 
+// FieldAssignExpr is `target.field = value` (amifl-spec.md section 3.2,
+// "p.x = 5", ex10). Always Unit-typed. Compiles directly to FSET, the same
+// way IndexAssignExpr compiles directly to ASET — see IndexAssignExpr's and
+// IndexExpr's doc comments; codegen's write-back (collections.go's
+// readAssignableContainer) treats an Index/Field chain uniformly, so a
+// target may freely mix both (`p.points[i].y = v`, `xs[i].total = v`, ...).
+type FieldAssignExpr struct {
+	Target Expr
+	Field  string
+	Value  Expr
+	Line   int
+
+	AmivmField string // filled by sema; the field's own bare Go name (see FieldExpr.AmivmField)
+}
+
 // SliceExpr is `target[from:to]` / `target[from:]` / `target[:to]` /
 // `target[:]` (amifl-spec.md section 3.2) — From/To are nil when omitted
 // (never a literal placeholder token; the spec's own "省略時は`_`を渡す"
@@ -1221,6 +1236,7 @@ func (*ListLit) exprNode()         {}
 func (*SetOrMapLit) exprNode()     {}
 func (*IndexExpr) exprNode()       {}
 func (*IndexAssignExpr) exprNode() {}
+func (*FieldAssignExpr) exprNode() {}
 func (*SliceExpr) exprNode()       {}
 func (*ForExpr) exprNode()         {}
 func (*RangeExpr) exprNode()       {}
@@ -1251,6 +1267,7 @@ func (n *ListLit) Pos() int         { return n.Line }
 func (n *SetOrMapLit) Pos() int     { return n.Line }
 func (n *IndexExpr) Pos() int       { return n.Line }
 func (n *IndexAssignExpr) Pos() int { return n.Line }
+func (n *FieldAssignExpr) Pos() int { return n.Line }
 func (n *SliceExpr) Pos() int       { return n.Line }
 func (n *ForExpr) Pos() int         { return n.Line }
 func (n *RangeExpr) Pos() int       { return n.Line }

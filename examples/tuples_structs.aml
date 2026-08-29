@@ -51,5 +51,17 @@ fn main() -> Int {
     let tup2 = (100, "info")
     print(tup2.1)
 
-    xs + tx + ty + tz + a + b
+    // ex10: `p.field = v` mutates the field in place (amifl-spec.md
+    // section 3.2). Nested chains work the same way: `line.to.x = 50`
+    // reaches through the intermediate `to` field.
+    line.to.x = 50
+    let afterMutation = line.to.x
+
+    // Mutating p1 *after* it was copied into line.from has no effect on
+    // line — struct literals copy by value, so line.from is its own
+    // independent Point.
+    p1.x = 999
+    let stillOriginal = line.from.x
+
+    xs + tx + ty + tz + a + b + afterMutation + stillOriginal
 }

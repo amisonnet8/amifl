@@ -164,26 +164,9 @@ func (g *gen) genIndexValue(v *ast.IndexExpr) (string, error) {
 }
 
 // genIndexAssignStmt emits `target[index] = value` (amifl-spec.md section
-// 3.2, "x[i] = v"). When target is itself an index expression (assigning
-// into a nested Array/List — `matrix[i][j] = v`), a single ASET into
-// genValue(target)'s result isn't always correct: genValue always
-// produces a fresh copy when reading through a compound expression, and
-// Go's native fixed-size Array is a genuine value type, so mutating that
-// copy would silently never reach the original storage (this happens to
-// work by accident for a List-of-Lists, since a slice header copy still
-// aliases the same backing array — but not once an intermediate level is
-// Array-typed, and this function doesn't get to assume which one it is —
-// mirrors CLAUDE.md's "過去に踏まれた地雷" #8's identical FGET/FSET concern).
-// sema's resolveIndexAssignExpr guarantees Target is either a plain
-// identifier or a chain of IndexExprs bottoming out in one (never a
-// struct field or other compound expression — a deliberate scope cut,
-// see its doc comment), so the fix here only ever has to unwind through
-// IndexExpr layers: read the innermost target into a temp, ASET into the
-// temp, then recursively write the mutated temp back into *its* slot,
-// unwinding outward until a plain variable is reached — correct for any
-// nesting depth, with zero extra cost for the common single-level case
-// (Target is already a bare identifier, so the recursion bottoms out
-// immediately).
+// 3.2, "x[i] = v") via readAssignableContainer — see its doc comment for
+// why a plain ASET into genValue(target)'s result isn't always correct
+// once target is itself compound.
 func (g *gen) genIndexAssignStmt(v *ast.IndexAssignExpr) error {
 	idxVal, err := g.genValue(v.Index)
 	if err != nil {
@@ -193,34 +176,95 @@ func (g *gen) genIndexAssignStmt(v *ast.IndexAssignExpr) error {
 	if err != nil {
 		return err
 	}
-	return g.emitIndexAssign(v.Target, idxVal, val)
-}
-
-// emitIndexAssign writes val into target[idx] (idx/val already-generated
-// value tokens) — see genIndexAssignStmt's doc comment.
-func (g *gen) emitIndexAssign(target ast.Expr, idx, val string) error {
-	if inner, ok := target.(*ast.IndexExpr); ok {
-		innerTargetVal, err := g.genValue(inner.Target)
-		if err != nil {
-			return err
-		}
-		innerIdxVal, err := g.genValue(inner.Index)
-		if err != nil {
-			return err
-		}
-		goType := g.prog.resolveGoType(inner.ResolvedType)
-		tmp := g.newTemp()
-		fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, goType)
-		fmt.Fprintf(g.b, "\tAGET\t%%%s\t%s\t%s\n", tmp, innerTargetVal, innerIdxVal)
-		fmt.Fprintf(g.b, "\tASET\t%%%s\t%s\t%s\n", tmp, idx, val)
-		return g.emitIndexAssign(inner.Target, innerIdxVal, "%"+tmp)
-	}
-	targetVal, err := g.genValue(target)
+	containerVal, writeBack, err := g.readAssignableContainer(v.Target)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(g.b, "\tASET\t%s\t%s\t%s\n", targetVal, idx, val)
-	return nil
+	fmt.Fprintf(g.b, "\tASET\t%s\t%s\t%s\n", containerVal, idxVal, val)
+	return writeBack()
+}
+
+// genFieldAssignStmt emits `target.field = value` (amifl-spec.md section
+// 3.2, "p.x = 5", ex10) — the FSET counterpart of genIndexAssignStmt above,
+// sharing the same readAssignableContainer write-back.
+func (g *gen) genFieldAssignStmt(v *ast.FieldAssignExpr) error {
+	val, err := g.genValue(v.Value)
+	if err != nil {
+		return err
+	}
+	containerVal, writeBack, err := g.readAssignableContainer(v.Target)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(g.b, "\tFSET\t%s\t>%s\t%s\n", containerVal, v.AmivmField, val)
+	return writeBack()
+}
+
+// readAssignableContainer returns a token holding target's current value
+// that is safe to mutate in place with a single ASET/FSET, plus a writeBack
+// closure that must be called afterward to propagate that mutation back
+// into target's real storage. For a plain identifier, the token *is* that
+// storage (genValue on an IdentExpr is a no-op read, no copy involved), so
+// writeBack does nothing. For an IndexExpr/FieldExpr layer, genValue always
+// produces a fresh copy when reading through it (AGET/FGET), and Go's
+// native fixed-size Array is a genuine value type, so mutating that copy
+// alone would silently never reach the original storage (this happens to
+// work by accident for a List-of-Lists, since a slice header copy still
+// aliases the same backing array — but not once an intermediate level is
+// Array- or struct-typed, and this function doesn't get to assume which one
+// it is — mirrors CLAUDE.md's "過去に踏まれた地雷" #8's identical FGET/FSET
+// concern): the layer's current value is read into a temp, and the
+// returned writeBack recursively writes that (now-mutated) temp back into
+// *its own* slot via ASET/FSET, unwinding outward until a plain variable is
+// reached. sema's isAssignableTarget guarantees target is exactly this
+// shape (a plain identifier, or a chain of Index/Field layers bottoming out
+// in one), so this handles any nesting depth and any mix of the two layer
+// kinds (`p.points[i].y = v`, `xs[i].total = v`, ...) uniformly, with zero
+// extra cost for the common single-level case (target is already a bare
+// identifier, so the recursion bottoms out immediately).
+func (g *gen) readAssignableContainer(target ast.Expr) (string, func() error, error) {
+	switch t := target.(type) {
+	case *ast.IndexExpr:
+		innerVal, innerWriteBack, err := g.readAssignableContainer(t.Target)
+		if err != nil {
+			return "", nil, err
+		}
+		idxVal, err := g.genValue(t.Index)
+		if err != nil {
+			return "", nil, err
+		}
+		goType := g.prog.resolveGoType(t.ResolvedType)
+		tmp := g.newTemp()
+		fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, goType)
+		fmt.Fprintf(g.b, "\tAGET\t%%%s\t%s\t%s\n", tmp, innerVal, idxVal)
+		tmpTok := "%" + tmp
+		writeBack := func() error {
+			fmt.Fprintf(g.b, "\tASET\t%s\t%s\t%s\n", innerVal, idxVal, tmpTok)
+			return innerWriteBack()
+		}
+		return tmpTok, writeBack, nil
+	case *ast.FieldExpr:
+		innerVal, innerWriteBack, err := g.readAssignableContainer(t.Target)
+		if err != nil {
+			return "", nil, err
+		}
+		goType := g.prog.resolveGoType(t.ResolvedType)
+		tmp := g.newTemp()
+		fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, goType)
+		fmt.Fprintf(g.b, "\tFGET\t%%%s\t%s\t>%s\n", tmp, innerVal, t.AmivmField)
+		tmpTok := "%" + tmp
+		writeBack := func() error {
+			fmt.Fprintf(g.b, "\tFSET\t%s\t>%s\t%s\n", innerVal, t.AmivmField, tmpTok)
+			return innerWriteBack()
+		}
+		return tmpTok, writeBack, nil
+	default:
+		targetVal, err := g.genValue(target)
+		if err != nil {
+			return "", nil, err
+		}
+		return targetVal, func() error { return nil }, nil
+	}
 }
 
 // genSliceValue emits `target[from:to]` (amifl-spec.md section 3.2),

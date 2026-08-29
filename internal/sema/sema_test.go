@@ -2046,8 +2046,16 @@ func TestCheck_IndexAssignChainedIndexIsValid(t *testing.T) {
 	}
 }
 
-func TestCheck_IndexAssignThroughFieldIsAnError(t *testing.T) {
+// TestCheck_IndexAssignThroughFieldIsValid (ex10) supersedes the old
+// "IndexAssignThroughFieldIsAnError" — resolveIndexAssignExpr's
+// isAssignableTarget now accepts a FieldExpr layer too (shared with
+// resolveFieldAssignExpr, see its own doc comment), so `p.xs[0] = 9` (a
+// struct field holding a List) is valid.
+func TestCheck_IndexAssignThroughFieldIsValid(t *testing.T) {
 	f := mainFile(
+		&ast.LetExpr{Name: "p", Value: &ast.StructLit{TypeName: "Bag", Fields: []ast.StructLitField{
+			{Name: "xs", Value: intListLit(1, 2, 3)},
+		}}},
 		&ast.IndexAssignExpr{
 			Target: &ast.FieldExpr{Target: &ast.IdentExpr{Name: "p"}, Field: "xs"},
 			Index:  &ast.IntLit{Value: 0},
@@ -2055,8 +2063,96 @@ func TestCheck_IndexAssignThroughFieldIsAnError(t *testing.T) {
 		},
 		&ast.IntLit{Value: 0},
 	)
+	f.Decls = append(f.Decls, &ast.StructDecl{Name: "Bag", Fields: []ast.Param{{Name: "xs", Type: lt(nt("Int"))}}})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_FieldAssignExprIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Value: pointLit(1, 2)},
+		&ast.FieldAssignExpr{Target: &ast.IdentExpr{Name: "p"}, Field: "x", Value: &ast.IntLit{Value: 9}},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, pointStructDecl())
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+// TestCheck_FieldAssignNestedChainIsValid (ex10) checks `line.to.x = 9` —
+// a FieldAssignExpr whose own Target is itself a FieldExpr chain.
+func TestCheck_FieldAssignNestedChainIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "line", Value: &ast.StructLit{TypeName: "Line", Fields: []ast.StructLitField{
+			{Name: "to", Value: pointLit(1, 2)},
+		}}},
+		&ast.FieldAssignExpr{
+			Target: &ast.FieldExpr{Target: &ast.IdentExpr{Name: "line"}, Field: "to"},
+			Field:  "x",
+			Value:  &ast.IntLit{Value: 9},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls,
+		&ast.StructDecl{Name: "Line", Fields: []ast.Param{{Name: "to", Type: nt("Point")}}},
+		pointStructDecl(),
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+// TestCheck_FieldAssignThroughIndexIsValid (ex10) checks `xs[0].x = 9` — a
+// FieldAssignExpr whose own Target is an IndexExpr, the mirror image of
+// TestCheck_IndexAssignThroughFieldIsValid above.
+func TestCheck_FieldAssignThroughIndexIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "xs", Value: &ast.ListLit{Elems: []ast.Expr{pointLit(1, 2)}}},
+		&ast.FieldAssignExpr{
+			Target: &ast.IndexExpr{Target: &ast.IdentExpr{Name: "xs"}, Index: &ast.IntLit{Value: 0}},
+			Field:  "x",
+			Value:  &ast.IntLit{Value: 9},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, pointStructDecl())
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_FieldAssignIntoTupleIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "t", Value: &ast.TupleLit{Elems: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}}}},
+		&ast.FieldAssignExpr{Target: &ast.IdentExpr{Name: "t"}, Field: "0", Value: &ast.IntLit{Value: 9}},
+		&ast.IntLit{Value: 0},
+	)
 	if err := Check(f); err == nil {
-		t.Fatal("expected an error for an index-assignment target that reaches through a struct field")
+		t.Fatal("expected an error assigning into a tuple's element (tuples are immutable)")
+	}
+}
+
+// TestCheck_FieldAssignThroughCallIsAnError confirms a call result (not a
+// plain identifier or an Index/Field chain over one) is still rejected as
+// an assignment target base.
+func TestCheck_FieldAssignThroughCallIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.FieldAssignExpr{
+			Target: &ast.CallExpr{Callee: "makePoint", ResolvedType: "Point"},
+			Field:  "x",
+			Value:  &ast.IntLit{Value: 9},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	f.Decls = append(f.Decls, pointStructDecl(), &ast.FuncDecl{
+		Name:       "makePoint",
+		ReturnType: nt("Point"),
+		Body:       &ast.Block{Exprs: []ast.Expr{pointLit(1, 2)}},
+	})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for an assignment target that isn't a plain variable or an index/field chain over one")
 	}
 }
 

@@ -939,6 +939,19 @@ tourを一通り読んだユーザーから「イケてない」箇所として�
 
 **実地検証（`amivm`→`go build`→実行）で確認した項目**：使い捨てプログラムで、`&&`の左が`false`のとき右側の副作用（`print`）が実行されないこと・`||`の左が`true`のとき右側が実行されないこと・逆に短絡されない側（`&&`の左が`true`、`||`の左が`false`）では右側が実行されること、および`(a && b) || c`という3項連鎖で評価順序・短絡の両方が期待どおりであることを、`print`の出現順序で確認した（`amivm`→`go build`→実行）。上記のdiscardバグ修正も同じ検証セッションで確認済み。`examples/operators.aml`に短絡評価の実演（`loudTrue`/`loudFalse`という副作用のあるヘルパー関数、短絡される呼び出し2件・されない呼び出し2件）を追加し、期待どおりの2行だけが出力されることを確認した。`internal/codegen/codegen_test.go`に2件のテストを追加（IF/ELSE/ENDIFへの展開かつAND/OR命令が出力されないことの確認、discardバグの回帰テスト）。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存`examples/`全ファイルに回帰が無いことも確認済み。`amifl-spec.md` §6・§17.2（短絡評価ではないという項目を削除し、以降の項目番号を1つずつ繰り上げ、§17.3からの参照番号も追随）を更新した。
 
+### ロードマップ10番目の拡張：構造体フィールド代入`p.x = 5`（ex10）——`x[i]=v`が確立した「読み出し→変更→書き戻し」を`Index`/`Field`混在の任意の連鎖へ一般化しただけで、新しいAMIVM命令もsemaの型検査ロジックの新設もほぼ不要だった
+
+Step 6は「フィールド代入は構文として提供しない（`FSET`自体はstructリテラル構築の内部実装として既に使っている）」という意図的なスコープカットを下しており、原則4（ユーザー拡張ポイントを絞る）の一項目としても明記されていた。ユーザーからの明示的な依頼で、この制限を解除した。
+
+**確定した設計判断**：
+
+1. **`ast.FieldAssignExpr{Target, Field, Value, AmivmField}`を新設し、`ast.IndexAssignExpr`と完全に対称な形にした**——パーサーの`finishAssignExpr`（代入検出、Step 7以来の「まず式としてパースしてから`=`の有無で振り分ける」手法）へ`*ast.FieldExpr`のケースを追加するだけで済んだ。ただし`Args != nil`（enum構築・qualified呼び出しの呼び出し形）は明示的に拒否する——`p.Field(...) = v`という、呼び出し結果への代入は意味を持たないため。
+2. **sema側は`isAssignableIndexTarget`を`isAssignableTarget`へ一般化し、`*ast.FieldExpr`（`Args == nil`の場合のみ）も許容する第3のケースとして追加した**——これにより`resolveIndexAssignExpr`（既存）と新設の`resolveFieldAssignExpr`が全く同じ関数を共有する。Targetの型解決自体は、既存の`resolveFieldExpr`が構造体フィールドを引く際に使っているのと同じ`fc.structs[targetTyp].fieldType(...)`をそのまま再利用した——新しい型検査ロジックはほぼ無く、既存の2つの仕組み（index-assignの許容チェック、struct field-typeのlookup）を組み合わせただけで完成した。
+3. **タプルのフィールド（`.0`等）への代入は明示的に拒否し続けている**——`resolveFieldAssignExpr`は`fc.structs[targetTyp]`にヒットしない限りエラーになるため、Targetがタプル型なら自動的に拒否される（追加のガードコードは不要だった）。「タプルは不変値として扱う」という、ex10着手時に下した設計判断——`==`比較が可能・複数箇所で同じ内部Go型を共有する、というタプルの既存の性質（Step 6）を踏まえ、あえて可変にする理由が無いと判断した。仕様上明示していなかった非対称性（struct=可変・Tuple=不変）だったため、`amifl-spec.md`にこの対比を明記した。
+4. **codegen側は既存の`emitIndexAssign`を`readAssignableContainer`という、Index/Fieldどちらの層も扱える単一の再帰ヘルパーへ一般化した**——「対象がまだ書き込み可能な実体（プレーンな識別子）かどうか」と「そうでなければ、どう読み出し・書き戻すか」を、`(トークン, writeBackクロージャ, error)`という3値を返す形へ切り出した。`IndexExpr`層は`AGET`で読んで`ASET`で書き戻し、`FieldExpr`層は`FGET`で読んで`FSET`で書き戻す——両者の非対称な部分（命令名とフィールド/添字オペランドの形）だけがそれぞれのcaseに残り、再帰そのもの（内側の`writeBack`をどう外側へ連鎖させるか）は完全に共有された。この設計により、`p.arr[i].y = v`（field→index→field）のような、Index/Fieldが交互に現れる任意の混在チェーンも、追加のロジックを一切書かずに正しく動く——実地に4パターン（単純field・field-of-field・field-of-index・index-of-field）全てで確認済み（下記）。
+
+**実地検証（`amivm`→`go build`→実行）で確認した項目**：使い捨てプログラムで、単純な`p.x = 10`・ネストした`line.to.x = 99`（struct内structのフィールド代入）・`pts[0].x = 77`（List[Point]の要素のフィールド代入、field-of-index）・`b.fixed[2] = 88`（Array型フィールドへの添字代入、field-then-index——CLAUDE.mdの「過去に踏まれた地雷」#8が警告する、Arrayが値型であるがゆえのエイリアシング罠が実際に正しく回避されることを確認する最重要ケース）・`b.items[1] = 99`（List型フィールドへの添字代入）の5パターンを1つのプログラムで検証し、期待どおりの終了コードと一致することを確認した。加えて、タプルフィールドへの代入（`t.0 = 5`）・enum構築結果への代入（`Status.Retry(delay:5) = ...`）・呼び出し結果への代入がいずれも期待どおりコンパイルエラーになることも確認した。`examples/tuples_structs.aml`に`line.to.x = 50`（ネストしたフィールド代入）と、struct値渡しのコピー意味論を実演する`p1.x = 999`（`line.from`へ構築時にコピーされたPointは影響を受けないことを`line.from.x`で確認）を追加した。`internal/parser/parser_test.go`に4件、`internal/sema/sema_test.go`に6件（既存の`TestCheck_IndexAssignThroughFieldIsAnError`は前提が崩れたため`TestCheck_IndexAssignThroughFieldIsValid`へ置き換え）、`internal/codegen/codegen_test.go`に4件（単純代入・ネストしたfield-of-field・field-of-index・index-of-fieldの4パターンそれぞれのIR形状を検証）を追加。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存`examples/`全ファイルに回帰が無いことも確認済み。`amifl-spec.md`の原則4・2.2節（`struct`/`Tuple2〜8`の両方）・3.2節・17.2節（項目6を「フィールド代入が無い」から「タプルフィールドへの代入だけができない」へ差し替え）を更新した。
+
 ## 開発の進め方
 
 1. `amifl-spec.md`を正として実装する。仕様に曖昧な点や矛盾を見つけたら、まず仕様側を疑い、確定させてからコードを直す

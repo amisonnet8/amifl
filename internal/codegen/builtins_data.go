@@ -153,8 +153,8 @@ func (g *gen) genAtValue(c *ast.CallExpr) (string, error) {
 // genSetAtStmt emits `setAt(x, i, v)` (amifl-spec.md section 13.4) — a
 // plain ASET. Unlike the `x[i]=v` sugar (ast.IndexAssignExpr), x here is
 // an ordinary call argument rather than a restricted assignable path
-// (isAssignableIndexTarget) — but that restriction exists only to make the
-// *nested* write-back case (`matrix[i][j]=v`) unambiguous; setAt has no
+// (sema's isAssignableTarget) — but that restriction exists only to make
+// the *nested* write-back case (`matrix[i][j]=v`) unambiguous; setAt has no
 // such nesting; x is evaluated once via genValue exactly like any other
 // argument, and ASET's `variable` operand only needs *some* bare token
 // (which genValue always produces), not specifically x's original
