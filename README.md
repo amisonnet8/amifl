@@ -95,7 +95,7 @@ fn main() -> Int {
 
 More runnable examples covering scalars/operators, control flow, functions/closures, collections, tuples/structs/enums, the pipe operator/error handling, sets/maps, concurrency/file I/O, `extern`/modules, and task-oriented programs (FizzBuzz, word count, an RPN calculator, and more) live in [`examples/`](examples/).
 
-New to AmiFL? [`tour/`](tour/) is an 11-chapter, chapter-by-chapter introduction (currently Japanese only).
+New to AmiFL? [`tour/`](tour/) is an 11-chapter, chapter-by-chapter introduction (currently Japanese only). There's also an [interactive guide built with Gemini Notebook](https://notebook.google.com/notebook/1fc67606-7665-4325-bbb1-028e373b76a7).
 
 ## Language
 
