@@ -105,15 +105,26 @@ func (c *checker) canonicalReturnType(name string) (string, bool) {
 }
 
 // makeFuncType/funcTypeParts/isFuncType encode a closure's signature as
-// "fn(P1,P2,...)->R" (Pi/R already-canonical scalar types) — a purely
-// internal sema/codegen convention, never surfaced in source syntax. Step
-// 5 gives AmiFL no `fn(...) -> R` type-annotation grammar at all (see
+// "fn(P1,P2,...)->R" (Pi/R already-canonical types) — a purely internal
+// sema/codegen convention, never surfaced in source syntax. Step 5 gives
+// AmiFL no `fn(...) -> R` type-annotation grammar at all (see
 // ast.ClosureLit's doc comment), so, unlike scalar type names, this
 // string is never parsed from user-written text — makeFuncType is the
 // only producer (always fed already-canonical pieces) and funcTypeParts
-// only ever decodes strings makeFuncType itself built, which is what
-// keeps the decoding trivial (Pi/R can never themselves contain "," ")"
-// or "->", since step 5's ClosureLit restricts them to plain scalars).
+// only ever decodes strings makeFuncType itself built.
+//
+// Pi/R were assumed scalar-only when step 5 wrote this (a ClosureLit's
+// own params/return are indeed always scalar), but step 11's map/filter/
+// reduce/sortBy pass a *List/Array element's* type as a closure param —
+// which can itself be a Tuple/List/Array/Set/Map/struct, i.e. contain a
+// "," of its own. funcTypeParts splitting paramsRaw with a plain
+// strings.Split (found via a compound-typed reduce accumulator in
+// examples/run_length_encode.aml, step 15's examples expansion) silently
+// over-split a single "Tuple(Int64,Int64)" param into three pieces —
+// exactly the class of bug mapKeyValueTypes's depth-aware split already
+// exists to avoid for Map[K,V]'s own key/value. splitTopLevelCommas below
+// applies that same technique generally (Map only ever needs 2 pieces at
+// the first depth-0 comma; params needs all of them).
 func makeFuncType(params []string, ret string) string {
 	return "fn(" + strings.Join(params, ",") + ")->" + ret
 }
@@ -133,18 +144,47 @@ func funcTypeParts(t string) (params []string, ret string, ok bool) {
 	paramsRaw := t[len("fn("):sep]
 	ret = t[sep+len(")->"):]
 	if paramsRaw != "" {
-		params = strings.Split(paramsRaw, ",")
+		params = splitTopLevelCommas(paramsRaw)
 	}
 	return params, ret, true
 }
 
+// splitTopLevelCommas splits s at every comma that sits at paren-nesting
+// depth 0 — s itself carries no surrounding parens (mapKeyValueTypes's
+// "inner", funcTypeParts' "paramsRaw", tupleTypeParts' "inner" are all
+// already-stripped interiors), so a "(" bumps depth and a matching ")"
+// drops it back, and only a depth-0 comma is a real separator between
+// sibling type strings rather than one buried inside a nested Tuple/List/
+// Map/.../'s own parens.
+func splitTopLevelCommas(s string) []string {
+	var parts []string
+	depth := 0
+	start := 0
+	for i, r := range s {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
+}
+
 // makeTupleType/tupleTypeParts/isTupleType encode a TupleLit's shape as
-// "Tuple(T1,T2,...)" (Ti already-canonical scalar or struct type names) —
-// an internal sema/codegen convention exactly mirroring makeFuncType above,
-// with the identical reason a naive comma-split decoding stays safe:
-// sema's resolveTupleLit rejects any element whose own type isTupleType or
-// isFuncType (ast.TupleLit's doc comment), so no Ti can itself contain a
-// "," or ")" that would need bracket-depth-aware parsing to undo.
+// "Tuple(T1,T2,...)" — an internal sema/codegen convention exactly
+// mirroring makeFuncType above. resolveTupleLit only rejects a Tuple/Func-
+// typed element (ast.TupleLit's doc comment); it does *not* restrict
+// elements to scalars, so a Ti can legitimately be a List/Map/Set/Array/
+// struct and contain its own "," — tupleTypeParts needs the same
+// splitTopLevelCommas depth-aware split funcTypeParts does, for the
+// identical reason (see that function's doc comment).
 func makeTupleType(elems []string) string {
 	return "Tuple(" + strings.Join(elems, ",") + ")"
 }
@@ -161,7 +201,7 @@ func tupleTypeParts(t string) (elems []string, ok bool) {
 	if inner == "" {
 		return nil, true
 	}
-	return strings.Split(inner, ","), true
+	return splitTopLevelCommas(inner), true
 }
 
 // makeListType/listElemType/isListType encode List[T] (amifl-spec.md

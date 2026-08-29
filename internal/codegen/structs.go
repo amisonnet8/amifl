@@ -16,8 +16,10 @@ import (
 // sema's only shared vocabulary (CLAUDE.md's リポジトリ構成), so a string
 // convention sema invents for its own bookkeeping (here, "Tuple(T1,T2,...)")
 // has to be independently understood on the codegen side too, exactly like
-// unitType above. Kept minimal: codegen only ever needs to split it back
-// into element types to mint a Tuple's own synthesized STTYPE once.
+// unitType above. tupleTypeParts uses splitTopLevelCommas, not a plain
+// strings.Split — a tuple element may itself be a compound type (List/
+// Map/Set/Array/struct) containing a "," of its own; see sema/types.go's
+// identical fix for the full explanation.
 func isTupleType(t string) bool {
 	return strings.HasPrefix(t, "Tuple(")
 }
@@ -27,7 +29,32 @@ func tupleTypeParts(t string) []string {
 	if inner == "" {
 		return nil
 	}
-	return strings.Split(inner, ",")
+	return splitTopLevelCommas(inner)
+}
+
+// splitTopLevelCommas is codegen's own copy of sema's identical helper
+// (types.go) — splits s at every comma sitting at paren-nesting depth 0,
+// so a nested compound type's own commas (inside its own parens) never
+// get mistaken for a separator between sibling type strings.
+func splitTopLevelCommas(s string) []string {
+	var parts []string
+	depth := 0
+	start := 0
+	for i, r := range s {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
 }
 
 // resolveGoType returns the Go/AMIVM type name amifl type t compiles to: a

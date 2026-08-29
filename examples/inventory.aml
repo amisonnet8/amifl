@@ -1,0 +1,63 @@
+struct Item {
+    name: String,
+    qty: Int,
+    price: Float
+}
+
+enum StockLevel {
+    Ok
+    Low
+    Empty
+}
+
+fn classify(item: Item) -> StockLevel {
+    if item.qty == 0 {
+        StockLevel.Empty
+    } elif item.qty < 5 {
+        StockLevel.Low
+    } else {
+        StockLevel.Ok
+    }
+}
+
+fn levelLabel(level: StockLevel) -> String {
+    switch level {
+        case StockLevel.Ok: "ok"
+        case StockLevel.Low: "low"
+        case StockLevel.Empty: "empty"
+    }
+}
+
+fn restock(item: Item, amount: Int) -> Item {
+    Item{name: item.name, qty: item.qty + amount, price: item.price}
+}
+
+fn itemValue(item: Item) -> Float {
+    cast[Float64](item.qty) * item.price
+}
+
+fn main() -> Int {
+    let items: List[Item] = [Item{name: "widget", qty: 12, price: 2.5}, Item{name: "gadget", qty: 3, price: 9.0}, Item{name: "gizmo", qty: 0, price: 15.0}]
+
+    let isLow = fn(item: Item) -> Bool {
+        let level = classify(item)
+        switch level {
+            case StockLevel.Ok: false
+            case StockLevel.Low: true
+            case StockLevel.Empty: true
+        }
+    }
+    let lowStock = filter(items, isLow)
+
+    for item in lowStock {
+        print(item.name + ": " + levelLabel(classify(item)))
+    }
+
+    let restocked = restock(items[2], 20)
+    print(restocked.name + " restocked: " + levelLabel(classify(restocked)))
+
+    let sumValue = fn(acc: Float, item: Item) -> Float { acc + itemValue(item) }
+    let totalValue = reduce(items, 0.0, sumValue)
+
+    len(lowStock) + cast[Int64](totalValue)
+}

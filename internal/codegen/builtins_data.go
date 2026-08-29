@@ -18,7 +18,11 @@ import (
 // (types.go's "fn(P1,P2,...)->R" convention) — needed here because map/
 // filter/reduce/sortBy's closure argument type has to be split back into
 // its parameter/return types to mint the right Go type arguments for
-// amiflrt's generic helpers.
+// amiflrt's generic helpers. paramsRaw is split with splitTopLevelCommas
+// (structs.go), not a plain strings.Split — a param can itself be a
+// compound type (a List/Array element passed through map/filter/reduce/
+// sortBy is under no scalar-only restriction) and so may contain a "," of
+// its own; see sema/types.go's identical fix for the full explanation.
 func funcTypeParts(t string) (params []string, ret string, ok bool) {
 	if !strings.HasPrefix(t, "fn(") {
 		return nil, "", false
@@ -30,7 +34,7 @@ func funcTypeParts(t string) (params []string, ret string, ok bool) {
 	paramsRaw := t[len("fn("):sep]
 	ret = t[sep+len(")->"):]
 	if paramsRaw != "" {
-		params = strings.Split(paramsRaw, ",")
+		params = splitTopLevelCommas(paramsRaw)
 	}
 	return params, ret, true
 }

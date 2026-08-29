@@ -768,6 +768,17 @@ codegen側は`amiflrt.Tap[T any]`/`amiflrt.Peek[T any]`という1個のGoジェ�
 
 `internal/parser`（パイプチェーンメタデータ3件）・`internal/sema`（ステージ番号付きエラー2件・非パイプ呼び出しの回帰確認1件・`tap`/`peek`4件）・`internal/codegen`（`tap`/`peek`のIR生成2件）・`internal/modloader`（`.amlz`をルート/import対象双方で読み込む2件）に新規ユニットテストを追加し、全てpassすることを確認済み。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイル（`examples/modules/`含む）に回帰が無いことも確認済み。**これでStep 15（パイプラインDX機能・CLI・配布）を完了し、CLAUDE.mdの実装ステップ計画15項目全てが完了した。**
 
+### 15ステップ完了後：examples/の拡充と、その過程で発見した`funcTypeParts`/`tupleTypeParts`/`genClosureLitInto`のバグ修正
+
+CLAUDE.md「開発の進め方」5番（新しい構文・組み込み関数の実装ごとにサンプルを追加する）に沿って各ステップが追加してきた`examples/`は、いずれも「その回で実装した構文・組み込み関数を一通り呼ぶ」という**機能網羅型**のサンプル（`data_ops.aml`が13.4節の28関数を1関数内で連鎖させる、等）だった。15ステップ完了後、ユーザーの依頼で「実際にAmiFLで何を書くか」を示す**タスク志向型**のサンプルを10本追加した——`fizzbuzz.aml`（MOD+分岐+`push`/`join`によるレポート組み立て）・`run_length_encode.aml`（ランレングス圧縮・伸長・往復検証、Tuple2を要素に持つList）・`binary_search.aml`（二分探索と`index`組み込みの結果一致検証）・`word_count.aml`（頻度カウントMap+`entries`上の`reduce`で最頻出語を求める）・`inventory.aml`（struct+enumによる在庫分類、`filter`/`reduce`、structの再構築パターン）・`csv_stats.aml`（CSV風データの`parse`失敗を`isError`で判定しつつMapへ集計）・`rpn_calculator.aml`（`push`/`pop`をスタックとして使う逆ポーランド記法電卓）・`temperature_alerts.aml`（フィールド付きenumのしきい値分類+Map集計）・`grade_book.aml`（struct内List[Int]の平均化とクラス平均の二重集約）・`tag_overlap.aml`（`List[Set[String]]`への`union`/`intersect`畳み込み）——各ファイルは既存examplesと重複しない組み合わせ・機構を1つ以上持つよう意図的に設計した（例：`word_count.aml`/`tag_overlap.aml`は「複合型（Tuple/Set）を集約値に持つ`reduce`」という、既存の`data_ops.aml`のスカラー専用`reduce`使用では踏まれていなかった経路を通る）。
+
+**この過程で、`run_length_encode.aml`（`reduce`の集約引数がTuple2[Int,Int]）を書いた際に、独立した3箇所に埋め込まれた同根のバグを発見・修正した**（詳細な発見の経緯・一般化した教訓は`amifl_implementation_notes.md`「踏んだ地雷・確立したパターン」に記載）：
+
+1. `funcTypeParts`（`"fn(P1,P2,...)->R"`という内部エンコーディングのデコーダー、sema/codegen双方に独立コピーあり）とtupleTypeParts（`"Tuple(T1,T2,...)"`の同種デコーダー、同じく双方に独立コピーあり）が、要素が複合型（それ自身カンマを内包する型）になりうる場合に対応しない素朴な`strings.Split(",")`のままだった——Step 5/6時点の「要素は常にスカラー」という当時正しかった前提が、Step 11の`map`/`filter`/`reduce`/`sortBy`（クロージャー引数がList/Array要素の型そのものになる設計）によって静かに破られていたが、それらのStepのexampleがどれも複合型要素を持つコレクションをこれらの組み込み関数へ渡していなかったため、これまで一度も顕在化していなかった。
+2. `internal/codegen/closure.go`の`genClosureLitInto`（クロージャーリテラル自身のコード生成）が、パラメータ/戻り値のGo型を`resolveGoType`（Tuple/List/Map/Set/Chan/Streamの合成型を正しく解決する共通ディスパッチャ）経由ではなく、スカラー型しか持たない`goTypeNames`マップへ直接アクセスして求めていた——同じくStep 5時点の前提をそのまま埋め込んだもので、Step 11の拡張に追随していなかった。
+
+対策：`Map[K,V]`の2要素分割で使われていた深さ追跡分割（Step 10で確立済みの`mapKeyValueTypes`）を任意個の要素へ一般化した`splitTopLevelCommas`を新設し、`funcTypeParts`/`tupleTypeParts`（sema/codegen双方）をこれで置き換え、`genClosureLitInto`は`resolveGoType`経由へ差し替えた。`internal/sema/sema_test.go`（`TestCheck_ReduceAcceptsTupleTypedAccumulator`）・`internal/codegen/codegen_test.go`（`TestGenerate_ClosureLitWithTupleParamUsesSynthesizedTupleGoType`）に回帰テストを追加。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、新規10本を含む`examples/`全ファイルの実行結果を手計算と照合して確認済み。
+
 ## 開発の進め方
 
 1. `amifl-spec.md`を正として実装する。仕様に曖昧な点や矛盾を見つけたら、まず仕様側を疑い、確定させてからコードを直す

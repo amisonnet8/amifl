@@ -1,0 +1,48 @@
+enum Alert {
+    Normal
+    Warning(delta: Float)
+    Critical(delta: Float)
+}
+
+fn classify(reading: Float, threshold: Float) -> Alert {
+    let delta = reading - threshold
+    if delta <= 0.0 {
+        Alert.Normal
+    } elif delta <= 10.0 {
+        Alert.Warning(delta: delta)
+    } else {
+        Alert.Critical(delta: delta)
+    }
+}
+
+fn label(alert: Alert) -> String {
+    switch alert {
+        case Alert.Normal: "normal"
+        case Alert.Warning(delta): "warning"
+        case Alert.Critical(delta): "critical"
+    }
+}
+
+fn bumpLabel(counts: Map[String, Int], key: String) -> Unit {
+    let current = get(counts, key, 0)
+    set(counts, key, current + 1)
+}
+
+fn main() -> Int {
+    let threshold: Float = 75.0
+    let readings: List[Float] = [70.0, 76.0, 82.0, 60.0, 95.0, 74.5, 88.0]
+
+    let counts: Map[String, Int] = {}
+    for reading in readings {
+        let alert = classify(reading, threshold)
+        bumpLabel(counts, label(alert))
+    }
+
+    let normalCount = get(counts, "normal", 0)
+    let warningCount = get(counts, "warning", 0)
+    let criticalCount = get(counts, "critical", 0)
+
+    print("temperature report ready")
+
+    normalCount + warningCount * 10 + criticalCount * 100
+}

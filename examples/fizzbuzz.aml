@@ -1,0 +1,26 @@
+fn main() -> Int {
+    let n: Int = 20
+    let lines: List[String] = []
+    let fizzCount: Int = 0
+    let buzzCount: Int = 0
+    let fizzBuzzCount: Int = 0
+
+    let i: Int = 0
+    while i < n {
+        i = i + 1
+        if i % 15 == 0 {
+            lines = push(lines, "FizzBuzz")
+            fizzBuzzCount = fizzBuzzCount + 1
+        } elif i % 3 == 0 {
+            lines = push(lines, "Fizz")
+            fizzCount = fizzCount + 1
+        } elif i % 5 == 0 {
+            lines = push(lines, "Buzz")
+            buzzCount = buzzCount + 1
+        }
+    }
+
+    print(join(lines, ","))
+
+    fizzCount + buzzCount + fizzBuzzCount
+}

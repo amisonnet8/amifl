@@ -142,21 +142,23 @@ func (p *program) newFuncTypeDecl(paramGoTypes []string, retGoType string) strin
 // genIfBranch/genWhileStmt's existing approach (step 4) rather than
 // needing any goto/VAR-hoisting machinery of its own.
 func (g *gen) genClosureLitInto(token string, lit *ast.ClosureLit) error {
+	// A ClosureLit's own params/return are always plain scalars when it's
+	// written as a `let`'s direct value (step 5's scope), but the *same*
+	// let-bound closure is routinely passed to map/filter/reduce/sortBy
+	// (step 11) as the List/Array element's own type — which can be a
+	// compound type (Tuple/List/Map/Set/struct, whatever the collection
+	// holds). A direct goTypeNames[...] lookup here only ever has scalar
+	// entries, so it must go through resolveGoType (the same dispatcher
+	// every other type-to-Go-type site uses) rather than duplicate its
+	// scalar-only fallback — found via a Tuple2-typed reduce accumulator
+	// in examples/run_length_encode.aml (step 15's examples expansion).
 	var paramGoTypes []string
 	for _, p := range lit.Params {
-		t, ok := goTypeNames[p.ResolvedType]
-		if !ok {
-			return fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", p.ResolvedType)
-		}
-		paramGoTypes = append(paramGoTypes, t)
+		paramGoTypes = append(paramGoTypes, g.prog.resolveGoType(p.ResolvedType))
 	}
 	var retGoType string
 	if lit.ResolvedReturnType != unitType {
-		t, ok := goTypeNames[lit.ResolvedReturnType]
-		if !ok {
-			return fmt.Errorf("codegen: unknown type %q (sema should have rejected this)", lit.ResolvedReturnType)
-		}
-		retGoType = t
+		retGoType = g.prog.resolveGoType(lit.ResolvedReturnType)
 	}
 
 	typeName := g.prog.newFuncTypeDecl(paramGoTypes, retGoType)

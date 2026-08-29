@@ -1,0 +1,70 @@
+fn encode(xs: List[Int]) -> List[Tuple2[Int, Int]] {
+    let result: List[Tuple2[Int, Int]] = []
+    let n = len(xs)
+    let i: Int = 0
+    while i < n {
+        let value = xs[i]
+        let count: Int = 1
+        let j: Int = i + 1
+        let scanning: Bool = true
+        while scanning {
+            if j >= n {
+                scanning = false
+            } elif xs[j] != value {
+                scanning = false
+            } else {
+                count = count + 1
+                j = j + 1
+            }
+        }
+        result = push(result, (value, count))
+        i = j
+    }
+    result
+}
+
+fn decode(pairs: List[Tuple2[Int, Int]]) -> List[Int] {
+    let result: List[Int] = []
+    for pair in pairs {
+        let k: Int = 0
+        while k < pair.1 {
+            result = push(result, pair.0)
+            k = k + 1
+        }
+    }
+    result
+}
+
+fn sameLists(a: List[Int], b: List[Int]) -> Bool {
+    if len(a) != len(b) {
+        false
+    } else {
+        let ok: Bool = true
+        let i: Int = 0
+        while i < len(a) {
+            if a[i] != b[i] {
+                ok = false
+            }
+            i = i + 1
+        }
+        ok
+    }
+}
+
+fn main() -> Int {
+    let original: List[Int] = [1, 1, 1, 2, 2, 3, 3, 3, 3, 1]
+    let encoded = encode(original)
+    let decoded = decode(encoded)
+
+    let roundTripOk = sameLists(original, decoded)
+    if roundTripOk {
+        print("round-trip ok")
+    } else {
+        print("round-trip mismatch")
+    }
+
+    let sumCounts = fn(acc: Int, p: Tuple2[Int, Int]) -> Int { acc + p.1 }
+    let totalCount = reduce(encoded, 0, sumCounts)
+
+    len(encoded) + totalCount
+}

@@ -1,0 +1,26 @@
+fn bumpCount(counts: Map[String, Int], word: String) -> Unit {
+    let current = get(counts, word, 0)
+    set(counts, word, current + 1)
+}
+
+fn main() -> Int {
+    let text = "the quick brown fox jumps over the lazy dog the fox runs"
+    let words = split(text, " ")
+
+    let counts: Map[String, Int] = {}
+    for w in words {
+        bumpCount(counts, w)
+    }
+
+    let mostFrequent = fn(acc: Tuple2[String, Int], item: Tuple2[String, Int]) -> Tuple2[String, Int] {
+        if item.1 > acc.1 { item } else { acc }
+    }
+
+    let allEntries = entries(counts)
+    let first = allEntries[0]
+    let winner = reduce(allEntries, first, mostFrequent)
+
+    print(winner.0)
+
+    len(words) + len(counts) + winner.1
+}

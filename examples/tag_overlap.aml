@@ -1,0 +1,18 @@
+fn main() -> Int {
+    let articleTags: List[Set[String]] = [{"go", "rust", "systems"}, {"rust", "webdev", "systems"}, {"go", "rust", "cli"}]
+
+    let unionAll = fn(acc: Set[String], tags: Set[String]) -> Set[String] { union(acc, tags) }
+    let intersectAll = fn(acc: Set[String], tags: Set[String]) -> Set[String] { intersect(acc, tags) }
+
+    let empty: Set[String] = {}
+    let allTags = reduce(articleTags, empty, unionAll)
+
+    let firstSet = articleTags[0]
+    let restTags = slice(articleTags, 1, len(articleTags))
+    let commonToAll = reduce(restTags, firstSet, intersectAll)
+
+    let report = toList(commonToAll) |> sort |> join(_, ",")
+    print(report)
+
+    len(allTags) + len(commonToAll) * 10
+}

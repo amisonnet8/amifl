@@ -1,0 +1,38 @@
+struct Student {
+    name: String,
+    scores: List[Int]
+}
+
+fn average(scores: List[Int]) -> Float {
+    let sumScores = fn(acc: Int, s: Int) -> Int { acc + s }
+    let total = reduce(scores, 0, sumScores)
+    cast[Float64](total) / cast[Float64](len(scores))
+}
+
+fn passed(avg: Float, threshold: Float) -> Bool {
+    avg >= threshold
+}
+
+fn main() -> Int {
+    let students: List[Student] = [Student{name: "Alice", scores: [88, 92, 79]}, Student{name: "Bob", scores: [55, 60, 58]}, Student{name: "Carol", scores: [95, 91, 89]}, Student{name: "Dave", scores: [40, 45, 50]}]
+
+    let threshold: Float = 60.0
+
+    let isPassing = fn(student: Student) -> Bool { passed(average(student.scores), threshold) }
+    let passing = filter(students, isPassing)
+
+    for student in passing {
+        print(student.name + " passed")
+    }
+
+    let studentAverage = fn(student: Student) -> Float { average(student.scores) }
+    let averages = map(students, studentAverage)
+
+    let sumAverages = fn(acc: Float, avg: Float) -> Float { acc + avg }
+    let classTotal = reduce(averages, 0.0, sumAverages)
+    let classAverage = classTotal / cast[Float64](len(averages))
+
+    print("grade book ready")
+
+    len(passing) + cast[Int64](classAverage)
+}

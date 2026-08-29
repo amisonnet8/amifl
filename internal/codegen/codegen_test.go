@@ -649,6 +649,47 @@ func TestGenerate_ClosureLitEmitsFntypeVarClos(t *testing.T) {
 	}
 }
 
+// TestGenerate_ClosureLitWithTupleParamUsesSynthesizedTupleGoType is a
+// regression test (step 15's examples expansion, examples/
+// run_length_encode.aml) for a bug found via that example: a ClosureLit's
+// own params/return were assumed always-scalar (step 5's original scope)
+// and genClosureLitInto looked them up directly in goTypeNames, which has
+// no entry at all for a synthesized Tuple type — a closure passed to
+// reduce whose accumulator is a Tuple2[...] (perfectly legal since step 11
+// lets a List/Array element's own type, which may be compound, flow
+// through as a closure param) crashed codegen with "unknown type". Fixed
+// by routing through resolveGoType, same as every other type site.
+func TestGenerate_ClosureLitWithTupleParamUsesSynthesizedTupleGoType(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "sumCounts", Token: "%sumCounts_1", Value: &ast.ClosureLit{
+			Params: []ast.Param{
+				{Name: "acc", Type: nt("Int"), ResolvedType: "Int64"},
+				{Name: "p", Type: nt("Tuple2"), ResolvedType: "Tuple(Int64,Int64)"},
+			},
+			ReturnType:         nt("Int"),
+			ResolvedReturnType: "Int64",
+			ResolvedType:       "fn(Int64,Tuple(Int64,Int64))->Int64",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.IdentExpr{Name: "acc", ResolvedType: "Int64", Token: "&1-1"},
+			}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"STTYPE\t^AmiflTuple1",
+		"FNTYPE\t^AmiflFunc1\t^int64\t^AmiflTuple1\t:\t^int64",
+		"VAR\t%sumCounts_1\t^AmiflFunc1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
 func TestGenerate_ClosureCapturesOuterLetTokenDirectly(t *testing.T) {
 	f := mainFile(
 		&ast.LetExpr{Name: "base", Token: "%base_1", ResolvedType: "Int64", Value: &ast.IntLit{Value: 10}},

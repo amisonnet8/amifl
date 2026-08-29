@@ -1,0 +1,41 @@
+fn parseAmount(row: String) -> Tuple2[Int, Error] {
+    let fields = split(row, ",")
+    parse[Int](fields[1])
+}
+
+fn category(row: String) -> String {
+    let fields = split(row, ",")
+    fields[0]
+}
+
+fn addToCategory(totals: Map[String, Int], cat: String, amount: Int) -> Unit {
+    let current = get(totals, cat, 0)
+    set(totals, cat, current + amount)
+}
+
+fn main() -> Int {
+    let rows: List[String] = ["fruit,120", "veggie,80", "fruit,45", "dairy,60", "fruit,30", "veggie,25", "bogus,notanumber"]
+
+    let totals: Map[String, Int] = {}
+    let errorCount: Int = 0
+
+    for row in rows {
+        let result = parseAmount(row)
+        if isError(result.1) {
+            errorCount = errorCount + 1
+        } else {
+            addToCategory(totals, category(row), result.0)
+        }
+    }
+
+    let sortedCats = sort(keys(totals))
+    for cat in sortedCats {
+        print(cat)
+    }
+
+    let fruitTotal = get(totals, "fruit", 0)
+    let veggieTotal = get(totals, "veggie", 0)
+    let dairyTotal = get(totals, "dairy", 0)
+
+    fruitTotal + veggieTotal + dairyTotal + len(totals) + errorCount
+}

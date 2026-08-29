@@ -1,0 +1,38 @@
+fn evaluate(expr: String) -> Int {
+    let tokens = split(expr, " ")
+    let stack: List[Int] = []
+
+    for token in tokens {
+        let isOperator = token == "+" || token == "-" || token == "*" || token == "/"
+        if isOperator {
+            let popB = pop(stack)
+            let afterB = popB.0
+            let b = popB.1
+            let popA = pop(afterB)
+            let afterA = popA.0
+            let a = popA.1
+            let result = switch {
+                case token == "+": a + b
+                case token == "-": a - b
+                case token == "*": a * b
+                default: a / b
+            }
+            stack = push(afterA, result)
+        } else {
+            let value = unwrap(parse[Int](token))
+            stack = push(stack, value)
+        }
+    }
+
+    stack[0]
+}
+
+fn main() -> Int {
+    let r1 = evaluate("3 4 +")
+    let r2 = evaluate("5 1 2 + 4 * + 3 -")
+    let r3 = evaluate("10 2 /")
+
+    print("rpn ok")
+
+    r1 + r2 + r3
+}

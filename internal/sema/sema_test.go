@@ -3652,3 +3652,43 @@ func TestCheck_TapRejectsUnitTypedValue(t *testing.T) {
 		t.Fatal("expected an error: tap's v must not be Unit-typed")
 	}
 }
+
+// TestCheck_ReduceAcceptsTupleTypedAccumulator is a regression test (step
+// 15's examples expansion, examples/run_length_encode.aml) for a bug found
+// via that example: funcTypeParts split a closure's own encoded type
+// string ("fn(Int64,Tuple(Int64,Int64))->Int64") with a plain
+// strings.Split on "," — which over-splits a Tuple-typed parameter at the
+// comma *inside* its own "Tuple(...)", so reduce wrongly rejected a
+// closure whose accumulator is a Tuple2[Int,Int] even though every
+// parameter/return type genuinely matched. Fixed by splitTopLevelCommas
+// (depth-aware, mirroring mapKeyValueTypes' existing technique).
+func TestCheck_ReduceAcceptsTupleTypedAccumulator(t *testing.T) {
+	pair := func(a, b uint64) ast.Expr {
+		return &ast.TupleLit{Elems: []ast.Expr{&ast.IntLit{Value: a}, &ast.IntLit{Value: b}}}
+	}
+	call := &ast.CallExpr{Callee: "reduce", Args: []ast.Expr{
+		&ast.IdentExpr{Name: "pairs"},
+		&ast.IdentExpr{Name: "zero"},
+		&ast.IdentExpr{Name: "sumCounts"},
+	}}
+	f := mainFile(
+		&ast.LetExpr{Name: "pairs", Value: &ast.ListLit{Elems: []ast.Expr{pair(1, 2), pair(3, 4)}}},
+		&ast.LetExpr{Name: "zero", Type: tuple2t(nt("Int"), nt("Int")), Value: pair(0, 0)},
+		&ast.LetExpr{Name: "sumCounts", Value: &ast.ClosureLit{
+			Params: []ast.Param{
+				{Name: "acc", Type: tuple2t(nt("Int"), nt("Int"))},
+				{Name: "p", Type: tuple2t(nt("Int"), nt("Int"))},
+			},
+			ReturnType: tuple2t(nt("Int"), nt("Int")),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IdentExpr{Name: "acc"}}},
+		}},
+		&ast.LetExpr{Name: "r", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v (a Tuple2[Int,Int]-typed accumulator should type-check)", err)
+	}
+	if call.ResolvedType != "Tuple(Int64,Int64)" {
+		t.Fatalf("got ResolvedType %q, want Tuple(Int64,Int64)", call.ResolvedType)
+	}
+}

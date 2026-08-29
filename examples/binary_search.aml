@@ -1,0 +1,50 @@
+fn linearIndex(xs: List[Int], target: Int) -> Tuple2[Int, Bool] {
+    index(xs, target)
+}
+
+fn binarySearch(xs: List[Int], target: Int) -> Tuple2[Int, Bool] {
+    let lo: Int = 0
+    let hi: Int = len(xs) - 1
+    let foundIdx: Int = -1
+    let searching: Bool = true
+    while searching {
+        if lo > hi {
+            searching = false
+        } else {
+            let mid = (lo + hi) / 2
+            let midVal = xs[mid]
+            if midVal == target {
+                foundIdx = mid
+                searching = false
+            } elif midVal < target {
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+    }
+    (foundIdx, foundIdx >= 0)
+}
+
+fn main() -> Int {
+    let sorted: List[Int] = [2, 5, 8, 12, 16, 23, 38, 45, 56, 72, 91]
+
+    let hitA = binarySearch(sorted, 23)
+    let hitB = linearIndex(sorted, 23)
+    let missA = binarySearch(sorted, 24)
+    let missB = linearIndex(sorted, 24)
+
+    let agreeHit = hitA.0 == hitB.0 && hitA.1 == hitB.1
+    let agreeMiss = missA.1 == missB.1
+
+    if agreeHit && agreeMiss {
+        print("binary search agrees with linear index")
+    } else {
+        print("mismatch")
+    }
+
+    let bonusA = if agreeHit { 100 } else { 0 }
+    let bonusB = if agreeMiss { 10 } else { 0 }
+
+    hitA.0 + bonusA + bonusB
+}
