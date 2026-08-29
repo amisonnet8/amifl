@@ -3,13 +3,14 @@
 // native executable.
 //
 // The source argument names either a single .aml file (its own
-// independent one-file package, amifl-spec.md section 12.1) or a
-// directory (every .aml file directly inside it, merged into one
-// package) — either way, modloader.Load resolves whatever `import`
-// declarations it (transitively) reaches into the full package DAG
-// (section 12.2-12.5) before compileToIR ever runs sema/codegen. .amlz
-// archives and the `archive` subcommand are step 15's own scope (see
-// CLAUDE.md's implementation step plan).
+// independent one-file package, amifl-spec.md section 12.1), a directory
+// (every .aml file directly inside it, merged into one package), or that
+// directory's .amlz archive (step 15's `archive` subcommand output,
+// section 16.2 — internal/modloader.Load treats it exactly like the
+// directory it was produced from) — either way, modloader.Load resolves
+// whatever `import` declarations it (transitively) reaches into the full
+// package DAG (section 12.2-12.5) before compileToIR ever runs
+// sema/codegen.
 package main
 
 import (
@@ -20,6 +21,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/amisonnet8/amifl/internal/modloader"
 )
 
 func main() {
@@ -46,7 +49,7 @@ func run(args []string) error {
 	case "emit-go":
 		return runEmitGo(rest)
 	case "archive":
-		return fmt.Errorf("amifl archive: not implemented yet (modules land in a later step; see CLAUDE.md)")
+		return runArchive(rest)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return nil
@@ -61,7 +64,7 @@ func printUsage(w io.Writer) {
 
 Usage:
 
-	amifl <command> [flags] <file.aml | package-dir>
+	amifl <command> [flags] <file.aml | package-dir | package.amlz>
 
 Commands:
 
@@ -69,7 +72,7 @@ Commands:
 	run        compile and immediately run, streaming its stdin/stdout/stderr
 	emit-ir    compile to AMIVM-IR
 	emit-go    compile to Go source (via amivm)
-	archive    package a directory's .aml files into a .amlz archive (not implemented yet)
+	archive    package a directory's .aml files into a .amlz archive
 	help       show this help message
 
 Flags (build, emit-ir, emit-go):
@@ -77,10 +80,16 @@ Flags (build, emit-ir, emit-go):
 	-o <file>  output file path (default: derived from the input path)
 	-v         show each pipeline stage's output as it runs
 
-The source argument is either a single .aml file (its own independent
-one-file package) or a directory (every .aml file directly inside it,
-merged into one package) — imports it declares are resolved automatically
-from other package directories (amifl-spec.md section 12).
+Flags (archive):
+
+	-o <file>  output .amlz path (default: <directory-name>.amlz)
+
+The source argument is a single .aml file (its own independent one-file
+package), a directory (every .aml file directly inside it, merged into one
+package), or that directory's .amlz archive (produced by "amifl archive",
+usable anywhere a package-dir is) — imports it declares are resolved
+automatically from other package directories or their own .amlz archives
+(amifl-spec.md section 12).
 `)
 }
 
@@ -99,7 +108,7 @@ func parseOneSrcArg(fs *flag.FlagSet, args []string) (string, error) {
 		return "", err
 	}
 	if fs.NArg() != 1 {
-		return "", fmt.Errorf("usage: amifl %s [-o file] [-v] <file.aml | package-dir>", fs.Name())
+		return "", fmt.Errorf("usage: amifl %s [-o file] [-v] <file.aml | package-dir | package.amlz>", fs.Name())
 	}
 	return fs.Arg(0), nil
 }
@@ -123,7 +132,7 @@ func runBuild(args []string) error {
 
 func runRun(args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("usage: amifl run <file.aml | package-dir>")
+		return fmt.Errorf("usage: amifl run <file.aml | package-dir | package.amlz>")
 	}
 	srcPath := args[0]
 
@@ -203,16 +212,19 @@ func runEmitGo(args []string) error {
 }
 
 // defaultOutPath derives an output path from srcPath and appending ext: for
-// a single file, its own base name with the .aml extension stripped (step
-// 1-13's original behavior, unchanged); for a package directory (step 14),
-// the directory's own base name — e.g. building "./myproject" (a
-// directory) defaults to "myproject" in the current directory, never the
-// directory path itself (which `go build -o` could never write an
-// executable over).
+// a single .aml file, its own base name with that extension stripped (step
+// 1-13's original behavior, unchanged); for a package directory (step 14)
+// or its .amlz archive (step 15), the directory/archive's own base name
+// with any .amlz extension stripped — e.g. building "./myproject" (a
+// directory) or "myproject.amlz" both default to "myproject" in the
+// current directory, never the source path itself (which `go build -o`
+// could never write an executable over, and which would otherwise leave a
+// stray ".amlz" in every derived output name).
 func defaultOutPath(srcPath, ext string) string {
 	base := filepath.Base(filepath.Clean(srcPath))
 	if info, err := os.Stat(srcPath); err == nil && info.IsDir() {
 		return base + ext
 	}
+	base = strings.TrimSuffix(base, modloader.AmlzExt)
 	return strings.TrimSuffix(base, ".aml") + ext
 }

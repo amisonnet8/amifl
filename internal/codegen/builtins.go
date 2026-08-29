@@ -21,6 +21,10 @@ func (g *gen) genBuiltinValue(c *ast.CallExpr) (string, error) {
 		return g.genTypeNameValue(c)
 	case "isError":
 		return g.genIsErrorValue(c)
+	case "tap":
+		return g.genTapValue(c)
+	case "peek":
+		return g.genPeekValue(c)
 	case "cast":
 		return g.genCastValue(c)
 	case "parse":

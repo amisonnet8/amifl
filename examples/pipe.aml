@@ -26,5 +26,8 @@ fn main() -> Int {
     let bumped = for x in nums yield addN(x, 10)
     let s2 = sum(bumped)
 
-    a + b + c + s1 + s2
+    let tapped = 7 |> tap(_, "seven")
+    let peeked = peek(9)
+
+    a + b + c + s1 + s2 + tapped + peeked
 }

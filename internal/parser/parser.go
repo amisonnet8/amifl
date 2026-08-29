@@ -825,16 +825,53 @@ func (p *parser) parsePipeExpr() (ast.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
+	if p.cur.Kind != lexer.PipeArrow {
+		return left, nil
+	}
+
+	// A real chain: collect every stage's CallExpr as we go (each already
+	// carries its own PipeArgIndex, set by parsePipeRHS below) so that once
+	// the chain ends we know its full length and can back-fill PipeStage/
+	// PipeChainLabels onto all of them at once — amifl-spec.md section 9.1's
+	// diagnostic needs the whole chain's shape, not just one stage.
+	labels := []string{pipeChainLabel(left)}
+	var stages []*ast.CallExpr
 	for p.cur.Kind == lexer.PipeArrow {
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
-		left, err = p.parsePipeRHS(left)
+		next, err := p.parsePipeRHS(left)
 		if err != nil {
 			return nil, err
 		}
+		call := next.(*ast.CallExpr) // parsePipeRHS always returns *ast.CallExpr
+		stages = append(stages, call)
+		labels = append(labels, call.Callee)
+		left = next
+	}
+	for i, call := range stages {
+		call.PipeStage = i + 1
+		call.PipeChainLabels = labels
 	}
 	return left, nil
+}
+
+// pipeChainLabel produces a short display label for a pipeline's initial
+// left-hand value (amifl-spec.md section 9.1's diagnostic, e.g. "data" in
+// `data |> parse |> ...`) — only IdentExpr/CallExpr get a precise label
+// (their own name), since anything else (a literal, a binary expression, a
+// field access, ...) has no single short name; those fall back to a generic
+// placeholder rather than attempting to unparse arbitrary source, which
+// nothing else in this codebase does either.
+func pipeChainLabel(e ast.Expr) string {
+	switch v := e.(type) {
+	case *ast.IdentExpr:
+		return v.Name
+	case *ast.CallExpr:
+		return v.Callee
+	default:
+		return "<value>"
+	}
 }
 
 // parsePipeRHS parses the right-hand side of one `|>` step, given the
@@ -863,7 +900,7 @@ func (p *parser) parsePipeRHS(lhs ast.Expr) (ast.Expr, error) {
 		// section 9, "省略時は第1引数へ左辺値を注入する", the degenerate
 		// no-other-args case). Also covers `a |> unwrap[T]`/`a |> cast[T]`
 		// (parseGenericTypeArgBracket already consumed the bracket above).
-		return &ast.CallExpr{Callee: nameTok.Value, Args: []ast.Expr{lhs}, Line: nameTok.Line, TypeArg: typeArg}, nil
+		return &ast.CallExpr{Callee: nameTok.Value, Args: []ast.Expr{lhs}, Line: nameTok.Line, TypeArg: typeArg, PipeArgIndex: 0}, nil
 	}
 	if err := p.advance(); err != nil { // consume '('
 		return nil, err
@@ -912,12 +949,14 @@ func (p *parser) parsePipeRHS(lhs ast.Expr) (ast.Expr, error) {
 		return nil, err
 	}
 
+	argIdx := 0
 	if placeholderIdx >= 0 {
 		args[placeholderIdx] = lhs
+		argIdx = placeholderIdx
 	} else {
 		args = append([]ast.Expr{lhs}, args...)
 	}
-	return &ast.CallExpr{Callee: nameTok.Value, Args: args, Line: nameTok.Line, TypeArg: typeArg}, nil
+	return &ast.CallExpr{Callee: nameTok.Value, Args: args, Line: nameTok.Line, TypeArg: typeArg, PipeArgIndex: argIdx}, nil
 }
 
 // The chain implements amifl-spec.md section 6's precedence table

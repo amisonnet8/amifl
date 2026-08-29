@@ -13,7 +13,9 @@
 package modloader
 
 import (
+	"archive/zip"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +24,12 @@ import (
 	"github.com/amisonnet8/amifl/internal/ast"
 	"github.com/amisonnet8/amifl/internal/parser"
 )
+
+// AmlzExt is the extension amifl-spec.md section 16.2 gives a package's
+// distributable archive form (the `archive` command's own output, step 15)
+// — a plain zip (ArchiveDir, cmd/amifl/archive.go) holding exactly the
+// producing directory's own direct .aml files, flat, no nested paths.
+const AmlzExt = ".amlz"
 
 // Package is one loaded AmiFL package: every .aml file sharing one
 // directory (amifl-spec.md section 12.1), already parsed. Key uniquely
@@ -105,26 +113,43 @@ func (l *loader) load(fsPath string, isRoot bool) (*Package, error) {
 	}
 	absPath = filepath.Clean(absPath)
 
-	info, err := os.Stat(absPath)
-	if err != nil {
-		return nil, err
-	}
+	isArchive := strings.HasSuffix(absPath, AmlzExt)
 
 	var dir string
 	var singleFile string
-	if info.IsDir() {
-		dir = absPath
-	} else {
-		if !isRoot {
-			return nil, fmt.Errorf("import path %q must name a directory (package), not a file", fsPath)
+	if !isArchive {
+		info, err := os.Stat(absPath)
+		if err != nil {
+			return nil, err
 		}
+		if info.IsDir() {
+			dir = absPath
+		} else {
+			if !isRoot {
+				return nil, fmt.Errorf("import path %q must name a directory (package), not a file", fsPath)
+			}
+			dir = filepath.Dir(absPath)
+			singleFile = absPath
+		}
+	} else {
+		// A .amlz archive stands in for the directory it was produced from
+		// (amifl-spec.md section 16.2, "package-dir（またはその.amlzアーカ
+		// イブ）") — never the single-file branch above, even if it happens
+		// to hold just one .aml file, since it's always the *complete*
+		// curated set of a directory's own children (cmd/amifl/archive.go),
+		// not one file selected out of a directory with ignored siblings.
+		// Any `import "./x"` its own files declare resolves relative to the
+		// directory the .amlz itself sits in, exactly as if it had been
+		// unpacked there.
 		dir = filepath.Dir(absPath)
-		singleFile = absPath
 	}
 
 	key := dir
 	if singleFile != "" {
 		key = singleFile
+	}
+	if isArchive {
+		key = absPath
 	}
 
 	// The cycle check must run *before* the cache-hit check below: a
@@ -143,37 +168,58 @@ func (l *loader) load(fsPath string, isRoot bool) (*Package, error) {
 	l.visiting[key] = true
 	defer delete(l.visiting, key)
 
-	var amlPaths []string
-	if singleFile != "" {
-		amlPaths = []string{singleFile}
-	} else {
+	// sources holds every file this package merges (amifl-spec.md section
+	// 12.1) as (display label, already-read bytes) pairs — read up front and
+	// uniformly across all three source kinds (single file / directory /
+	// .amlz archive) so the parse loop below never needs to know which one
+	// it came from.
+	var sources []sourceFile
+	switch {
+	case singleFile != "":
+		src, err := os.ReadFile(singleFile)
+		if err != nil {
+			return nil, err
+		}
+		sources = []sourceFile{{label: singleFile, data: src}}
+	case isArchive:
+		var err error
+		sources, err = readArchiveAmlFiles(absPath)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", absPath, err)
+		}
+	default:
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			return nil, err
 		}
+		var names []string
 		for _, e := range entries {
 			if !e.IsDir() && strings.HasSuffix(e.Name(), ".aml") {
-				amlPaths = append(amlPaths, filepath.Join(dir, e.Name()))
+				names = append(names, e.Name())
 			}
 		}
-		sort.Strings(amlPaths)
-		if len(amlPaths) == 0 {
-			return nil, fmt.Errorf("no .aml files found in %s", dir)
+		sort.Strings(names)
+		for _, name := range names {
+			p := filepath.Join(dir, name)
+			src, err := os.ReadFile(p)
+			if err != nil {
+				return nil, err
+			}
+			sources = append(sources, sourceFile{label: p, data: src})
 		}
+	}
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("no .aml files found in %s", absPath)
 	}
 
 	pkg := &Package{Key: key, Dir: dir, Imports: map[string]string{}}
 	l.byKey[key] = pkg
 
 	var importDecls []*ast.ImportDecl
-	for _, p := range amlPaths {
-		src, err := os.ReadFile(p)
+	for _, sf := range sources {
+		f, err := parser.Parse(string(sf.data))
 		if err != nil {
-			return nil, err
-		}
-		f, err := parser.Parse(string(src))
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", p, err)
+			return nil, fmt.Errorf("%s: %w", sf.label, err)
 		}
 		pkg.Files = append(pkg.Files, f)
 		for _, decl := range f.Decls {
@@ -205,4 +251,55 @@ func (l *loader) load(fsPath string, isRoot bool) (*Package, error) {
 	}
 	l.order = append(l.order, pkg)
 	return pkg, nil
+}
+
+// sourceFile is one already-read .aml file, with a label suitable for a
+// parse-error message — a filesystem path for a directory/single-file
+// package, or "archive.amlz:member.aml" for one read out of a .amlz.
+type sourceFile struct {
+	label string
+	data  []byte
+}
+
+// readArchiveAmlFiles opens the .amlz (zip) file at absPath and reads back
+// every top-level *.aml member, sorted by name for the same deterministic
+// ordering os.ReadDir's own sort.Strings pass gives a real directory
+// (CLAUDE.md's established "file exploration order is fixed and
+// reproducible" requirement, section 12.4's canonical-prefix
+// first-alias-wins rule depends on it). A member under a subdirectory
+// inside the zip is ignored rather than rejected — cmd/amifl/archive.go
+// never writes one, but silently accepting a stray nested entry (rather
+// than erroring on an archive some other tool produced) costs nothing.
+func readArchiveAmlFiles(absPath string) ([]sourceFile, error) {
+	r, err := zip.OpenReader(absPath)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	var names []string
+	byName := map[string]*zip.File{}
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() || strings.Contains(f.Name, "/") || !strings.HasSuffix(f.Name, ".aml") {
+			continue
+		}
+		names = append(names, f.Name)
+		byName[f.Name] = f
+	}
+	sort.Strings(names)
+
+	sources := make([]sourceFile, 0, len(names))
+	for _, name := range names {
+		rc, err := byName[name].Open()
+		if err != nil {
+			return nil, err
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return nil, err
+		}
+		sources = append(sources, sourceFile{label: absPath + ":" + name, data: data})
+	}
+	return sources, nil
 }

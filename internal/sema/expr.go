@@ -1,6 +1,7 @@
 package sema
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -44,6 +45,65 @@ func (fc *funcChecker) checkExpr(e ast.Expr, expected string) (string, error) {
 		return "", fmt.Errorf("line %d: expected %s, got %s", e.Pos(), expected, typ)
 	}
 	return typ, nil
+}
+
+// checkExprPipeAware is checkExpr plus amifl-spec.md section 9.1's
+// stage-numbered pipeline diagnostic: call's own metadata (set by the
+// parser's parsePipeExpr/parsePipeRHS, step 15) says whether argIdx is the
+// argument position that actually received a piped-in value — if so, and
+// arg's resolved type doesn't match expected, the error names the stage
+// and its neighbor instead of checkExpr's plain "expected X, got Y"
+// (unchanged for every other argument, and for any call outside a `|>`
+// chain at all). Callers that already call checkExpr per-argument (ordinary
+// fn/closure calls via checkCallArgs, and the handful of built-ins whose
+// first argument has one fixed expected type: print, trim/upper/lower,
+// split/join/replace, startsWith/endsWith) pass call and that argument's
+// own index; every other built-in — the polymorphic ones that discover
+// their expected type from the argument itself rather than checking
+// against one fixed type — has no single "expected" to name here and so
+// keeps calling checkExpr directly.
+func (fc *funcChecker) checkExprPipeAware(call *ast.CallExpr, argIdx int, arg ast.Expr, expected string) (string, error) {
+	typ, err := fc.checkExpr(arg, expected)
+	if err == nil {
+		return typ, nil
+	}
+	if call.PipeStage == 0 || argIdx != call.PipeArgIndex {
+		return "", err
+	}
+	resolveExpected := expected
+	if expected == "Any" {
+		resolveExpected = ""
+	}
+	actualTyp, resolveErr := fc.resolveType(arg, resolveExpected)
+	if resolveErr != nil {
+		return "", err // the argument itself doesn't even type-check; report the original error
+	}
+	return "", pipeTypeMismatchError(call, actualTyp, expected)
+}
+
+// pipeTypeMismatchError renders amifl-spec.md section 9.1's "pipeline type
+// mismatch at stage N" diagnostic for call (a `|>` chain's stage-N step)
+// whose piped-in argument resolved to actualTyp instead of the expected
+// type. This is a deliberately scoped-down rendering of the spec's own
+// example: it names the chain (via each stage's bare callee name plus a
+// short label for the chain's initial value, amifl-spec.md's own worked
+// example shows a full source-text reproduction with a caret pointer
+// underneath the offending stage and a "did you mean ..." fix suggestion —
+// neither is attempted here, since this codebase has no AST-to-source
+// pretty-printer to reconstruct the former precisely, and the latter would
+// need real type-directed suggestion synthesis, both disproportionate to a
+// diagnostics-quality-of-life feature.
+func pipeTypeMismatchError(call *ast.CallExpr, actualTyp, expected string) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "line %d: pipeline type mismatch at stage %d (%s)\n", call.Line, call.PipeStage, call.Callee)
+	fmt.Fprintf(&b, "  pipeline: %s\n", strings.Join(call.PipeChainLabels, " |> "))
+	if call.PipeStage == 1 {
+		fmt.Fprintf(&b, "  %s outputs: %s\n", call.PipeChainLabels[0], actualTyp)
+	} else {
+		fmt.Fprintf(&b, "  stage %d (%s) outputs: %s\n", call.PipeStage-1, call.PipeChainLabels[call.PipeStage-1], actualTyp)
+	}
+	fmt.Fprintf(&b, "  stage %d (%s) expects: %s", call.PipeStage, call.Callee, expected)
+	return errors.New(b.String())
 }
 
 func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) {
@@ -175,7 +235,7 @@ func (fc *funcChecker) resolveCallExpr(v *ast.CallExpr) (string, error) {
 		if len(v.Args) != 1 {
 			return "", fmt.Errorf("line %d: print expects exactly 1 argument, got %d", v.Line, len(v.Args))
 		}
-		if _, err := fc.checkExpr(v.Args[0], "String"); err != nil {
+		if _, err := fc.checkExprPipeAware(v, 0, v.Args[0], "String"); err != nil {
 			return "", err
 		}
 		v.ResolvedType = unitType
@@ -264,7 +324,7 @@ func (fc *funcChecker) checkCallArgs(v *ast.CallExpr, params []string) error {
 		return fmt.Errorf("line %d: %q expects %d argument(s), got %d", v.Line, v.Callee, len(params), len(v.Args))
 	}
 	for i, arg := range v.Args {
-		if _, err := fc.checkExpr(arg, params[i]); err != nil {
+		if _, err := fc.checkExprPipeAware(v, i, arg, params[i]); err != nil {
 			return err
 		}
 	}

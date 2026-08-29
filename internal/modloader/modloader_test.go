@@ -1,6 +1,7 @@
 package modloader
 
 import (
+	"archive/zip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,6 +21,36 @@ func writeFiles(t *testing.T, dir string, files map[string]string) string {
 		}
 	}
 	return dir
+}
+
+// writeAmlz writes each name->content pair as a flat top-level member of a
+// new zip at path — the same shape cmd/amifl/archive.go's own writer
+// produces (this test package deliberately doesn't import cmd/amifl, so it
+// builds the zip directly rather than reusing that writer).
+func writeAmlz(t *testing.T, path string, files map[string]string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	zw := zip.NewWriter(f)
+	for name, content := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestLoad_SingleFileIsItsOwnPackage(t *testing.T) {
@@ -139,5 +170,52 @@ func TestLoad_DiamondDependencyReusesTheSamePackage(t *testing.T) {
 	}
 	if len(order) != 4 {
 		t.Fatalf("got %d packages, want 4 (shared, a, b, root)", len(order))
+	}
+}
+
+func TestLoad_AmlzArchiveAsRootPackage(t *testing.T) {
+	dir := t.TempDir()
+	archivePath := writeAmlz(t, filepath.Join(dir, "pkg.amlz"), map[string]string{
+		"a.aml": "fn Foo() -> Int {\n    1\n}\n",
+		"b.aml": "fn main() -> Int {\n    Foo()\n}\n",
+	})
+
+	root, order, err := Load(archivePath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(root.Files) != 2 {
+		t.Fatalf("got %d files, want 2 (both members of the archive merged into one package)", len(root.Files))
+	}
+	if len(order) != 1 {
+		t.Fatalf("got %d packages, want 1", len(order))
+	}
+	if root.Prefix != "" {
+		t.Fatalf("got Prefix %q, want \"\" for the root package", root.Prefix)
+	}
+}
+
+func TestLoad_AmlzArchiveAsImportTarget(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"main.aml": "import mathutil \"./mathutil.amlz\"\nfn main() -> Int {\n    mathutil.Clamp(1)\n}\n",
+	})
+	writeAmlz(t, filepath.Join(dir, "mathutil.amlz"), map[string]string{
+		"m.aml": "fn Clamp(v: Int) -> Int {\n    v\n}\n",
+	})
+
+	root, order, err := Load(filepath.Join(dir, "main.aml"))
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(order) != 2 {
+		t.Fatalf("got %d packages in order, want 2 (mathutil, then root)", len(order))
+	}
+	mathutilKey := root.Imports["mathutil"]
+	if order[0].Key != mathutilKey {
+		t.Fatalf("expected the archive package to be loaded before root")
+	}
+	if order[0].Prefix != "mathutil_" {
+		t.Fatalf("got Prefix %q, want \"mathutil_\"", order[0].Prefix)
 	}
 }

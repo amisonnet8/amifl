@@ -494,6 +494,23 @@ type CallExpr struct {
 	// literal-defaulting (sema's resolveIntLit) actually gave it — see
 	// that function's own doc comment for the full explanation.
 	ExternParamTypes []string
+
+	// Pipe-chain metadata (amifl-spec.md section 9.1, step 15's
+	// stage-numbered type-mismatch diagnostic) — filled in by the parser's
+	// parsePipeExpr/parsePipeRHS only for a CallExpr synthesized from a
+	// `|>` step; PipeStage stays 0 (its zero value) for every ordinary
+	// call, which callers use as the "not part of a pipe" test. PipeStage
+	// is this call's 1-based position among the chain's `|>` steps (the
+	// first RHS after the initial value is stage 1). PipeArgIndex is which
+	// element of Args received the piped-in value (0 unless an explicit
+	// `_` placeholder chose otherwise). PipeChainLabels holds one short
+	// display label per position — index 0 the initial left-hand value,
+	// index i (i>=1) that stage's own callee name — identical across every
+	// CallExpr in the same chain, so a mismatch at any one stage can still
+	// render the whole chain.
+	PipeStage       int
+	PipeArgIndex    int
+	PipeChainLabels []string
 }
 
 // ClosureLit is `fn(params) -> R { body }` used as an expression — a

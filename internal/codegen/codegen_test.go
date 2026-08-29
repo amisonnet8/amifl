@@ -1451,6 +1451,42 @@ func TestGenerate_IsErrorEmitsNeqNil(t *testing.T) {
 	}
 }
 
+func TestGenerate_TapEmitsGenericCallAndReturnsItsFirstArg(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "tap", Builtin: "tap", ResolvedType: "Int64",
+		Args:     []ast.Expr{&ast.IntLit{Value: 5}, &ast.StringLit{Value: "label"}},
+		ArgTypes: []string{"Int64", "String"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "r", Token: "%r_1", ResolvedType: "Int64", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{"VAR\t%amifl_tmp1\t^int64", "CALL\t%amifl_tmp1\t:\t?amiflrt.Tap\t^int64\t:\t5\t\"label\""} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_PeekEmitsGenericCallAndReturnsItsArg(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "peek", Builtin: "peek", ResolvedType: "String",
+		Args:     []ast.Expr{&ast.StringLit{Value: "hi"}},
+		ArgTypes: []string{"String"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "r", Token: "%r_1", ResolvedType: "String", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{"VAR\t%amifl_tmp1\t^string", "CALL\t%amifl_tmp1\t:\t?amiflrt.Peek\t^string\t:\t\"hi\""} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
 func TestGenerate_CastEmitsTypeConversionCall(t *testing.T) {
 	call := &ast.CallExpr{
 		Callee: "cast", Builtin: "cast", ResolvedType: "Float64",

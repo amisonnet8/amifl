@@ -1,6 +1,7 @@
 package sema
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/amisonnet8/amifl/internal/ast"
@@ -3536,5 +3537,118 @@ func TestCheckPackage_MultipleFilesShareOneNamespaceWithNoImportNeeded(t *testin
 	}}
 	if _, err := CheckPackage([]*ast.File{f1, f2}, "", nil); err != nil {
 		t.Fatalf("CheckPackage() error: %v", err)
+	}
+}
+
+// --- step 15: pipeline DX (amifl-spec.md section 9.1's stage-numbered
+// diagnostic, section 13.8's tap/peek) ---
+
+// TestCheck_PipeStageMismatchProducesStageNumberedError builds the same
+// shape parser.parsePipeExpr produces for `data |> stageA |> stageB`
+// (stageA: String -> Int, stageB expects String) by hand — sema doesn't
+// care how PipeStage/PipeArgIndex/PipeChainLabels got set, only that
+// checkCallArgs reads them off the call that actually receives the
+// mismatched value.
+func TestCheck_PipeStageMismatchProducesStageNumberedError(t *testing.T) {
+	labels := []string{"data", "stageA", "stageB"}
+	stageA := &ast.CallExpr{
+		Callee: "stageA", Args: []ast.Expr{&ast.IdentExpr{Name: "data"}},
+		PipeStage: 1, PipeArgIndex: 0, PipeChainLabels: labels,
+	}
+	stageB := &ast.CallExpr{
+		Callee: "stageB", Args: []ast.Expr{stageA},
+		PipeStage: 2, PipeArgIndex: 0, PipeChainLabels: labels,
+	}
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name: "stageA", Params: []ast.Param{{Name: "s", Type: nt("String")}}, ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 1}}},
+		},
+		&ast.FuncDecl{
+			Name: "stageB", Params: []ast.Param{{Name: "n", Type: nt("String")}}, ReturnType: nt("String"),
+			Body: &ast.Block{Exprs: []ast.Expr{&ast.IdentExpr{Name: "n"}}},
+		},
+		&ast.FuncDecl{
+			Name: "main", ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "data", Type: nt("String"), Value: &ast.StringLit{Value: "hi"}},
+				&ast.DiscardExpr{Value: stageB},
+				&ast.IntLit{Value: 0},
+			}},
+		},
+	}}
+	err := Check(f)
+	if err == nil {
+		t.Fatal("expected a pipeline type-mismatch error: stageA returns Int, stageB expects String")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"pipeline type mismatch at stage 2 (stageB)",
+		"pipeline: data |> stageA |> stageB",
+		"stage 1 (stageA) outputs: Int64",
+		"stage 2 (stageB) expects: String",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error message %q doesn't contain %q", msg, want)
+		}
+	}
+}
+
+// TestCheck_NonPipeArgMismatchKeepsThePlainMessage confirms an ordinary
+// (non-pipe, PipeStage == 0) call's own type mismatch is entirely
+// unaffected by checkExprPipeAware — still the plain "expected X, got Y"
+// checkExpr already gave before step 15.
+func TestCheck_NonPipeArgMismatchKeepsThePlainMessage(t *testing.T) {
+	f := mainFile(&ast.CallExpr{Callee: "addNums", Args: []ast.Expr{&ast.StringLit{Value: "x"}, &ast.IntLit{Value: 2}}})
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name:       "addNums",
+		Params:     []ast.Param{{Name: "a", Type: nt("Int")}, {Name: "b", Type: nt("Int")}},
+		ReturnType: nt("Int"),
+		Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+	})
+	err := Check(f)
+	if err == nil {
+		t.Fatal("expected a type mismatch error")
+	}
+	if strings.Contains(err.Error(), "pipeline type mismatch") {
+		t.Fatalf("got pipeline-flavored error %q for a call that was never part of a `|>` chain", err.Error())
+	}
+}
+
+func TestCheck_TapIsIdentityAndAcceptsAnyValueType(t *testing.T) {
+	call := &ast.CallExpr{Callee: "tap", Args: []ast.Expr{&ast.IntLit{Value: 5}, &ast.StringLit{Value: "label"}}}
+	f := mainFile(&ast.LetExpr{Name: "r", Value: call}, &ast.IdentExpr{Name: "r"})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "Int64" {
+		t.Fatalf("got ResolvedType %q, want Int64 (tap returns its own first argument's type)", call.ResolvedType)
+	}
+}
+
+func TestCheck_TapRejectsNonStringLabel(t *testing.T) {
+	call := &ast.CallExpr{Callee: "tap", Args: []ast.Expr{&ast.IntLit{Value: 5}, &ast.IntLit{Value: 1}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: tap's label must be a String")
+	}
+}
+
+func TestCheck_PeekIsIdentity(t *testing.T) {
+	call := &ast.CallExpr{Callee: "peek", Args: []ast.Expr{&ast.StringLit{Value: "hi"}}}
+	f := mainFile(&ast.LetExpr{Name: "r", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ResolvedType != "String" {
+		t.Fatalf("got ResolvedType %q, want String (peek returns its own argument's type unchanged)", call.ResolvedType)
+	}
+}
+
+func TestCheck_TapRejectsUnitTypedValue(t *testing.T) {
+	call := &ast.CallExpr{Callee: "tap", Args: []ast.Expr{printStr("x"), &ast.StringLit{Value: "label"}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: tap's v must not be Unit-typed")
 	}
 }

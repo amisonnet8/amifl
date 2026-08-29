@@ -207,7 +207,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 12 ✅ | ファイルI/O・`Stream[T]`・並列処理 | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣、`spawn`/`send`/`recv`/`parallel` | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` `SPAWN` `DEFER`（`SEL`系は結局不要だった——下記「確定した設計判断」参照） | — |
 | 13 ✅ | `extern`機構 | Go資産バインド（15.1〜15.4節）、`Any`型境界の実装方式確定 | `METHVAL`（`ASSERT`は結局不要だった——下記「確定した設計判断」参照） | 設計課題1（`Any`/externの値境界、下記「確定した設計判断」参照） |
 | 14 ✅ | モジュール | `import`/エイリアス/可視性/循環禁止（12節） | — | — |
-| 15 | パイプラインDX機能・CLI・配布 | `tap`/`peek`、ステージ番号付き型エラー表示、CLI（16.2節）実装、`amiflrt`の`go:embed`配布、CI | — | 設計課題8 |
+| 15 ✅ | パイプラインDX機能・CLI・配布 | `tap`/`peek`、ステージ番号付き型エラー表示、CLI（16.2節）実装、`amiflrt`の`go:embed`配布、CI | — | 設計課題8 |
 
 **統合の理由**（当初18項目からの調整）:
 - Step12（ファイルI/O + 並列処理を統合）：`Stream[T]`は仕様上「`Chan[T]`+goroutineの糖衣」と明記されており（2.2節）、ファイルI/Oの`lines()`が`Stream[String]`を返す以上、並列処理の基盤（`Chan[T]`本体）を先に固めないとファイルI/O単体でも検証できないため
@@ -722,6 +722,51 @@ amivmの`-i alias=path`は生成コードの先頭に**明示的な**`import ali
 ### 実地検証（`amivm`→`go build`→実行）で確認した項目（Step 14）
 
 `examples/modules/`ディレクトリ（`main.aml`・同じルートパッケージの2つ目のファイル`helper.aml`・`import`先の`mathutil/mathutil.aml`）で以下を確認済み：ディレクトリ丸ごとの複数ファイル統合（`main.aml`が`import`無しで`helper.aml`の`helperSum`を呼び出す、12.1節）、`import mathutil "./mathutil"`によるクロスパッケージ関数呼び出し（`mathutil.Clamp(15,0,10)`・`mathutil.DoubleClamped(3,0,10)`、後者は内部で非公開関数`double`を同一パッケージ内の無修飾呼び出しとして使う）、クロスパッケージconst参照（`mathutil.MaxClamp`、参照箇所へのインライン展開）。生成されたIRを目視確認し、`mathutil`パッケージの宣言が`mathutil_double`/`mathutil_Clamp`/`mathutil_DoubleClamped`という一意な名前へ、ルートパッケージの`helperSum`は無修飾のまま、`mathutil.MaxClamp`は`100`という生リテラルへ正しく変換されていることを確認。実行結果は終了コード132（`a(10)+b(6)+c(100)+d(16)=132`という手計算と一致）を確認。加えて、非公開名への参照拒否・循環import検出（直接循環・自己循環）・同一エイリアスの異なるパッケージへの二重割り当て拒否・named引数を渡したクロスパッケージ呼び出しの拒否・constを関数として呼ぶ誤用の拒否・非ルートパッケージ自身の`main`（シグネチャ任意、エントリーポイントとして扱われない）・Unit型を返すクロスパッケージ呼び出し（`CALL`に結果オペランド無し）を、それぞれ手動でCLIから、または`internal/modloader`/`internal/sema`/`internal/codegen`の新規ユニットテストから確認した。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。**これでStep 14（モジュール）を完了した——残るはStep 15（パイプラインDX機能・CLI・配布）のみとなった。**
+
+### Step 15着手時点で既に完了していた項目（`amiflrt`の`go:embed`配布・CI）
+
+Step 15のスコープ表は「`amiflrt`の`go:embed`配布」「CI」を含むが、着手時点で両方とも実装済みだった——`amiflrt/embed.go`（`//go:embed *.go`＋`cmd/amifl/build.go`の`copyAmiflrt`）と`.github/workflows/test.yml`（push/PR時に`gofmt`/`go vet`/`go test`/`amivmのgo install`/`make test-examples`を実行）は、CLIコマンド一式（`build`/`run`/`emit-ir`/`emit-go`）自体と同様、Step 1のブートストラップ時点でamivm呼び出しパイプラインの一部として先行実装されていた（そうしないとStep 1の「`amivm`→`go build`→実行まで通す」という検証手順自体が回らないため）。Step 15で実際に新規実装したのは、CLIコマンド一覧のうち唯一未実装だった`archive`と、`tap`/`peek`（13.8節）、9.1節のパイプライン型エラー表示の3点のみ。
+
+### `tap`/`peek`はGoジェネリクス1つずつ（`amiflrt.Tap[T]`/`amiflrt.Peek[T]`）——capability分岐が要らない、Step 11以来初めて完全に無制約なTの組み込み関数（Step 15で確定）
+
+13節のほぼ全ての組み込み関数はTが何らかのcapability（Numeric・Lenable・Ordered等、2.3節）に属することを要求し、sema側リゾルバがその集合に応じて分岐する——`tap(v: T, label: String) -> T`・`peek(v: T) -> T`はStep 11以来初めて「Tに一切制約が無い」組み込み関数だった（識別関数なので、Tが何であっても意味が成立する）。このためsemaの`resolveTap`/`resolvePeek`は他の全リゾルバと違い、引数の型をただ`checkExpr(v.Args[0], "")`で受け取ってそのまま返すだけで、`isXxxType`系の分岐が一切無い——`internal/sema/builtins_pipeline.go`という新規ファイルに切り出したのも、他のcapability別ファイル（`builtins_numeric.go`等）と並べたときにこの「無分岐」という性質が一目で分かるようにするため。
+
+codegen側は`amiflrt.Tap[T any]`/`amiflrt.Peek[T any]`という1個のGoジェネリック関数へ、Step 11で確立した`CALL result : ?amiflrt.Fn<<^T>> args...`パターン（`writeGenericCall`）でそのまま委譲する——`T`が構造体・タプル・List/Map/Set等どんな複合型であっても、Goの`any`へのボックス化と`%v`/`%T`書式化がその場で正しく動くため、AmiFL側に型ごとの特別扱いが一切要らない（Step 13の`Any`境界実装がGoの暗黙インターフェース変換に一切追加コードなしで乗れたのと同じ理由）。
+
+**Unit型のvは明示的に拒否した**——`tap`/`peek`の`v`がUnit型（`print(...)`のような呼び出し結果）だと、`resolveGoType`がUnit型に対応するGo型を持たない（`^Unit`という無効な型が生成される）というStep 9の`for...yield`と全く同じ罠を踏む。対策も同じ：sema側（`resolveTap`/`resolvePeek`）が`vTyp == unitType`を明示的に検査して拒否する——CLAUDE.md「意味検査の責任分担」どおり、codegenの内部エラーやamivmの`go/types`エラーとしてではなく、AmiFL自身のsemaが最初に捕まえる形にした。
+
+**`tap`はstderrへ1行、`peek`は`AMIFL_DEV`環境変数で完全にオン/オフする対話的インスペクタ、という2つの異なる実行時挙動に分けて実装した**——13.8節の説明文言（`tap`:「恒等関数＋ログ出力」、`peek`:「開発モード限定の対話的インスペクタ」）を字義通りに解釈した設計判断：`tap(v, label)`は常に`fmt.Fprintf(os.Stderr, "[%s] %v\n", label, v)`を実行する（本番実行でも動く、ラベル付きlog出力という素直な用途）のに対し、`peek(v)`は`os.Getenv("AMIFL_DEV")`が空なら**一切のI/Oを行わない完全なパススルー**になり、非空の場合のみ動的型名＋値をstderrへ書いてから`bufio.Reader`で標準入力の1行を読むまでブロックする（Enterキー待ち）。どちらも標準出力ではなく標準エラー出力へ書く——パイプラインの本来のデータ出力（`print`が書く標準出力）に一切混ざらないようにするため。「開発モード」の判定手段（環境変数）自体は仕様に明記が無い未決事項だが、AmiFLコンパイラ自身に「開発ビルド/本番ビルド」という区別の概念が無い（`amifl build`は常に同じ1種類のバイナリを生成する）ため、実行時の環境変数以外に妥当な選択肢が無いと判断した。
+
+### パイプライン型エラー診断（9.1節）はスコープを絞って実装した——ソースの逐語的な再現とcaret位置指定、「did you mean」修正候補提案は意図的に見送った（Step 15で確定）
+
+9.1節の例（`error: pipeline type mismatch at stage 3` ... caret付きの元のソース行再現＋`hint: did you mean ...`）を実装するには、(a) AST→ソーステキストの逆変換（pretty-printer）と、(b) 型ギャップを埋める修正候補を型主導で合成するロジック、の2つが必要になるが、**このコードベースには元々ASTを読める形のソースへ戻す機構が存在しない**（エラーメッセージは常に`fmt.Errorf`でその場に必要な情報だけを埋め込む方式で、Step 1以来一貫している）。両方とも、9.1節が触れている「開発体験の質を上げるオプション機能」という位置づけに対して実装コストが不釣り合いに大きいと判断し、次の縮小版で実装した：
+
+- **caret付きの元のソース行再現の代わりに**、各パイプステージの簡潔なラベル（識別子/呼び出しの`Callee`名そのもの、Step 9で確立済みの`CallExpr.Callee`——それ以外の式は`"<value>"`という汎用プレースホルダーに落とす）を`|>`で繋いだ再構成済みの1行を表示する
+- **`hint: did you mean ...`（型ギャップを埋める修正候補の合成）は実装していない**——構造体のどのフィールドへアクセスすればうまく繋がるかを型から逆算する一般的な仕組みは、今回のDX強化の範囲を超える別機能と判断した
+
+**実装方式**：Step 9の「`|>`は完全にパース時の構文糖衣で、sema/codegenは`|>`の存在を一切知らない」という設計（CLAUDE.mdの既存の確定事項）はそのまま維持しつつ、`ast.CallExpr`にパース専用のメタデータ3つ（`PipeStage int`——このステージの1始まりの番号、0なら「パイプ由来ではない」、`PipeArgIndex int`——注入された値が入った引数位置、`PipeChainLabels []string`——チェーン全体のラベル列、先頭が初期値のラベル）を追加し、`internal/parser`の`parsePipeExpr`がチェーン全体をいったん集めてから一括で書き込む（各ステージ単独ではチェーンの全長が分からないため）。sema側は新設の`checkExprPipeAware`ヘルパー——通常の`checkExpr`をラップし、対象の引数位置が`PipeArgIndex`と一致し`PipeStage > 0`のときだけ、失敗した引数の実際の型を`resolveType`で再取得してステージ番号付きメッセージへ整形する——を、`checkCallArgs`（トップ`fn`・クロージャー呼び出し共通）と、13.4節の「データは固定でString型」というシグネチャを持つ少数の組み込み（`print`・`trim`/`upper`/`lower`・`split`/`join`/`replace`・`startsWith`/`endsWith`）にだけ差し込んだ。
+
+**この線引きの理由**：組み込み関数の大半（`len`・`contains`・`map`/`filter`等）は「第1引数の型を見てcapabilityグループを判定する」という多相解決方式（design issue 6）のため、そもそも「固定のexpected型に対する不一致」という形のエラーにならない（該当するcapabilityが1つも無ければ別の種類のエラーになる）——ステージ番号付き表示が意味を持つのは「fixed expected type」を持つ呼び出しだけであり、それはちょうど`checkCallArgs`（ユーザー`fn`/クロージャー、パラメータ型は宣言時に固定）と上記の少数のString限定組み込みに一致する。全組み込みリゾルバへ機械的に展開する案も検討したが、約50個のリゾルバ全部を触るのは9.1節が「あると嬉しい」と位置づけるDX機能に対して不釣り合いなコストと判断し、最も典型的な使用パターン（ユーザー定義関数のパイプ連鎖、および文字列処理の定番組み込み）をカバーする範囲に絞った。
+
+### `.amlz`はプレーンなzipファイル——ディレクトリの「その場の代役」として`modloader.Load`に直接組み込んだ（Step 15で確定・設計課題無し、16.2節の実装）
+
+16.2節は`.amlz`を「12節のパッケージの配布形式」とだけ規定し、内部フォーマットは指定していない。実装は最も単純な選択——Goの標準ライブラリ`archive/zip`で、ディレクトリ直下の`.aml`ファイル群をフラット（サブディレクトリ無し）に格納するだけの、拡張子だけ独自の一般的なzipコンテナとした（`.docx`/`.jar`と同じ発想）。
+
+**`internal/modloader`は`.amlz`を「そのファイルが元々あったディレクトリの代役」として扱う**——`loader.load`は`fsPath`の拡張子が`.amlz`なら（`os.Stat`によるディレクトリ判定より前に）専用分岐へ入り、zipのメンバー一覧を読んでディレクトリの`os.ReadDir`と同じ形（ファイル名でソート、決定的な順序）へ変換し、以降のパース・import解決ロジックは完全に共有する。`.amlz`ファイル自身が宣言する`import "./x"`は、**そのzipファイル自身が置かれているディレクトリ**を基準に相対解決する——あたかもその場に展開されたディレクトリであるかのように扱う設計で、これにより「`.amlz`を`import`のターゲットパスとして使う」「`.amlz`をトップレベルのソース引数として使う」の両方が、既存のディレクトリ処理パスをほぼ素通りするだけで実現できた（新しい特別扱いは`.amlz`の入力側の分岐だけで、それ以降——DAG構築・循環検出・エイリアス一意性・`sema.CheckPackage`呼び出し・`codegen.GenerateProgram`——は一切変更不要）。
+
+**単一ファイルモード（`isRoot`かつファイル1つ）へは絶対に落ちない**——`.amlz`は常に「ディレクトリ全体を集めた形」の分岐（サブファイル1個だけを含む場合でも）を通る。12.1節の「単一ファイルを直接指定した場合は兄弟ファイルを無視する」という規則は、ファイルシステム上で明示的に1ファイルだけを名指しした場合の話であり、`.amlz`はそもそも作成時点（`amifl archive`）でディレクトリの**全**`.aml`ファイルを収めている以上、この区別が最初から意味を持たない。
+
+**書き込み側（`amifl archive`、`cmd/amifl/archive.go`）は読み込み側と完全に独立した実装**——`internal/modloader`は`cmd/amifl`に依存できない（CLAUDE.mdのリポジトリ構成の依存方向どおり）ため、zip書き込みロジックを共有クラスにまとめることはできず、`archive/zip`の`Writer`/`Reader`をそれぞれの側で素直に使うだけの薄い実装にした——フォーマット自体が単純（フラットなzip）なので、共有できないことによる重複コストはごく小さい。
+
+### 実地検証（`amivm`→`go build`→実行、および`amifl archive`のCLI往復）で確認した項目（Step 15）
+
+`examples/pipe.aml`に`tap`/`peek`の呼び出し（`7 |> tap(_, "seven")`・`peek(9)`）を追加して確認済み：`tap`は本番実行でも`AMIFL_DEV`の有無に関わらず`[seven] 7`をstderrへ出力し、値7をそのまま通過させる。`peek(9)`は`AMIFL_DEV`未設定時は完全に無音でパススルー（終了コード112 = `a+b+c+s1+s2+tapped+peeked = 5*2+8+15+20+50+7+9`の内訳と一致——既存Step 9の96に7+9を加えた値）、`AMIFL_DEV=1`かつ標準入力に空行を与えた実行では`[peek] int64: 9`＋`(press Enter to continue)`のプロンプトを出したうえで正しくブロック・再開することを確認した（`go build -race`は今回未実施——並行処理を一切伴わない機能のため対象外と判断）。
+
+パイプライン型エラー表示は、使い捨てのAmiFLプログラム3種（`data |> stageA |> stageB |> stageC`の中間ステージ不一致、`stageA`直後の初段不一致、リテラルの直接パイプ〈ラベルが`<value>`になるケース〉）を`amifl emit-ir`へ通し、いずれも狙いどおりの`pipeline type mismatch at stage N (...)`形式のエラー（チェーン全体のラベル列・直前ステージの出力型・当該ステージの期待型）が出ることを確認した。既存の`examples/pipe.aml`（パイプ由来ではない通常の型不一致）が従来どおりの`expected X, got Y`のままであることも回帰確認済み。
+
+`.amlz`は`examples/modules/mathutil`ディレクトリを`amifl archive`でzip化し、(a) 別プログラムから`import mathutil "./mathutil.amlz"`として参照する経路、(b) `.amlz`ファイル自身を`amifl build`のトップレベルソース引数として直接指定する経路の両方で、`examples/modules/`のオリジナル（ディレクトリ直接参照、終了コード132系列）と同じ計算結果（終了コード116 = `a(10)+b(6)+c(100)`）が得られることを確認した。
+
+`internal/parser`（パイプチェーンメタデータ3件）・`internal/sema`（ステージ番号付きエラー2件・非パイプ呼び出しの回帰確認1件・`tap`/`peek`4件）・`internal/codegen`（`tap`/`peek`のIR生成2件）・`internal/modloader`（`.amlz`をルート/import対象双方で読み込む2件）に新規ユニットテストを追加し、全てpassすることを確認済み。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイル（`examples/modules/`含む）に回帰が無いことも確認済み。**これでStep 15（パイプラインDX機能・CLI・配布）を完了し、CLAUDE.mdの実装ステップ計画15項目全てが完了した。**
 
 ## 開発の進め方
 

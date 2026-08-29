@@ -268,7 +268,7 @@ func resolveStringUnary(v *ast.CallExpr, fc *funcChecker) (string, error) {
 	if len(v.Args) != 1 {
 		return "", arityError(v, 1)
 	}
-	if _, err := fc.checkExpr(v.Args[0], "String"); err != nil {
+	if _, err := fc.checkExprPipeAware(v, 0, v.Args[0], "String"); err != nil {
 		return "", err
 	}
 	v.ArgTypes = []string{"String"}
@@ -285,10 +285,10 @@ func resolveSplit(fc *funcChecker, v *ast.CallExpr) (string, error) {
 	if len(v.Args) != 2 {
 		return "", arityError(v, 2)
 	}
-	if _, err := fc.checkExpr(v.Args[0], "String"); err != nil {
+	if _, err := fc.checkExprPipeAware(v, 0, v.Args[0], "String"); err != nil {
 		return "", err
 	}
-	if _, err := fc.checkExpr(v.Args[1], "String"); err != nil {
+	if _, err := fc.checkExprPipeAware(v, 1, v.Args[1], "String"); err != nil {
 		return "", err
 	}
 	v.ArgTypes = []string{"String", "String"}
@@ -305,10 +305,10 @@ func resolveJoin(fc *funcChecker, v *ast.CallExpr) (string, error) {
 	if len(v.Args) != 2 {
 		return "", arityError(v, 2)
 	}
-	if _, err := fc.checkExpr(v.Args[0], makeListType("String")); err != nil {
+	if _, err := fc.checkExprPipeAware(v, 0, v.Args[0], makeListType("String")); err != nil {
 		return "", err
 	}
-	if _, err := fc.checkExpr(v.Args[1], "String"); err != nil {
+	if _, err := fc.checkExprPipeAware(v, 1, v.Args[1], "String"); err != nil {
 		return "", err
 	}
 	v.ArgTypes = []string{makeListType("String"), "String"}
@@ -321,8 +321,8 @@ func resolveReplace(fc *funcChecker, v *ast.CallExpr) (string, error) {
 	if len(v.Args) != 3 {
 		return "", arityError(v, 3)
 	}
-	for _, a := range v.Args {
-		if _, err := fc.checkExpr(a, "String"); err != nil {
+	for i, a := range v.Args {
+		if _, err := fc.checkExprPipeAware(v, i, a, "String"); err != nil {
 			return "", err
 		}
 	}
@@ -336,10 +336,10 @@ func resolveStringPredicate(v *ast.CallExpr, fc *funcChecker) (string, error) {
 	if len(v.Args) != 2 {
 		return "", arityError(v, 2)
 	}
-	if _, err := fc.checkExpr(v.Args[0], "String"); err != nil {
+	if _, err := fc.checkExprPipeAware(v, 0, v.Args[0], "String"); err != nil {
 		return "", err
 	}
-	if _, err := fc.checkExpr(v.Args[1], "String"); err != nil {
+	if _, err := fc.checkExprPipeAware(v, 1, v.Args[1], "String"); err != nil {
 		return "", err
 	}
 	v.ArgTypes = []string{"String", "String"}

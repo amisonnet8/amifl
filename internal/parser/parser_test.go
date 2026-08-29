@@ -1427,6 +1427,63 @@ func TestParse_PipeIntoGenericBuiltinWithParens(t *testing.T) {
 	}
 }
 
+// --- step 15: pipe-chain metadata (amifl-spec.md section 9.1) ---
+
+func TestParse_PipeChainStageMetadataIsFilledIn(t *testing.T) {
+	src := "fn main() -> Int {\n    let a = data |> f |> g\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	outer := let.Value.(*ast.CallExpr) // g, stage 2
+	inner := outer.Args[0].(*ast.CallExpr)
+
+	if inner.Callee != "f" || inner.PipeStage != 1 {
+		t.Fatalf("got inner Callee=%q PipeStage=%d, want \"f\" stage 1", inner.Callee, inner.PipeStage)
+	}
+	if outer.Callee != "g" || outer.PipeStage != 2 {
+		t.Fatalf("got outer Callee=%q PipeStage=%d, want \"g\" stage 2", outer.Callee, outer.PipeStage)
+	}
+	wantLabels := []string{"data", "f", "g"}
+	for _, call := range []*ast.CallExpr{inner, outer} {
+		if len(call.PipeChainLabels) != len(wantLabels) {
+			t.Fatalf("got PipeChainLabels %v, want %v", call.PipeChainLabels, wantLabels)
+		}
+		for i, want := range wantLabels {
+			if call.PipeChainLabels[i] != want {
+				t.Fatalf("got PipeChainLabels %v, want %v", call.PipeChainLabels, wantLabels)
+			}
+		}
+	}
+}
+
+func TestParse_PipeChainPipeArgIndexFollowsUnderscore(t *testing.T) {
+	src := "fn main() -> Int {\n    let a = data |> f(1, _, 2)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	call := let.Value.(*ast.CallExpr)
+	if call.PipeArgIndex != 1 {
+		t.Fatalf("got PipeArgIndex %d, want 1 (the '_' position)", call.PipeArgIndex)
+	}
+}
+
+func TestParse_NonPipeCallHasZeroPipeStage(t *testing.T) {
+	src := "fn main() -> Int {\n    let a = f(1)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	call := let.Value.(*ast.CallExpr)
+	if call.PipeStage != 0 {
+		t.Fatalf("got PipeStage %d, want 0 for an ordinary (non-piped) call", call.PipeStage)
+	}
+}
+
 func TestParse_Tuple2TypeAnnotation(t *testing.T) {
 	src := "fn f() -> Tuple2[Int, Error] {\n    (1, 2)\n}\nfn main() -> Int {\n    0\n}\n"
 	f, err := Parse(src)
