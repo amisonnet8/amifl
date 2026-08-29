@@ -120,7 +120,12 @@ func (g *gen) genReadLineValue(c *ast.CallExpr) (string, error) {
 	return g.assembleTuple2(c.ResolvedType, "%"+strTmp, "%"+errTmp)
 }
 
-// genWriteValue emits `write(f, data) -> Tuple2[Int, Error]`.
+// genWriteValue emits `write(f, data) -> Tuple2[Int, Error]` — ex12 widened
+// data to accept String as well as Bytes (resolveWrite's doc comment,
+// internal/sema/builtins_chan.go), dispatched here via c.ArgTypes[1] onto
+// amiflrt's WriteString or WriteFile respectively (the established
+// "sema records which capability branch was taken in ArgTypes, codegen
+// just reads it" pattern this file's siblings already use).
 func (g *gen) genWriteValue(c *ast.CallExpr) (string, error) {
 	fVal, err := g.genValue(c.Args[0])
 	if err != nil {
@@ -130,12 +135,16 @@ func (g *gen) genWriteValue(c *ast.CallExpr) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	amiflrtFunc := "?amiflrt.WriteFile"
+	if c.ArgTypes[1] == "String" {
+		amiflrtFunc = "?amiflrt.WriteString"
+	}
 	nTmp := g.newTemp()
 	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^int64\n", nTmp)
 	errGoType := g.prog.resolveGoType("Error")
 	errTmp := g.newTemp()
 	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", errTmp, errGoType)
-	g.writeCallMulti([]string{"%" + nTmp, "%" + errTmp}, "?amiflrt.WriteFile", []string{fVal, dataVal})
+	g.writeCallMulti([]string{"%" + nTmp, "%" + errTmp}, amiflrtFunc, []string{fVal, dataVal})
 
 	return g.assembleTuple2(c.ResolvedType, "%"+nTmp, "%"+errTmp)
 }

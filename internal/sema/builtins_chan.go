@@ -235,11 +235,17 @@ func resolveLines(fc *funcChecker, v *ast.CallExpr) (string, error) {
 	return makeStreamType("String"), nil
 }
 
-// resolveWrite type-checks `write(f, data: Bytes) -> Tuple2[Int, Error]`
-// (amifl-spec.md section 13.10) — Bytes canonicalizes to List(UInt8)
-// (types.go's canonicalType), so the expected type here is spelled that way
-// directly rather than via the "Bytes" surface name (which is never a
-// canonical type string itself).
+// resolveWrite type-checks `write(f, data: String|Bytes) -> Tuple2[Int,
+// Error]` (amifl-spec.md section 13.10) — ex12 widened data from Bytes-only
+// to accept a String directly too (writing a string used to require
+// spelling it out as a List[UInt8] literal by hand — no String->Bytes
+// conversion function exists, and adding one just for this felt like
+// solving a narrower problem than the actual one: `write` itself should
+// just accept a String). Bytes canonicalizes to List(UInt8) (types.go's
+// canonicalType), so the expected type here is spelled that way directly
+// rather than via the "Bytes" surface name (which is never a canonical
+// type string itself). v.ArgTypes[1] (either "String" or the List(UInt8)
+// string) is what tells genWriteValue which amiflrt function to call.
 func resolveWrite(fc *funcChecker, v *ast.CallExpr) (string, error) {
 	if len(v.Args) != 2 {
 		return "", arityError(v, 2)
@@ -247,11 +253,15 @@ func resolveWrite(fc *funcChecker, v *ast.CallExpr) (string, error) {
 	if _, err := fc.checkExpr(v.Args[0], "File"); err != nil {
 		return "", err
 	}
-	bytesTyp := makeListType("UInt8")
-	if _, err := fc.checkExpr(v.Args[1], bytesTyp); err != nil {
+	dataTyp, err := fc.checkExpr(v.Args[1], "")
+	if err != nil {
 		return "", err
 	}
-	v.ArgTypes = []string{"File", bytesTyp}
+	bytesTyp := makeListType("UInt8")
+	if dataTyp != "String" && dataTyp != bytesTyp {
+		return "", fmt.Errorf("line %d: write: data must be a String or Bytes, got %s", v.Line, dataTyp)
+	}
+	v.ArgTypes = []string{"File", dataTyp}
 	return makeTupleType([]string{"Int64", "Error"}), nil
 }
 

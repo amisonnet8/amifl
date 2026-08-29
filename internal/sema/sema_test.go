@@ -3916,11 +3916,25 @@ func TestCheck_CloseReturnsError(t *testing.T) {
 	}
 }
 
-func TestCheck_WriteRequiresBytesArg(t *testing.T) {
-	call := &ast.CallExpr{Callee: "write", Args: []ast.Expr{&ast.CallExpr{Callee: "stdout"}, &ast.StringLit{Value: "nope"}}}
+// TestCheck_WriteAcceptsStringArg (ex12) supersedes the old
+// "WriteRequiresBytesArg" — write now accepts a String directly (writing
+// one used to require spelling it out as a List[UInt8] literal by hand).
+func TestCheck_WriteAcceptsStringArg(t *testing.T) {
+	call := &ast.CallExpr{Callee: "write", Args: []ast.Expr{&ast.CallExpr{Callee: "stdout"}, &ast.StringLit{Value: "hello"}}}
+	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ArgTypes[1] != "String" {
+		t.Fatalf("got ArgTypes[1] %q, want \"String\"", call.ArgTypes[1])
+	}
+}
+
+func TestCheck_WriteRequiresStringOrBytesArg(t *testing.T) {
+	call := &ast.CallExpr{Callee: "write", Args: []ast.Expr{&ast.CallExpr{Callee: "stdout"}, &ast.IntLit{Value: 5}}}
 	f := mainFile(&ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
 	if err := Check(f); err == nil {
-		t.Fatal("expected an error: write(File, String) — data must be Bytes (List[UInt8])")
+		t.Fatal("expected an error: write(File, Int) — data must be a String or Bytes")
 	}
 }
 

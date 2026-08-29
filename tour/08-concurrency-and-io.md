@@ -69,7 +69,7 @@ fn main() -> Int {
 ```amifl
 fn main() -> Int {
     let path = "/tmp/amifl_tour_example.txt"
-    let content: Bytes = [104, 101, 108, 108, 111, 10]   // "hello\n"のバイト列
+    let content = "hello\n"
 
     let wf = open(path, "w")
     let writeResult = write(wf.0, content)
@@ -84,16 +84,14 @@ fn main() -> Int {
 }
 ```
 
-`open(path, mode) -> Tuple2[File, Error]`はファイルを開き、`write`/`readLine`/`readAll`はいずれも`Tuple2[..., Error]`を返します——6章で見た「値+エラー」パターンがここでも一貫しています。`File`は不透明なハンドル型で、フィールド・メソッドはありません。
-
-**AmiFLには`String`から`Bytes`への変換関数がありません**(既知の限界)——ファイルへ文字列を書きたい場合、現状はこのように数値のバイト列として明示的に綴る必要があります。
+`open(path, mode) -> Tuple2[File, Error]`はファイルを開き、`write`/`readLine`/`readAll`はいずれも`Tuple2[..., Error]`を返します——6章で見た「値+エラー」パターンがここでも一貫しています。`File`は不透明なハンドル型で、フィールド・メソッドはありません。`write`の`data`は`String`・`Bytes`のどちらでも渡せます。
 
 `lines(f) -> Stream[String]`はファイルを1行ずつの`Stream[String]`として読みます。
 
 ```amifl
 fn main() -> Int {
     let path = "/tmp/amifl_tour_lines.txt"
-    let content: Bytes = [97, 10, 98, 10, 99, 10]   // "a\nb\nc\n"
+    let content = "a\nb\nc\n"
     let wf = open(path, "w")
     _ = write(wf.0, content)
     _ = close(wf.0)
@@ -143,7 +141,7 @@ fn main() -> Int {
 ```amifl
 fn main() -> Int {
     let path = "/tmp/amifl_tour_ex.txt"
-    let content: Bytes = [49, 10, 50, 10, 51, 10]   // "1\n2\n3\n"
+    let content = "1\n2\n3\n"
     let wf = open(path, "w")
     _ = write(wf.0, content)
     _ = close(wf.0)

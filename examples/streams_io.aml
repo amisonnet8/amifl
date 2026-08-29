@@ -12,7 +12,8 @@ fn main() -> Int {
     let chanTotal = r1.0 + r2.0 + r3.0
 
     let path = "/tmp/amifl_step12_test.txt"
-    let content: Bytes = [97, 98, 10, 99, 100, 10, 101, 102, 10]
+    // ex12: write() accepts a String directly now, not just Bytes.
+    let content = "ab\ncd\nef\n"
     let wf = open(path, "w")
     let writeResult = write(wf.0, content)
     let writtenN = writeResult.0
@@ -34,7 +35,7 @@ fn main() -> Int {
     _ = close(rfSkip.0)
 
     let path2 = "/tmp/amifl_step12_test2.txt"
-    let content2: Bytes = [120, 10, 121, 121, 10, 122, 122, 122, 10]
+    let content2 = "x\nyy\nzzz\n"
     let wf2 = open(path2, "w")
     _ = write(wf2.0, content2)
     _ = close(wf2.0)
@@ -57,6 +58,8 @@ fn main() -> Int {
     }
     _ = close(rf3.0)
 
+    // write() still accepts Bytes directly too (the two capability
+    // branches — resolveWrite, internal/sema/builtins_chan.go).
     let out = stdout()
     let msg: Bytes = [111, 107, 10]
     let outResult = write(out, msg)

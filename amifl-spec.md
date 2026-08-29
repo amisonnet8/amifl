@@ -641,7 +641,7 @@ fn main() -> Int {
 | `readAll` | `(f: File) -> Tuple2[Bytes, Error]` | |
 | `readLine` | `(f: File) -> Tuple2[String, Error]` | 行末の`\n`（および`\r`）は含まれない |
 | `lines` | `(f: File) -> Stream[String]` | |
-| `write` | `(f: File, data: Bytes) -> Tuple2[Int, Error]` | |
+| `write` | `(f: File, data: String\|Bytes) -> Tuple2[Int, Error]` | `data`は`String`・`Bytes`のどちらでも渡せる（ex12。以前は`Bytes`専用で、文字列を書くには数値のバイト列を手で綴る必要があった） |
 | `stdin` / `stdout` / `stderr` | `() -> File` | |
 
 ---

@@ -96,10 +96,22 @@ func ReadLineFile(fh *FileHandle) (string, error) {
 	return line, nil
 }
 
-// WriteFile implements `write(f, data) -> Tuple2[Int, Error]`.
+// WriteFile implements `write(f, data) -> Tuple2[Int, Error]` for a Bytes
+// (List[UInt8]) data argument.
 func WriteFile(fh *FileHandle, data []byte) (int64, error) {
 	n, err := fh.f.Write(data)
 	return int64(n), err
+}
+
+// WriteString implements `write(f, data) -> Tuple2[Int, Error]` for a
+// String data argument (ex12) — the codegen half of resolveWrite's
+// String/Bytes capability dispatch (internal/sema/builtins_chan.go). Kept
+// as its own function, rather than converting the string to []byte in
+// generated IR, so the conversion never needs an AMIVM-level type-
+// conversion CALL at all (`[]byte` isn't a bare identifier the `callname`
+// operand category could name directly).
+func WriteString(fh *FileHandle, s string) (int64, error) {
+	return WriteFile(fh, []byte(s))
 }
 
 // Stdin/Stdout/Stderr implement `stdin`/`stdout`/`stderr` () -> File.

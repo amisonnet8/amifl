@@ -2915,6 +2915,31 @@ func TestGenerate_WriteAssemblesTuple2FromWriteFileCall(t *testing.T) {
 	}
 }
 
+// TestGenerate_WriteWithStringArgCallsWriteString (ex12) checks the new
+// String-data path dispatches to amiflrt.WriteString rather than
+// amiflrt.WriteFile, mirroring the Bytes-path test just above.
+func TestGenerate_WriteWithStringArgCallsWriteString(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "write", Builtin: "write", ResolvedType: "Tuple(Int64,Error)",
+		Args: []ast.Expr{
+			&ast.IdentExpr{Name: "f", ResolvedType: "File", Token: "%f_1"},
+			&ast.StringLit{Value: "hello"},
+		},
+		ArgTypes: []string{"File", "String"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "wr", Token: "%wr_1", ResolvedType: "Tuple(Int64,Error)", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := `CALL	%amifl_tmp1	%amifl_tmp2	:	?amiflrt.WriteString	%f_1	"hello"`; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+	}
+	if strings.Contains(ir, "WriteFile") {
+		t.Errorf("did not expect WriteFile to be called for a String argument; got:\n%s", ir)
+	}
+}
+
 // --- step 13: extern/bind (Any/extern value boundary, CLAUDE.md design issue 1) ---
 
 func TestGenerate_ExternPlainBindEmitsQualifiedCallAndAssemblesTuple2(t *testing.T) {
