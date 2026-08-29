@@ -5,6 +5,18 @@ fn main() -> Int {
     let b = mathutil.DoubleClamped(3, 0, 10)
     let c = mathutil.MaxClamp
     let d = helperSum(a, b)
+
+    // ex5: cross-package struct/enum construction and field/type-annotation
+    // use (amifl-spec.md section 12.2) — the struct/enum both stay
+    // constructed and passed by value here; ClassifyClamp/DeltaOrZero (in
+    // mathutil's own package) do the actual variant inspection.
+    let iv: mathutil.Interval = mathutil.Interval{lo: 0, hi: 10}
+    let e = mathutil.ClampToInterval(15, iv)
+    let outcome = mathutil.ClassifyClamp(15, iv)
+    let f = mathutil.DeltaOrZero(outcome)
+    let outcome2 = mathutil.ClassifyClamp(5, iv)
+    let g = mathutil.DeltaOrZero(outcome2)
+
     print("modules ok")
-    a + b + c + d
+    a + b + c + d + e + f + g
 }

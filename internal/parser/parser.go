@@ -367,16 +367,19 @@ func (p *parser) parseFuncDecl() (*ast.FuncDecl, error) {
 // parseTypeExpr parses a type annotation: a plain name (a scalar or
 // struct type, amifl-spec.md sections 2.1/2.2), one of step 7's two
 // bracket-generic collection types, `List[Elem]` and `Array[Elem;N1,N2,
-// ...]` (section 2.2), or (ex3) `fn(T1,T2,...) -> R` — the one case that
+// ...]` (section 2.2), (ex3) `fn(T1,T2,...) -> R` — the one case that
 // isn't a leading identifier at all (`fn` is lexer.KwFn, a keyword, not an
 // Ident), so it's checked first, before the p.expect(lexer.Ident) every
-// other case still shares. "List" and "Array" are recognized structurally,
-// by comparing the leading identifier's text, rather than being reserved
-// keywords — exactly like "Unit" is only special in a return-type
-// position (sema's canonicalReturnType) without being a keyword anywhere
-// else. A variable can still be named "List" or "Array" without conflict,
-// since this function is only ever reached from a type-annotation
-// position.
+// other case still shares — or (ex5) `alias.Name`, a cross-package struct/
+// enum reference (amifl-spec.md section 12.2), checked right after the
+// leading identifier and before the reserved bracket-generic names, since a
+// package alias could in principle collide textually with one of those.
+// "List" and "Array" are recognized structurally, by comparing the leading
+// identifier's text, rather than being reserved keywords — exactly like
+// "Unit" is only special in a return-type position (sema's
+// canonicalReturnType) without being a keyword anywhere else. A variable
+// can still be named "List" or "Array" without conflict, since this
+// function is only ever reached from a type-annotation position.
 func (p *parser) parseTypeExpr() (ast.TypeExpr, error) {
 	if p.cur.Kind == lexer.KwFn {
 		return p.parseFuncType()
@@ -384,6 +387,23 @@ func (p *parser) parseTypeExpr() (ast.TypeExpr, error) {
 	nameTok, err := p.expect(lexer.Ident)
 	if err != nil {
 		return nil, err
+	}
+	// ex5: `alias.Name` (amifl-spec.md section 12.2) — a cross-package
+	// struct/enum type annotation. Checked before the switch below since a
+	// package alias could in principle collide textually with one of the
+	// six reserved bracket-generic names ("List" etc.) — the '.' takes
+	// priority, matching how the qualified-struct-literal check in
+	// parsePostfixExpr similarly runs before any other interpretation of a
+	// leading identifier gets a chance.
+	if p.cur.Kind == lexer.Dot {
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		typeNameTok, err := p.expect(lexer.Ident)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.QualifiedType{Alias: nameTok.Value, Name: typeNameTok.Value, Line: nameTok.Line}, nil
 	}
 	switch nameTok.Value {
 	case "List":
@@ -1158,6 +1178,7 @@ func (p *parser) parsePostfixExpr() (ast.Expr, error) {
 				return nil, err
 			}
 			var field string
+			fieldLine := p.cur.Line
 			switch p.cur.Kind {
 			case lexer.Int, lexer.Ident:
 				field = p.cur.Value
@@ -1166,6 +1187,28 @@ func (p *parser) parsePostfixExpr() (ast.Expr, error) {
 			}
 			if err := p.advance(); err != nil {
 				return nil, err
+			}
+			// ex5: `alias.Name{...}` — a cross-package struct literal
+			// (amifl-spec.md section 12.2). Only reachable right off a bare
+			// leading identifier (expr hasn't been reassigned away from
+			// *ast.IdentExpr yet, i.e. this is the chain's first '.'), and
+			// only outside a noCompositeLit context — the identical
+			// disambiguation parseIdentOrCall's own unqualified `Ident '{'`
+			// check already uses (e.g. `if p.field { ... }`'s body-opening
+			// `{` must never be swallowed this way). sema is what actually
+			// verifies "alias" names a real import and "Name" a real
+			// exported struct — nothing here checks that, exactly like the
+			// unqualified form's own StructLit doesn't verify TypeName names
+			// a real struct at parse time either.
+			if alias, ok := expr.(*ast.IdentExpr); ok && p.cur.Kind == lexer.LBrace && !p.noCompositeLit {
+				lit, err := p.parseStructLit(lexer.Token{Kind: lexer.Ident, Value: field, Line: fieldLine})
+				if err != nil {
+					return nil, err
+				}
+				sl := lit.(*ast.StructLit)
+				sl.Qualifier = alias.Name
+				expr = sl
+				continue
 			}
 			var args []ast.StructLitField
 			if p.cur.Kind == lexer.LParen {

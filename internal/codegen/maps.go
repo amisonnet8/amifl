@@ -75,16 +75,19 @@ func makeListType(elem string) string {
 // this one case — a harmless amount of duplicate MPTYPE output (at most
 // one extra line) is a small price for not special-casing that.
 func (p *program) setGoTypeName(canonical string) string {
-	if name, ok := p.setTypes[canonical]; ok {
+	elemGoType := p.resolveGoType(setElemType(canonical))
+	// Cached by elemGoType, not the raw canonical string — see
+	// listGoTypeName's identical fix/doc comment (ex5).
+	goKey := "Set(" + elemGoType + ")"
+	if name, ok := p.setTypes[goKey]; ok {
 		return name
 	}
-	elemGoType := p.resolveGoType(setElemType(canonical))
 	p.setSeq++
 	name := fmt.Sprintf("AmiflSet%d", p.setSeq)
 	if p.setTypes == nil {
 		p.setTypes = map[string]string{}
 	}
-	p.setTypes[canonical] = name
+	p.setTypes[goKey] = name
 
 	fmt.Fprintf(&p.typeHeader, "MPTYPE\t^%s\t^%s\t^bool\n", name, elemGoType)
 	return name
@@ -94,18 +97,21 @@ func (p *program) setGoTypeName(canonical string) string {
 // backing one Map[K,V] shape, keyed by its full canonical string —
 // mirrors setGoTypeName above, minus the hardcoded bool value type.
 func (p *program) mapGoTypeName(canonical string) string {
-	if name, ok := p.mapTypes[canonical]; ok {
-		return name
-	}
 	key, val := mapKeyValueTypes(canonical)
 	keyGoType := p.resolveGoType(key)
 	valGoType := p.resolveGoType(val)
+	// Cached by (keyGoType, valGoType), not the raw canonical string — see
+	// listGoTypeName's identical fix/doc comment (ex5).
+	goKey := "Map(" + keyGoType + "," + valGoType + ")"
+	if name, ok := p.mapTypes[goKey]; ok {
+		return name
+	}
 	p.mapSeq++
 	name := fmt.Sprintf("AmiflMap%d", p.mapSeq)
 	if p.mapTypes == nil {
 		p.mapTypes = map[string]string{}
 	}
-	p.mapTypes[canonical] = name
+	p.mapTypes[goKey] = name
 
 	fmt.Fprintf(&p.typeHeader, "MPTYPE\t^%s\t^%s\t^%s\n", name, keyGoType, valGoType)
 	return name

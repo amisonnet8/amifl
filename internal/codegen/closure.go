@@ -157,9 +157,6 @@ func (p *program) newFuncTypeDecl(paramGoTypes []string, retGoType string) strin
 // return/let-annotation of the same shape must resolve to this exact same
 // name or a perfectly valid AmiFL program simply won't compile as Go.
 func (p *program) funcGoTypeName(canonical string) string {
-	if name, ok := p.funcTypes[canonical]; ok {
-		return name
-	}
 	params, ret, _ := funcTypeParts(canonical)
 	// Resolved before newFuncTypeDecl writes this FNTYPE's own header line
 	// — see tupleGoTypeName's identical fix/doc comment for why
@@ -176,11 +173,17 @@ func (p *program) funcGoTypeName(canonical string) string {
 	if ret != unitType {
 		retGoType = p.resolveGoType(ret)
 	}
+	// Cached by the joined parameter/return Go types, not the raw canonical
+	// string — see listGoTypeName's identical fix/doc comment (ex5).
+	goKey := "fn(" + strings.Join(paramGoTypes, ",") + ")->" + retGoType
+	if name, ok := p.funcTypes[goKey]; ok {
+		return name
+	}
 	name := p.newFuncTypeDecl(paramGoTypes, retGoType)
 	if p.funcTypes == nil {
 		p.funcTypes = map[string]string{}
 	}
-	p.funcTypes[canonical] = name
+	p.funcTypes[goKey] = name
 	return name
 }
 

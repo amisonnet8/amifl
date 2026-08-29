@@ -57,6 +57,20 @@ func splitTopLevelCommas(s string) []string {
 	return parts
 }
 
+// isQualifiedType/qualifiedTypeGoName are codegen's own copies of sema's
+// identical helpers (types.go's makeQualifiedType) — ast is codegen's and
+// sema's only shared vocabulary, so this "Qualified(GoName)" convention
+// sema invents for its own bookkeeping (ex5, a cross-package struct/enum
+// reference) has to be independently understood here too, exactly like
+// isTupleType/tupleTypeParts above.
+func isQualifiedType(t string) bool {
+	return strings.HasPrefix(t, "Qualified(") && strings.HasSuffix(t, ")")
+}
+
+func qualifiedTypeGoName(t string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(t, "Qualified("), ")")
+}
+
 // resolveGoType returns the Go/AMIVM type name amifl type t compiles to: a
 // scalar's fixed name (goTypeNames), a tuple/func/list/array/set/map's
 // deduplicated synthesized type name (tupleGoTypeName/funcGoTypeName
@@ -69,11 +83,19 @@ func splitTopLevelCommas(s string) []string {
 // other, so a closure literal, a passed-by-name top-level `fn`, and a
 // Func-typed parameter/return/let-annotation of the same shape all have to
 // resolve to the exact same Go type or they simply won't compile — see
-// funcGoTypeName's own doc comment), or a struct's own declared name
-// verbatim (its STTYPE's Go type is always exactly the struct's AmiFL
-// name — already a valid Go identifier, since every AmiFL identifier is
-// one, so no mangling is needed the way a tuple/array's positional shape
-// needs one).
+// funcGoTypeName's own doc comment), a cross-package struct/enum's already
+// fully package-prefixed Go name verbatim (ex5, isQualifiedType — the exact
+// same string the *declaring* package's own genStructDecl/genEnumDecl call
+// already emitted its STTYPE under, when *that* package's own Unit was
+// processed earlier in GenerateProgram's loop; this program's own
+// pkgPrefix must NOT be applied a second time on top, which is the entire
+// reason sema wraps this in a distinguishable envelope rather than handing
+// codegen a bare name indistinguishable from a same-package one), or a
+// same-package struct's/enum's own declared name verbatim modulo this
+// program's own pkgPrefix (its STTYPE's Go type is always exactly
+// "<pkgPrefix><the struct's AmiFL name>" — already a valid Go identifier,
+// since every AmiFL identifier is one, so no mangling is needed the way a
+// tuple/array's positional shape needs one).
 func (p *program) resolveGoType(t string) string {
 	if isTupleType(t) {
 		return p.tupleGoTypeName(t)
@@ -102,6 +124,9 @@ func (p *program) resolveGoType(t string) string {
 	if t == "Range" {
 		return p.rangeGoTypeName()
 	}
+	if isQualifiedType(t) {
+		return qualifiedTypeGoName(t)
+	}
 	if goName, ok := p.externTypes[t]; ok {
 		return goName
 	}
@@ -128,9 +153,6 @@ func (p *program) resolveGoType(t string) string {
 // settled on "F"+index at sema time and codegen must reproduce exactly the
 // same field names here for FGET/FSET to agree).
 func (p *program) tupleGoTypeName(canonical string) string {
-	if name, ok := p.tupleTypes[canonical]; ok {
-		return name
-	}
 	elems := tupleTypeParts(canonical)
 	// Resolved before this STTYPE's own header line is written — see
 	// genStructDecl's identical fix/doc comment for why interleaving would
@@ -139,12 +161,18 @@ func (p *program) tupleGoTypeName(canonical string) string {
 	for i, e := range elems {
 		goTypes[i] = p.resolveGoType(e)
 	}
+	// Cached by the joined element Go types, not the raw canonical string —
+	// see listGoTypeName's identical fix/doc comment (ex5).
+	goKey := "Tuple(" + strings.Join(goTypes, ",") + ")"
+	if name, ok := p.tupleTypes[goKey]; ok {
+		return name
+	}
 	p.tupleSeq++
 	name := fmt.Sprintf("AmiflTuple%d", p.tupleSeq)
 	if p.tupleTypes == nil {
 		p.tupleTypes = map[string]string{}
 	}
-	p.tupleTypes[canonical] = name
+	p.tupleTypes[goKey] = name
 
 	fmt.Fprintf(&p.typeHeader, "STTYPE\t^%s\n", name)
 	for i, goType := range goTypes {

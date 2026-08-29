@@ -2912,3 +2912,139 @@ func TestGenerate_QualifiedUnitCallEmitsCallWithNoResultOperand(t *testing.T) {
 		t.Errorf("generated IR missing %q (a Unit-returning qualified call has no result operand); got:\n%s", want, ir)
 	}
 }
+
+// --- ex5: cross-package struct/enum references (amifl-spec.md section
+// 12.2) ---
+
+// TestGenerate_QualifiedStructLitUsesGoNameVerbatim covers resolveGoType's
+// new isQualifiedType branch (structs.go): a struct literal whose
+// ResolvedType sema resolved to the qualified canonical string ("Qualified
+// (geo_Point)", types.go's makeQualifiedType) must emit VAR/FSET against
+// "geo_Point" verbatim — the internal envelope itself must never leak into
+// generated IR.
+func TestGenerate_QualifiedStructLitUsesGoNameVerbatim(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "p", Token: "%p_1", ResolvedType: "Qualified(geo_Point)", Value: &ast.StructLit{
+			Qualifier: "geo", TypeName: "Point", ResolvedType: "Qualified(geo_Point)",
+			Fields: []ast.StructLitField{
+				{Name: "x", Value: &ast.IntLit{Value: 1}},
+				{Name: "y", Value: &ast.IntLit{Value: 2}},
+			},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "VAR\t%amifl_tmp1\t^geo_Point") {
+		t.Errorf("expected the qualified struct literal to use geo_Point verbatim; got:\n%s", ir)
+	}
+	if strings.Contains(ir, "Qualified(") {
+		t.Errorf("didn't expect the internal \"Qualified(...)\" envelope to leak into generated IR; got:\n%s", ir)
+	}
+}
+
+// TestGenerate_QualifiedEnumVariantConstructionUsesGoNameVerbatim is
+// TestGenerate_QualifiedStructLitUsesGoNameVerbatim's enum-construction
+// counterpart (genEnumVariantValue, enum.go) — that function already
+// routes through resolveGoType generically, so this needed no codegen
+// changes of its own beyond the same isQualifiedType branch.
+func TestGenerate_QualifiedEnumVariantConstructionUsesGoNameVerbatim(t *testing.T) {
+	construction := &ast.FieldExpr{
+		Field: "Circle", ResolvedType: "Qualified(geo_Shape)", IsEnumVariant: true, VariantIndex: 0,
+		Args: []ast.StructLitField{{Name: "radius", Value: &ast.IntLit{Value: 5}}},
+	}
+	f := mainFile(
+		&ast.LetExpr{Name: "s", Token: "%s_1", ResolvedType: "Qualified(geo_Shape)", Value: construction},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "VAR\t%amifl_tmp1\t^geo_Shape") {
+		t.Errorf("expected the qualified enum variant construction to use geo_Shape verbatim; got:\n%s", ir)
+	}
+	if !strings.Contains(ir, "FSET\t%amifl_tmp1\t>Circle_radius\t5") {
+		t.Errorf("expected FSET into the mechanically-named Circle_radius field; got:\n%s", ir)
+	}
+}
+
+// TestGenerateProgram_QualifiedStructTypeAvoidsDoublePrefixing confirms a
+// qualified struct/enum type's already-complete Go name isn't prefixed a
+// second time by whichever *importing* package happens to be generating
+// at the moment resolveGoType resolves it — app's own "app_" prefix must
+// never appear anywhere near geo_Point.
+func TestGenerateProgram_QualifiedStructTypeAvoidsDoublePrefixing(t *testing.T) {
+	app := Unit{
+		Prefix: "app_",
+		Decls: []ast.TopLevelDecl{
+			&ast.FuncDecl{
+				Name: "MakePoint", ReturnType: nt("Int"), ResolvedReturnType: "Int64",
+				Body: &ast.Block{Exprs: []ast.Expr{
+					&ast.LetExpr{Name: "p", Token: "%p_1", ResolvedType: "Qualified(geo_Point)", Value: &ast.StructLit{
+						Qualifier: "geo", TypeName: "Point", ResolvedType: "Qualified(geo_Point)",
+						Fields: []ast.StructLitField{{Name: "x", Value: &ast.IntLit{Value: 1}}},
+					}},
+					&ast.IntLit{Value: 0},
+				}},
+			},
+		},
+	}
+	root := Unit{Decls: mainFile(&ast.IntLit{Value: 0}).Decls}
+	ir, err := GenerateProgram([]Unit{app, root})
+	if err != nil {
+		t.Fatalf("GenerateProgram() error: %v", err)
+	}
+	if !strings.Contains(ir, "VAR\t%p_1\t^geo_Point") {
+		t.Errorf("expected the qualified struct type to resolve to geo_Point verbatim, without app_'s own prefix applied on top; got:\n%s", ir)
+	}
+	if strings.Contains(ir, "app_geo_Point") || strings.Contains(ir, "Qualified(") {
+		t.Errorf("didn't expect app_'s own prefix or the internal envelope to leak into the Go type name; got:\n%s", ir)
+	}
+}
+
+// TestGenerateProgram_ListOfQualifiedStructSharesGoTypeWithDeclaringPackage
+// is a regression test for a real bug found while implementing ex5: geo's
+// own internal codegen resolves a List[Point] parameter via the bare
+// canonical string "List(Point)", while an importer resolves the identical
+// element type via the qualified "List(Qualified(geo_Point))" — two
+// different AmiFL canonical strings for what must be one shared Go slice
+// type. listGoTypeName (and, by the same fix, every other compound-type
+// minting function — arrayGoTypeName/setGoTypeName/mapGoTypeName/
+// chanGoTypeName/streamGoTypeName/tupleGoTypeName/funcGoTypeName) now
+// caches by the *already-resolved* element Go type rather than the raw
+// canonical string, which is what this test locks in: exactly one SLTYPE
+// must be emitted for both, not two structurally-identical-but-distinct
+// ones (Go would then reject assigning one to the other, exactly the
+// "AmiflList2 vs AmiflList1" mismatch actually hit — by hand, through the
+// real amivm -> go build pipeline — before this fix existed).
+func TestGenerateProgram_ListOfQualifiedStructSharesGoTypeWithDeclaringPackage(t *testing.T) {
+	geo := Unit{
+		Prefix: "geo_",
+		Decls: []ast.TopLevelDecl{
+			&ast.StructDecl{Name: "Point", Fields: []ast.Param{{Name: "x", ResolvedType: "Int64"}}},
+			&ast.FuncDecl{
+				Name:               "Count",
+				Params:             []ast.Param{{Name: "points", ResolvedType: "List(Point)"}},
+				ReturnType:         nt("Int"),
+				ResolvedReturnType: "Int64",
+				Body:               &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+			},
+		},
+	}
+	root := Unit{Decls: mainFile(
+		&ast.LetExpr{Name: "pts", Token: "%pts_1", ResolvedType: "List(Qualified(geo_Point))", Value: &ast.ListLit{
+			ResolvedType: "List(Qualified(geo_Point))",
+		}},
+		&ast.IntLit{Value: 0},
+	).Decls}
+	ir, err := GenerateProgram([]Unit{geo, root})
+	if err != nil {
+		t.Fatalf("GenerateProgram() error: %v", err)
+	}
+	if strings.Count(ir, "SLTYPE") != 1 {
+		t.Errorf("expected exactly one shared SLTYPE for List(Point)/List(Qualified(geo_Point)) (both wrapping geo_Point); got:\n%s", ir)
+	}
+}

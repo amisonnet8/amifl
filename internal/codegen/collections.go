@@ -60,18 +60,28 @@ func elementType(t string) (string, bool) {
 }
 
 // listGoTypeName mints (or reuses) the synthesized Go/AMIVM slice type for
-// one List[T] shape, keyed by its full canonical string.
+// one List[T] shape. Cached by elemGoType (T's own *already-resolved* Go
+// type name), not the raw canonical string — see resolveGoType's own doc
+// comment ("ex5" paragraph) for why: a cross-package struct/enum's element
+// type resolves to two different AmiFL canonical strings depending on who's
+// asking (the declaring package's own bare name vs. an importer's
+// "Qualified(...)" form) but always the identical Go type either way, so
+// keying by canonical string would mint two structurally-identical-but-
+// distinct Go slice types for what must be one shared List[T] — found via
+// ex5's own cross-package examples/modules-style test (a struct/enum-typed
+// List flowing between a struct's own declaring package and its importer).
 func (p *program) listGoTypeName(canonical string) string {
-	if name, ok := p.listTypes[canonical]; ok {
+	elemGoType := p.resolveGoType(listElemType(canonical))
+	goKey := "List(" + elemGoType + ")"
+	if name, ok := p.listTypes[goKey]; ok {
 		return name
 	}
-	elemGoType := p.resolveGoType(listElemType(canonical))
 	p.listSeq++
 	name := fmt.Sprintf("AmiflList%d", p.listSeq)
 	if p.listTypes == nil {
 		p.listTypes = map[string]string{}
 	}
-	p.listTypes[canonical] = name
+	p.listTypes[goKey] = name
 
 	fmt.Fprintf(&p.typeHeader, "SLTYPE\t^%s\t^%s\n", name, elemGoType)
 	return name
@@ -89,17 +99,22 @@ func (p *program) listGoTypeName(canonical string) string {
 // every Array a name up front means resolveGoType never has to know which
 // context it's being asked for.
 func (p *program) arrayGoTypeName(canonical string) string {
-	if name, ok := p.arrayTypes[canonical]; ok {
-		return name
-	}
 	elem, size := arrayParts(canonical)
 	elemGoType := p.resolveGoType(elem)
+	// Cached by (elemGoType, size), not the raw canonical string — see
+	// listGoTypeName's identical fix/doc comment (ex5); size is still part
+	// of the key since two Arrays of the same element Go type but different
+	// lengths are still genuinely different Go array types.
+	goKey := "Array(" + elemGoType + ";" + size + ")"
+	if name, ok := p.arrayTypes[goKey]; ok {
+		return name
+	}
 	p.arraySeq++
 	name := fmt.Sprintf("AmiflArray%d", p.arraySeq)
 	if p.arrayTypes == nil {
 		p.arrayTypes = map[string]string{}
 	}
-	p.arrayTypes[canonical] = name
+	p.arrayTypes[goKey] = name
 
 	fmt.Fprintf(&p.typeHeader, "ARTYPE\t^%s\t^%s\t%s\n", name, elemGoType, size)
 	return name

@@ -1892,6 +1892,12 @@ func ft(params []ast.TypeExpr, ret ast.TypeExpr) ast.TypeExpr {
 	return &ast.FuncType{Params: params, Ret: ret}
 }
 
+// qt builds a cross-package type annotation (ast.QualifiedType, ex5) —
+// `alias.name`.
+func qt(alias, name string) ast.TypeExpr {
+	return &ast.QualifiedType{Alias: alias, Name: name}
+}
+
 func intListLit(vals ...uint64) *ast.ListLit {
 	elems := make([]ast.Expr, len(vals))
 	for i, v := range vals {
@@ -4033,6 +4039,244 @@ func TestCheckPackage_MultipleFilesShareOneNamespaceWithNoImportNeeded(t *testin
 	}}
 	if _, err := CheckPackage([]*ast.File{f1, f2}, "", nil); err != nil {
 		t.Fatalf("CheckPackage() error: %v", err)
+	}
+}
+
+// --- ex5: cross-package struct/enum references (amifl-spec.md section
+// 12.2) ---
+
+func TestCheckPackage_BuildsExportsForStructsAndEnumsCapitalizedOnly(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{Name: "main", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}},
+		&ast.StructDecl{Name: "Point", Fields: []ast.Param{{Name: "x", Type: nt("Int")}, {Name: "y", Type: nt("Int")}}},
+		&ast.StructDecl{Name: "hidden", Fields: []ast.Param{{Name: "v", Type: nt("Int")}}},
+		&ast.EnumDecl{Name: "Shape", Variants: []ast.EnumVariant{{Name: "Circle", Fields: []ast.Param{{Name: "radius", Type: nt("Int")}}}}},
+		&ast.EnumDecl{Name: "invisible", Variants: []ast.EnumVariant{{Name: "Only"}}},
+	}}
+	exports, err := CheckPackage([]*ast.File{f}, "geo_", nil)
+	if err != nil {
+		t.Fatalf("CheckPackage() error: %v", err)
+	}
+	sInfo, ok := exports.Structs["Point"]
+	if !ok {
+		t.Fatal("expected Point to be exported")
+	}
+	if sInfo.GoName != "geo_Point" {
+		t.Fatalf("got GoName %q, want \"geo_Point\"", sInfo.GoName)
+	}
+	if len(sInfo.Fields) != 2 {
+		t.Fatalf("got %d fields, want 2", len(sInfo.Fields))
+	}
+	if _, ok := exports.Structs["hidden"]; ok {
+		t.Fatal("did not expect lowercase hidden to be exported")
+	}
+	eInfo, ok := exports.Enums["Shape"]
+	if !ok {
+		t.Fatal("expected Shape to be exported")
+	}
+	if eInfo.GoName != "geo_Shape" {
+		t.Fatalf("got GoName %q, want \"geo_Shape\"", eInfo.GoName)
+	}
+	if _, ok := exports.Enums["invisible"]; ok {
+		t.Fatal("did not expect lowercase invisible to be exported")
+	}
+}
+
+// TestCheckPackage_QualifiedTypeAnnotationAgreesWithConstructedValue is a
+// regression test for the bug found while implementing ex5: a same-package
+// function's parameter naming a struct type ("Point") and a cross-package
+// construction of that same struct ("mathutil.Point{...}") must resolve to
+// the *identical* canonical type string once seen from the importer's own
+// perspective, or a perfectly well-typed cross-package call is rejected.
+// This chains two real CheckPackage runs (mathutil's own, then main's,
+// exactly like modloader.Load's dependency-order pipeline does) rather
+// than hand-building an Exports literal — a hand-built one could trivially
+// "cheat" by writing the already-correct rewritten form directly, without
+// ever exercising buildExports' own exportTypeString rewriting at all.
+func TestCheckPackage_QualifiedTypeAnnotationAgreesWithConstructedValue(t *testing.T) {
+	mathutilFile := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.StructDecl{Name: "Point", Fields: []ast.Param{{Name: "x", Type: nt("Int")}, {Name: "y", Type: nt("Int")}}},
+		&ast.FuncDecl{
+			Name: "SumPoint", Params: []ast.Param{{Name: "p", Type: nt("Point")}}, ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.BinaryExpr{Op: "+",
+					Left:  &ast.FieldExpr{Target: &ast.IdentExpr{Name: "p"}, Field: "x"},
+					Right: &ast.FieldExpr{Target: &ast.IdentExpr{Name: "p"}, Field: "y"},
+				},
+			}},
+		},
+	}}
+	mathutilExports, err := CheckPackage([]*ast.File{mathutilFile}, "mathutil_", nil)
+	if err != nil {
+		t.Fatalf("CheckPackage(mathutil) error: %v", err)
+	}
+
+	structLit := &ast.StructLit{Qualifier: "mathutil", TypeName: "Point", Fields: []ast.StructLitField{
+		{Name: "x", Value: &ast.IntLit{Value: 3}},
+		{Name: "y", Value: &ast.IntLit{Value: 4}},
+	}}
+	sumCall := qualifiedCall("mathutil", "SumPoint", structLit)
+	mainFileAST := mainFile(&ast.DiscardExpr{Value: sumCall}, &ast.IntLit{Value: 0})
+	imports := map[string]Exports{"mathutil": mathutilExports}
+	if _, err := CheckPackage([]*ast.File{mainFileAST}, "", imports); err != nil {
+		t.Fatalf("CheckPackage(main) error: %v (a value built from mathutil.Point{...} should type-check against SumPoint's own p: Point parameter)", err)
+	}
+	if !sumCall.IsQualifiedCall || sumCall.ResolvedType != "Int64" {
+		t.Fatalf("got IsQualifiedCall=%v ResolvedType=%q, want true/\"Int64\"", sumCall.IsQualifiedCall, sumCall.ResolvedType)
+	}
+}
+
+func TestCheckPackage_QualifiedStructLitConstructsAndTypeChecks(t *testing.T) {
+	imports := map[string]Exports{
+		"geo": {Structs: map[string]ExportedStruct{
+			"Point": {Fields: []fieldInfo{{Name: "x", Typ: "Int64"}, {Name: "y", Typ: "Int64"}}, GoName: "geo_Point"},
+		}},
+	}
+	lit := &ast.StructLit{Qualifier: "geo", TypeName: "Point", Fields: []ast.StructLitField{
+		{Name: "x", Value: &ast.IntLit{Value: 1}},
+		{Name: "y", Value: &ast.IntLit{Value: 2}},
+	}}
+	f := mainFile(&ast.LetExpr{Name: "p", Type: qt("geo", "Point"), Value: lit}, &ast.IntLit{Value: 0})
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err != nil {
+		t.Fatalf("CheckPackage() error: %v", err)
+	}
+	if lit.ResolvedType != "Qualified(geo_Point)" {
+		t.Fatalf("got ResolvedType %q, want \"Qualified(geo_Point)\"", lit.ResolvedType)
+	}
+}
+
+func TestCheckPackage_QualifiedStructLitMissingFieldIsAnError(t *testing.T) {
+	imports := map[string]Exports{
+		"geo": {Structs: map[string]ExportedStruct{
+			"Point": {Fields: []fieldInfo{{Name: "x", Typ: "Int64"}, {Name: "y", Typ: "Int64"}}, GoName: "geo_Point"},
+		}},
+	}
+	lit := &ast.StructLit{Qualifier: "geo", TypeName: "Point", Fields: []ast.StructLitField{
+		{Name: "x", Value: &ast.IntLit{Value: 1}},
+	}}
+	f := mainFile(&ast.DiscardExpr{Value: lit}, &ast.IntLit{Value: 0})
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err == nil {
+		t.Fatal("expected an error for a qualified struct literal missing a field")
+	}
+}
+
+func TestCheckPackage_QualifiedStructLitUnknownStructIsAnError(t *testing.T) {
+	imports := map[string]Exports{"geo": {Structs: map[string]ExportedStruct{}}}
+	lit := &ast.StructLit{Qualifier: "geo", TypeName: "Circle", Fields: nil}
+	f := mainFile(&ast.DiscardExpr{Value: lit}, &ast.IntLit{Value: 0})
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err == nil {
+		t.Fatal("expected an error for a qualified struct literal naming an unknown/unexported struct")
+	}
+}
+
+func TestCheckPackage_QualifiedEnumVariantConstructsAndTypeChecks(t *testing.T) {
+	imports := map[string]Exports{
+		"geo": {Enums: map[string]ExportedEnum{
+			"Shape": {
+				Variants: []variantInfo{{Name: "Circle", Fields: []fieldInfo{{Name: "radius", Typ: "Int64"}}}},
+				GoName:   "geo_Shape",
+			},
+		}},
+	}
+	construction := &ast.FieldExpr{
+		Target: &ast.FieldExpr{Target: &ast.IdentExpr{Name: "geo"}, Field: "Shape"},
+		Field:  "Circle",
+		Args:   []ast.StructLitField{{Name: "radius", Value: &ast.IntLit{Value: 5}}},
+	}
+	f := mainFile(&ast.LetExpr{Name: "s", Value: construction}, &ast.IntLit{Value: 0})
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err != nil {
+		t.Fatalf("CheckPackage() error: %v", err)
+	}
+	if !construction.IsEnumVariant || construction.VariantIndex != 0 {
+		t.Fatalf("got IsEnumVariant=%v VariantIndex=%d, want true/0", construction.IsEnumVariant, construction.VariantIndex)
+	}
+	if construction.ResolvedType != "Qualified(geo_Shape)" {
+		t.Fatalf("got ResolvedType %q, want \"Qualified(geo_Shape)\"", construction.ResolvedType)
+	}
+}
+
+func TestCheckPackage_QualifiedEnumVariantUnknownVariantIsAnError(t *testing.T) {
+	imports := map[string]Exports{
+		"geo": {Enums: map[string]ExportedEnum{"Shape": {Variants: []variantInfo{{Name: "Circle"}}, GoName: "geo_Shape"}}},
+	}
+	construction := &ast.FieldExpr{
+		Target: &ast.FieldExpr{Target: &ast.IdentExpr{Name: "geo"}, Field: "Shape"},
+		Field:  "Square",
+		Args:   []ast.StructLitField{},
+	}
+	f := mainFile(&ast.DiscardExpr{Value: construction}, &ast.IntLit{Value: 0})
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err == nil {
+		t.Fatal("expected an error for an unknown variant on a cross-package enum")
+	}
+}
+
+func TestCheck_SwitchOverCrossPackageEnumIsAnError(t *testing.T) {
+	imports := map[string]Exports{
+		"geo": {Enums: map[string]ExportedEnum{"Shape": {Variants: []variantInfo{{Name: "Circle"}}, GoName: "geo_Shape"}}},
+	}
+	construction := &ast.FieldExpr{
+		Target: &ast.FieldExpr{Target: &ast.IdentExpr{Name: "geo"}, Field: "Shape"},
+		Field:  "Circle",
+		Args:   []ast.StructLitField{},
+	}
+	sw := &ast.SwitchExpr{
+		Subject: construction,
+		Cases: []ast.SwitchCase{
+			{EnumName: "Shape", Variant: "Circle", Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}},
+		},
+	}
+	f := mainFile(&ast.DiscardExpr{Value: sw}, &ast.IntLit{Value: 0})
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err == nil {
+		t.Fatal("expected an error: switch over a cross-package enum subject isn't supported yet")
+	}
+}
+
+func TestCheckPackage_QualifiedFieldAccessOnConstructedStruct(t *testing.T) {
+	imports := map[string]Exports{
+		"geo": {Structs: map[string]ExportedStruct{
+			"Point": {Fields: []fieldInfo{{Name: "x", Typ: "Int64"}, {Name: "y", Typ: "Int64"}}, GoName: "geo_Point"},
+		}},
+	}
+	lit := &ast.StructLit{Qualifier: "geo", TypeName: "Point", Fields: []ast.StructLitField{
+		{Name: "x", Value: &ast.IntLit{Value: 1}},
+		{Name: "y", Value: &ast.IntLit{Value: 2}},
+	}}
+	access := &ast.FieldExpr{Target: lit, Field: "x"}
+	f := mainFile(&ast.LetExpr{Name: "v", Value: access}, &ast.IntLit{Value: 0})
+	if _, err := CheckPackage([]*ast.File{f}, "", imports); err != nil {
+		t.Fatalf("CheckPackage() error: %v", err)
+	}
+	if access.ResolvedType != "Int64" || access.AmivmField != "x" {
+		t.Fatalf("got ResolvedType=%q AmivmField=%q, want \"Int64\"/\"x\"", access.ResolvedType, access.AmivmField)
+	}
+}
+
+// TestCheckPackage_ExportTypeStringRewritesNestedStructInsideCompoundType
+// exercises exportTypeString's recursive case directly (not just the
+// top-level struct name — module.go's own doc comment): a struct field
+// typed List[Point] must export as "List(Qualified(<prefix>Point))", not
+// the bare "List(Point)" an importer's own c.structs has no entry for.
+func TestCheckPackage_ExportTypeStringRewritesNestedStructInsideCompoundType(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{Name: "main", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}},
+		&ast.StructDecl{Name: "Point", Fields: []ast.Param{{Name: "x", Type: nt("Int")}}},
+		&ast.StructDecl{Name: "Path", Fields: []ast.Param{{Name: "points", Type: &ast.ListType{Elem: nt("Point")}}}},
+		&ast.FuncDecl{
+			Name: "MakePath", Params: []ast.Param{{Name: "points", Type: &ast.ListType{Elem: nt("Point")}}}, ReturnType: nt("Path"),
+			Body: &ast.Block{Exprs: []ast.Expr{&ast.StructLit{TypeName: "Path", Fields: []ast.StructLitField{{Name: "points", Value: &ast.IdentExpr{Name: "points"}}}}}},
+		},
+	}}
+	exports, err := CheckPackage([]*ast.File{f}, "geo_", nil)
+	if err != nil {
+		t.Fatalf("CheckPackage() error: %v", err)
+	}
+	pathFields := exports.Structs["Path"].Fields
+	if len(pathFields) != 1 || pathFields[0].Typ != "List(Qualified(geo_Point))" {
+		t.Fatalf("got Path.Fields %#v, want [{points List(Qualified(geo_Point))}]", pathFields)
+	}
+	makePathParams := exports.Funcs["MakePath"].Params
+	if len(makePathParams) != 1 || makePathParams[0] != "List(Qualified(geo_Point))" {
+		t.Fatalf("got MakePath.Params %#v, want [List(Qualified(geo_Point))]", makePathParams)
 	}
 }
 

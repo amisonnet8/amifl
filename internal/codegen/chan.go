@@ -52,16 +52,19 @@ func streamElemType(t string) string {
 // backing one Chan[T] shape, keyed by its full canonical string — mirrors
 // setGoTypeName (maps.go) exactly, minus the hardcoded bool value type.
 func (p *program) chanGoTypeName(canonical string) string {
-	if name, ok := p.chanTypes[canonical]; ok {
+	elemGoType := p.resolveGoType(chanElemType(canonical))
+	// Cached by elemGoType, not the raw canonical string — see
+	// listGoTypeName's identical fix/doc comment (ex5).
+	goKey := "Chan(" + elemGoType + ")"
+	if name, ok := p.chanTypes[goKey]; ok {
 		return name
 	}
-	elemGoType := p.resolveGoType(chanElemType(canonical))
 	p.chanSeq++
 	name := fmt.Sprintf("AmiflChan%d", p.chanSeq)
 	if p.chanTypes == nil {
 		p.chanTypes = map[string]string{}
 	}
-	p.chanTypes[canonical] = name
+	p.chanTypes[goKey] = name
 
 	fmt.Fprintf(&p.typeHeader, "CHTYPE\t^%s\t^%s\n", name, elemGoType)
 	return name
@@ -72,16 +75,19 @@ func (p *program) chanGoTypeName(canonical string) string {
 // identical element type, exactly like setGoTypeName/mapGoTypeName's
 // step-10 precedent (ast.StreamType's doc comment explains why).
 func (p *program) streamGoTypeName(canonical string) string {
-	if name, ok := p.streamTypes[canonical]; ok {
+	elemGoType := p.resolveGoType(streamElemType(canonical))
+	// Cached by elemGoType, not the raw canonical string — see
+	// listGoTypeName's identical fix/doc comment (ex5).
+	goKey := "Stream(" + elemGoType + ")"
+	if name, ok := p.streamTypes[goKey]; ok {
 		return name
 	}
-	elemGoType := p.resolveGoType(streamElemType(canonical))
 	p.streamSeq++
 	name := fmt.Sprintf("AmiflStream%d", p.streamSeq)
 	if p.streamTypes == nil {
 		p.streamTypes = map[string]string{}
 	}
-	p.streamTypes[canonical] = name
+	p.streamTypes[goKey] = name
 
 	fmt.Fprintf(&p.typeHeader, "CHTYPE\t^%s\t^%s\n", name, elemGoType)
 	return name

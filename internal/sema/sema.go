@@ -63,6 +63,20 @@ func CheckPackage(files []*ast.File, prefix string, imports map[string]Exports) 
 		externAliases: map[string]string{},
 		imports:       imports,
 	}
+	// ex5: every imported package's own exported structs/enums are
+	// registered into c.structs/c.enums here, before anything else — see
+	// registerImportedTypes' own doc comment. This has to run before Pass 0
+	// below (not folded into it) since Pass 0's own registerStructName/
+	// registerEnumName check c.structs/c.enums for a name collision, and a
+	// same-package declaration should never collide with an imported
+	// qualified entry (it structurally can't — see makeQualifiedType's doc
+	// comment — but running this first keeps the invariant "c.structs/
+	// c.enums are fully populated with every name resolveFieldExpr/
+	// resolveTypeExpr might ever need to look up" true from the very start
+	// of type-checking, matching how imports themselves are always fully
+	// resolved before CheckPackage even begins, amifl-spec.md's own
+	// dependency-order guarantee).
+	c.registerImportedTypes()
 
 	var consts []*ast.ConstDecl
 	var funcs []*ast.FuncDecl

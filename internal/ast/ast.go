@@ -159,25 +159,51 @@ type FuncType struct {
 	Line   int
 }
 
-func (*NamedType) typeExprNode()  {}
-func (*ListType) typeExprNode()   {}
-func (*ArrayType) typeExprNode()  {}
-func (*SetType) typeExprNode()    {}
-func (*MapType) typeExprNode()    {}
-func (*TupleType) typeExprNode()  {}
-func (*ChanType) typeExprNode()   {}
-func (*StreamType) typeExprNode() {}
-func (*FuncType) typeExprNode()   {}
+// QualifiedType is `alias.Name` used as a type annotation (amifl-spec.md
+// section 12.2, ex5) — a cross-package `struct`/`enum` referenced by its
+// declaring package's own name, exactly as NamedType would name a
+// same-package one. Parsed by parseTypeExpr the moment it sees `Ident '.'
+// Ident` where a plain NamedType would otherwise have ended (every other
+// bracketed type — List[T], Tuple2[T1,T2], ... — starts its own bracket
+// right after the leading name instead, so there's no ambiguity between
+// this and any of those). sema's resolveTypeExpr is the only place that
+// interprets Alias/Name — looking Alias up in the current package's own
+// imports, then Name in that import's Exports.Structs/Exports.Enums —
+// resolving to the same "Qualified(GoName)" canonical string
+// (types.go's makeQualifiedType) a qualified StructLit/enum-variant
+// FieldExpr resolves to, so a value built one way and a parameter/`let`
+// annotated the other agree on being the same type. Unlike FuncType (ex3),
+// there is no separate "value" grammar this shadows — a struct/enum type
+// name was never independently a value in this language (only
+// `TypeName{...}`/`EnumType.Variant(...)` construction was), so there's no
+// analogue of ClosureLit's own scope-cut to worry about here.
+type QualifiedType struct {
+	Alias string
+	Name  string
+	Line  int
+}
 
-func (n *NamedType) Pos() int  { return n.Line }
-func (n *ListType) Pos() int   { return n.Line }
-func (n *ArrayType) Pos() int  { return n.Line }
-func (n *SetType) Pos() int    { return n.Line }
-func (n *MapType) Pos() int    { return n.Line }
-func (n *TupleType) Pos() int  { return n.Line }
-func (n *ChanType) Pos() int   { return n.Line }
-func (n *StreamType) Pos() int { return n.Line }
-func (n *FuncType) Pos() int   { return n.Line }
+func (*NamedType) typeExprNode()     {}
+func (*ListType) typeExprNode()      {}
+func (*ArrayType) typeExprNode()     {}
+func (*SetType) typeExprNode()       {}
+func (*MapType) typeExprNode()       {}
+func (*TupleType) typeExprNode()     {}
+func (*ChanType) typeExprNode()      {}
+func (*StreamType) typeExprNode()    {}
+func (*FuncType) typeExprNode()      {}
+func (*QualifiedType) typeExprNode() {}
+
+func (n *NamedType) Pos() int     { return n.Line }
+func (n *ListType) Pos() int      { return n.Line }
+func (n *ArrayType) Pos() int     { return n.Line }
+func (n *SetType) Pos() int       { return n.Line }
+func (n *MapType) Pos() int       { return n.Line }
+func (n *TupleType) Pos() int     { return n.Line }
+func (n *ChanType) Pos() int      { return n.Line }
+func (n *StreamType) Pos() int    { return n.Line }
+func (n *FuncType) Pos() int      { return n.Line }
+func (n *QualifiedType) Pos() int { return n.Line }
 
 // TopLevelDecl is a top-level declaration: *FuncDecl or *ConstDecl.
 // AmiFL forbids top-level `let` (amifl-spec.md section 4, principle 5) —
@@ -661,16 +687,34 @@ type TupleLit struct {
 }
 
 // StructLit is `TypeName{field1: v1, field2: v2, ...}` (amifl-spec.md
-// section 2.2/8.4). Every one of the struct's declared fields must be
-// given exactly once; order doesn't matter (each is matched by name, not
-// position) — sema's resolveStructLit checks both completeness and
-// duplicates.
+// section 2.2/8.4), or, since ex5, `alias.TypeName{...}` — a cross-package
+// struct construction (Qualifier holds the import alias, "" for the plain,
+// same-package form). The parser only ever produces the qualified form from
+// inside parsePostfixExpr's own `.field` loop (never parseIdentOrCall,
+// which only ever sees a *bare* leading identifier) — right after building
+// what would otherwise become a plain `alias.TypeName` FieldExpr with no
+// call args, a following `{` (outside a noCompositeLit context, exactly the
+// same disambiguation parseIdentOrCall's own unqualified check already
+// uses) is reinterpreted as this node instead, with the FieldExpr's
+// would-be Target's Name becoming Qualifier and its would-be Field becoming
+// TypeName. Every one of the struct's declared fields must be given exactly
+// once; order doesn't matter (each is matched by name, not position) —
+// sema's resolveStructLit checks both completeness and duplicates, for
+// either form identically (only the very first step — finding the right
+// *structInfo to check fields against — differs by Qualifier).
 type StructLit struct {
-	TypeName string
-	Fields   []StructLitField
-	Line     int
+	Qualifier string
+	TypeName  string
+	Fields    []StructLitField
+	Line      int
 
-	ResolvedType string // filled by sema: always == TypeName (struct types aren't aliased)
+	// ResolvedType is TypeName verbatim for the same-package form (struct
+	// types aren't aliased), or, for a qualified literal, the synthesized
+	// "Qualified(GoName)" canonical string (types.go's makeQualifiedType) —
+	// see that function's own doc comment for why a cross-package struct/
+	// enum can't just reuse its own bare declared name as its canonical
+	// type here the way a same-package one does.
+	ResolvedType string
 }
 
 // StructLitField is one `name: value` entry inside a StructLit.

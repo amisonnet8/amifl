@@ -1003,26 +1003,52 @@ func (fc *funcChecker) resolveTupleLit(v *ast.TupleLit) (string, error) {
 }
 
 // resolveStructLit type-checks `TypeName{field1: v1, ...}` (amifl-spec.md
-// section 2.2/8.4): TypeName must be a declared struct, every one of its
-// fields must be given exactly once (in any order — matched by name, not
-// position), and each value is checked against its field's declared type
-// (so an untyped literal value adapts to that field's type exactly like a
-// `let`'s initializer would).
+// section 2.2/8.4), or, since ex5, `alias.TypeName{...}` (v.Qualifier != ""
+// — see StructLit's own doc comment): TypeName must be a declared struct
+// (in the current package, or, qualified, an exported one in the named
+// import), every one of its fields must be given exactly once (in any
+// order — matched by name, not position), and each value is checked
+// against its field's declared type (so an untyped literal value adapts to
+// that field's type exactly like a `let`'s initializer would).
+//
+// typeKey is the string actually looked up in fc.structs — TypeName
+// verbatim for the same-package form, or the qualified canonical string
+// (types.go's makeQualifiedType) once v.Qualifier resolves against
+// fc.imports for the cross-package form; registerImportedTypes (module.go)
+// is what guarantees the latter is already a valid fc.structs key by the
+// time any function body is checked. displayName is only for error text
+// ("mathutil.Point" rather than the internal "Qualified(mathutil_Point)"
+// wrapper) — every check below otherwise runs completely unchanged for
+// either form once typeKey/displayName are settled.
 func (fc *funcChecker) resolveStructLit(v *ast.StructLit) (string, error) {
-	info, ok := fc.structs[v.TypeName]
+	typeKey := v.TypeName
+	displayName := v.TypeName
+	if v.Qualifier != "" {
+		pkg, ok := fc.imports[v.Qualifier]
+		if !ok {
+			return "", fmt.Errorf("line %d: undefined import alias %q", v.Line, v.Qualifier)
+		}
+		es, ok := pkg.Structs[v.TypeName]
+		if !ok {
+			return "", fmt.Errorf("line %d: package %q has no exported struct %q", v.Line, v.Qualifier, v.TypeName)
+		}
+		typeKey = makeQualifiedType(es.GoName)
+		displayName = v.Qualifier + "." + v.TypeName
+	}
+	info, ok := fc.structs[typeKey]
 	if !ok {
-		return "", fmt.Errorf("line %d: undefined struct type %q", v.Line, v.TypeName)
+		return "", fmt.Errorf("line %d: undefined struct type %q", v.Line, displayName)
 	}
 	seen := map[string]bool{}
 	for i := range v.Fields {
 		f := &v.Fields[i]
 		if seen[f.Name] {
-			return "", fmt.Errorf("line %d: duplicate field %q in %s literal", f.Line, f.Name, v.TypeName)
+			return "", fmt.Errorf("line %d: duplicate field %q in %s literal", f.Line, f.Name, displayName)
 		}
 		seen[f.Name] = true
 		fieldTyp, ok := info.fieldType(f.Name)
 		if !ok {
-			return "", fmt.Errorf("line %d: struct %s has no field %q", f.Line, v.TypeName, f.Name)
+			return "", fmt.Errorf("line %d: struct %s has no field %q", f.Line, displayName, f.Name)
 		}
 		if _, err := fc.checkExpr(f.Value, fieldTyp); err != nil {
 			return "", err
@@ -1035,41 +1061,62 @@ func (fc *funcChecker) resolveStructLit(v *ast.StructLit) (string, error) {
 				missing = append(missing, fld.Name)
 			}
 		}
-		return "", fmt.Errorf("line %d: %s literal is missing field(s): %s", v.Line, v.TypeName, strings.Join(missing, ", "))
+		return "", fmt.Errorf("line %d: %s literal is missing field(s): %s", v.Line, displayName, strings.Join(missing, ", "))
 	}
-	v.ResolvedType = v.TypeName
-	return v.TypeName, nil
+	v.ResolvedType = typeKey
+	return typeKey, nil
 }
 
 // resolveFieldExpr type-checks postfix `target.field` (amifl-spec.md
 // section 3.2/2.2) — tuple index sugar when Target's type is a Tuple,
 // ordinary struct field access when it's a struct, (step 8) enum variant
 // construction when Target is a bare identifier naming a declared enum
-// type, or (step 14) a cross-package qualified reference
+// type, (step 14) a cross-package qualified reference
 // (resolveQualifiedReference, module.go) when Target is a bare identifier
-// naming a known `import` alias instead — both of these last two are
-// checked *first*, before Target is ever resolved as a value: an enum type
-// name or an import alias was never a valid variable reference to begin
-// with, so there's nothing lost by not trying checkExpr(Target) in either
-// case, and trying it first would just fail with a confusing "undefined
-// name" instead of resolving correctly. Every other case computes and stores
-// AmivmField, the exact string codegen writes after FGET's `>` prefix
-// (ast.FieldExpr's doc comment) — a synthesized "F0"/"F1"/... for a tuple
-// index (Go struct fields can't be named with a bare digit) or Field
-// verbatim for a struct, since codegen has no vocabulary of its own to
-// tell a Tuple's encoded ResolvedType apart from a struct's (see
-// makeTupleType's doc comment on why that stays sema-internal).
+// naming a known `import` alias instead, or (ex5) cross-package enum
+// variant construction (`alias.EnumType.Variant(...)`) when Target is
+// itself *another* FieldExpr shaped exactly like a bare `alias.EnumType`
+// qualified reference (no call args of its own) whose Field names an
+// exported enum in that package — parsePostfixExpr's ordinary dot-chaining
+// loop already produces this shape with no parser changes needed (see
+// QualifiedType's doc comment for the analogous point about type
+// annotations); resolveEnumVariantConstruction itself doesn't care whether
+// its enumInfo came from fc.enums directly (same-package) or was
+// synthesized here from Exports.Enums (cross-package) — every one of these
+// is checked *before* Target is ever resolved as an ordinary value: an enum
+// type name, an import alias, or an alias.EnumType pair was never a valid
+// variable reference to begin with, so there's nothing lost by not trying
+// checkExpr(Target) in any of these cases, and trying it first would just
+// fail with a confusing "undefined name"/"no exported name" instead of
+// resolving correctly. Every other case computes and stores AmivmField,
+// the exact string codegen writes after FGET's `>` prefix (ast.FieldExpr's
+// doc comment) — a synthesized "F0"/"F1"/... for a tuple index (Go struct
+// fields can't be named with a bare digit) or Field verbatim for a struct,
+// since codegen has no vocabulary of its own to tell a Tuple's encoded
+// ResolvedType apart from a struct's (see makeTupleType's doc comment on
+// why that stays sema-internal).
 func (fc *funcChecker) resolveFieldExpr(v *ast.FieldExpr) (string, error) {
 	if ident, ok := v.Target.(*ast.IdentExpr); ok {
 		if info, isEnum := fc.enums[ident.Name]; isEnum {
-			return fc.resolveEnumVariantConstruction(v, ident.Name, info)
+			return fc.resolveEnumVariantConstruction(v, ident.Name, ident.Name, info)
 		}
 		if pkg, isAlias := fc.imports[ident.Name]; isAlias {
 			return fc.resolveQualifiedReference(v, ident.Name, pkg)
 		}
 	}
+	if qual, ok := v.Target.(*ast.FieldExpr); ok && qual.Args == nil {
+		if alias, ok := qual.Target.(*ast.IdentExpr); ok {
+			if pkg, isAlias := fc.imports[alias.Name]; isAlias {
+				if ee, ok := pkg.Enums[qual.Field]; ok {
+					displayName := alias.Name + "." + qual.Field
+					info := &enumInfo{Name: displayName, Variants: ee.Variants}
+					return fc.resolveEnumVariantConstruction(v, displayName, makeQualifiedType(ee.GoName), info)
+				}
+			}
+		}
+	}
 	if v.Args != nil {
-		return "", fmt.Errorf("line %d: '.'-call syntax (`X.Y(...)`) is only valid for enum variant construction (`EnumType.Variant(...)`) or a step-14 qualified package call (`alias.Name(...)`)", v.Line)
+		return "", fmt.Errorf("line %d: '.'-call syntax (`X.Y(...)`) is only valid for enum variant construction (`EnumType.Variant(...)`/`alias.EnumType.Variant(...)`) or a qualified package call (`alias.Name(...)`)", v.Line)
 	}
 
 	targetTyp, err := fc.checkExpr(v.Target, "")
@@ -1101,31 +1148,44 @@ func (fc *funcChecker) resolveFieldExpr(v *ast.FieldExpr) (string, error) {
 // resolveEnumVariantConstruction type-checks `EnumType.Variant` (v.Args ==
 // nil) or `EnumType.Variant(field: v, ...)` (v.Args != nil) — amifl-spec.md
 // section 2.2's "値生成は型名.バリアント名(...)というリテラルではない通常の
-// 式". Every one of the variant's declared fields must be given exactly
-// once, by name (v.Args uses the identical named-field convention
-// resolveStructLit already enforces for struct literals) — a zero-field
-// variant naturally satisfies this with v.Args empty (nil or a
-// zero-length slice both compare equal-length to a zero-field variant's
-// own Fields, so no separate "bare variant" code path is needed here).
-func (fc *funcChecker) resolveEnumVariantConstruction(v *ast.FieldExpr, enumName string, info *enumInfo) (string, error) {
+// 式" — for either a same-package enum (info straight from fc.enums) or,
+// since ex5, a cross-package one (resolveFieldExpr synthesizes an *enumInfo
+// from Exports.Enums for this call only, never registered into fc.enums
+// itself — unlike resolveStructLit's Qualifier branch, this doesn't need a
+// stable, repeatedly-looked-up map key the way a struct's *value* type
+// does, since an enum's Target is never read as a value at all, see below).
+// displayName is used only in error text ("mathutil.Status" for the
+// qualified form, the bare enum name otherwise); canonicalType is what
+// actually becomes v.ResolvedType — the two coincide for the same-package
+// call site (fc.resolveFieldExpr passes ident.Name for both) but diverge
+// for the qualified one (the human-readable "alias.EnumType" vs. the
+// internal "Qualified(GoName)" wrapper, types.go's makeQualifiedType).
+//
+// Every one of the variant's declared fields must be given exactly once, by
+// name (v.Args uses the identical named-field convention resolveStructLit
+// already enforces for struct literals) — a zero-field variant naturally
+// satisfies this with v.Args empty (nil or a zero-length slice both compare
+// equal-length to a zero-field variant's own Fields, so no separate "bare
+// variant" code path is needed here).
+func (fc *funcChecker) resolveEnumVariantConstruction(v *ast.FieldExpr, displayName, canonicalType string, info *enumInfo) (string, error) {
 	vi, ok := info.variantIndex(v.Field)
 	if !ok {
-		return "", fmt.Errorf("line %d: enum %s has no variant %q", v.Line, enumName, v.Field)
+		return "", fmt.Errorf("line %d: enum %s has no variant %q", v.Line, displayName, v.Field)
 	}
 	variant := info.Variants[vi]
 	if len(v.Args) != len(variant.Fields) {
-		return "", fmt.Errorf("line %d: %s.%s expects %d field value(s), got %d", v.Line, enumName, v.Field, len(variant.Fields), len(v.Args))
+		return "", fmt.Errorf("line %d: %s.%s expects %d field value(s), got %d", v.Line, displayName, v.Field, len(variant.Fields), len(v.Args))
 	}
 	seen := map[string]bool{}
 	for i := range v.Args {
 		a := &v.Args[i]
 		if seen[a.Name] {
-			return "", fmt.Errorf("line %d: duplicate field %q in %s.%s construction", a.Line, a.Name, enumName, v.Field)
+			return "", fmt.Errorf("line %d: duplicate field %q in %s.%s construction", a.Line, a.Name, displayName, v.Field)
 		}
 		seen[a.Name] = true
 		fieldTyp, ok := variant.fieldType(a.Name)
 		if !ok {
-			return "", fmt.Errorf("line %d: variant %s.%s has no field %q", a.Line, enumName, v.Field, a.Name)
+			return "", fmt.Errorf("line %d: variant %s.%s has no field %q", a.Line, displayName, v.Field, a.Name)
 		}
 		if _, err := fc.checkExpr(a.Value, fieldTyp); err != nil {
 			return "", err
@@ -1138,12 +1198,12 @@ func (fc *funcChecker) resolveEnumVariantConstruction(v *ast.FieldExpr, enumName
 				missing = append(missing, fld.Name)
 			}
 		}
-		return "", fmt.Errorf("line %d: %s.%s construction is missing field(s): %s", v.Line, enumName, v.Field, strings.Join(missing, ", "))
+		return "", fmt.Errorf("line %d: %s.%s construction is missing field(s): %s", v.Line, displayName, v.Field, strings.Join(missing, ", "))
 	}
 	v.IsEnumVariant = true
 	v.VariantIndex = vi
-	v.ResolvedType = enumName
-	return enumName, nil
+	v.ResolvedType = canonicalType
+	return canonicalType, nil
 }
 
 // resolveSwitchExpr type-checks step 8's subject-carrying `switch`
@@ -1162,6 +1222,17 @@ func (fc *funcChecker) resolveSwitchExpr(v *ast.SwitchExpr, expected string) (st
 	subjectTyp, err := fc.checkExpr(v.Subject, "")
 	if err != nil {
 		return "", err
+	}
+	if isQualifiedType(subjectTyp) {
+		// ex5 deliberately stops at construction/field-annotation use —
+		// matching a cross-package enum's variants in a `switch` would need
+		// case patterns to name it qualified too (`case alias.EnumType.
+		// Variant(...):`), which parseSwitchCasePattern's grammar has no way
+		// to write (it only ever reads a bare, same-package EnumName). A
+		// same-package `fn` in the enum's own declaring package remains the
+		// way to inspect one from outside that package (call it, get back
+		// whatever plain value it extracts via its own local switch).
+		return "", fmt.Errorf("line %d: switch over a cross-package enum isn't supported yet (%s is declared in another package) — expose a function in that package to inspect it instead", v.Subject.Pos(), subjectTyp)
 	}
 	info, ok := fc.enums[subjectTyp]
 	if !ok {
@@ -1821,6 +1892,25 @@ func (fc *funcChecker) resolveTypeExpr(te ast.TypeExpr) (string, error) {
 			return "", err
 		}
 		return makeFuncType(paramTypes, retTyp), nil
+	case *ast.QualifiedType:
+		// ex5: `alias.Name` naming a cross-package struct or enum
+		// (amifl-spec.md section 12.2) — see QualifiedType's own doc
+		// comment. Either kind resolves the same way here (a type
+		// annotation doesn't care which); resolveStructLit/
+		// resolveFieldExpr's own qualified-construction branches are what
+		// separately enforce "only a struct can be built with {...}" /
+		// "only an enum can be built with .Variant(...)".
+		pkg, ok := fc.imports[t.Alias]
+		if !ok {
+			return "", fmt.Errorf("line %d: undefined import alias %q", t.Line, t.Alias)
+		}
+		if es, ok := pkg.Structs[t.Name]; ok {
+			return makeQualifiedType(es.GoName), nil
+		}
+		if ee, ok := pkg.Enums[t.Name]; ok {
+			return makeQualifiedType(ee.GoName), nil
+		}
+		return "", fmt.Errorf("line %d: package %q has no exported struct or enum type %q", t.Line, t.Alias, t.Name)
 	default:
 		return "", fmt.Errorf("sema: unsupported type expression %T", te)
 	}

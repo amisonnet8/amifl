@@ -11,3 +11,38 @@ fn Clamp(v: Int, lo: Int, hi: Int) -> Int {
 fn DoubleClamped(v: Int, lo: Int, hi: Int) -> Int {
     Clamp(double(v), lo, hi)
 }
+
+// ex5: an exported struct/enum, constructible and consumable from another
+// package via `mathutil.Interval{...}`/`mathutil.ClampOutcome.Variant(...)`
+// (amifl-spec.md section 12.2) — switch over ClampOutcome stays here, in
+// its own declaring package, since matching a cross-package enum's
+// variants directly isn't supported yet (ex5's own deliberate scope cut).
+struct Interval {
+    lo: Int,
+    hi: Int
+}
+
+fn ClampToInterval(v: Int, iv: Interval) -> Int {
+    Clamp(v, iv.lo, iv.hi)
+}
+
+enum ClampOutcome {
+    Unchanged
+    Adjusted(delta: Int)
+}
+
+fn ClassifyClamp(v: Int, iv: Interval) -> ClampOutcome {
+    let clamped = ClampToInterval(v, iv)
+    if clamped == v {
+        ClampOutcome.Unchanged
+    } else {
+        ClampOutcome.Adjusted(delta: clamped - v)
+    }
+}
+
+fn DeltaOrZero(o: ClampOutcome) -> Int {
+    switch o {
+        case ClampOutcome.Unchanged: 0
+        case ClampOutcome.Adjusted(delta): delta
+    }
+}

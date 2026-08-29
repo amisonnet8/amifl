@@ -422,6 +422,51 @@ func streamElemType(t string) (string, bool) {
 	return strings.TrimSuffix(strings.TrimPrefix(t, "Stream("), ")"), true
 }
 
+// makeQualifiedType/isQualifiedType/qualifiedTypeGoName encode a
+// cross-package `struct`/`enum` reference (ex5, amifl-spec.md section
+// 12.2) as "Qualified(GoName)" — goName is the exporting package's own
+// canonical rename already baked in (module.go's ExportedStruct.GoName/
+// ExportedEnum.GoName, "<prefix><declared name>", identical to what that
+// package's own codegen already emits its STTYPE under — codegen.go's
+// pkgPrefix), never the bare declared name alone. This can't just reuse the
+// bare name the way a same-package struct/enum's own canonical type string
+// does (structInfo/enumInfo are keyed by that bare name in c.structs/
+// c.enums) — two different packages could each happen to declare a struct
+// with the identical bare name, and conflating them into the same
+// canonical string would let sema silently treat two genuinely different
+// types as one (and codegen would only ever emit an STTYPE for whichever
+// one happened to be registered first). Wrapping in this envelope, exactly
+// like every other compound canonical string here (Tuple(...)/List(...)/
+// etc.), sidesteps that: no bare struct/enum name a user could actually
+// declare can ever collide with one of these (identifiers can't contain
+// '(' or ')'), so sema.CheckPackage's setup step can register each import's
+// exported structs/enums straight into the *same* c.structs/c.enums maps
+// this key uses (registerImportedTypes, sema.go) and every existing
+// consumer of those maps (resolveFieldExpr's struct/enum lookups,
+// resolveStructLit, resolveSwitchExpr's subject lookup, ...) handles a
+// cross-package type exactly like a local one with no changes of its own —
+// only resolveTypeExpr's new *ast.QualifiedType case and the two qualified-
+// construction call sites (resolveFieldExpr's alias.EnumType.Variant
+// branch, resolveStructLit's Qualifier branch) ever need to know this
+// envelope exists at all. codegen's own resolveGoType mirrors this exactly
+// (structs.go's isQualifiedType/qualifiedTypeGoName, an independent copy —
+// ast is sema's and codegen's only shared vocabulary): once unwrapped, the
+// inner string is used as the Go type name completely verbatim, with no
+// further pkgPrefix applied on top (the "<prefix><name>" is already
+// complete) — that's the entire reason this needs to be structurally
+// distinguishable from a bare local name in the first place.
+func makeQualifiedType(goName string) string {
+	return "Qualified(" + goName + ")"
+}
+
+func isQualifiedType(t string) bool {
+	return strings.HasPrefix(t, "Qualified(") && strings.HasSuffix(t, ")")
+}
+
+func qualifiedTypeGoName(t string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(t, "Qualified("), ")")
+}
+
 // forIterableElemType is elementType (List/Array) plus Set (step 10) —
 // `for x in items { ... }`'s single-variable form accepts all three
 // (amifl-spec.md section 7 doesn't restrict `for` to List/Array once a

@@ -1915,3 +1915,97 @@ func TestParse_EnumVariantNamedArgsStillParseAfterUnification(t *testing.T) {
 		t.Fatalf("got Args %#v, want one named arg \"delay\"", fe.Args)
 	}
 }
+
+// ex5: cross-package struct/enum references (amifl-spec.md section 12.2).
+
+func TestParse_QualifiedStructLitParsesQualifierAndFields(t *testing.T) {
+	src := "fn main() -> Int {\n    let p = mathutil.Point{x: 1, y: 2}\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	let := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr)
+	sl, ok := let.Value.(*ast.StructLit)
+	if !ok || sl.Qualifier != "mathutil" || sl.TypeName != "Point" {
+		t.Fatalf("got %#v, want StructLit{Qualifier: \"mathutil\", TypeName: \"Point\"}", let.Value)
+	}
+	if len(sl.Fields) != 2 {
+		t.Fatalf("got %d fields, want 2", len(sl.Fields))
+	}
+}
+
+// TestParse_QualifiedStructLitAllowsFurtherPostfixChaining confirms the
+// qualified-literal branch inside parsePostfixExpr's dot-loop `continue`s
+// back into the same loop (rather than returning early) — a field access
+// right after the closing '}' must still parse.
+func TestParse_QualifiedStructLitAllowsFurtherPostfixChaining(t *testing.T) {
+	src := "fn main() -> Int {\n    mathutil.Point{x: 1, y: 2}.x\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	fe, ok := parseFuncMain(t, f).Body.Exprs[0].(*ast.FieldExpr)
+	if !ok || fe.Field != "x" {
+		t.Fatalf("got %#v, want FieldExpr{Field: \"x\"}", parseFuncMain(t, f).Body.Exprs[0])
+	}
+	if _, ok := fe.Target.(*ast.StructLit); !ok {
+		t.Fatalf("got Target %#v, want *ast.StructLit", fe.Target)
+	}
+}
+
+// TestParse_QualifiedStructLitSuppressedInHeaderPosition confirms
+// noCompositeLit still wins over the new qualified-literal check — an
+// if-header ending in `alias.field` must leave the following '{' for the
+// if-body, exactly like the pre-existing unqualified case does.
+func TestParse_QualifiedStructLitSuppressedInHeaderPosition(t *testing.T) {
+	src := "fn main() -> Int {\n    if mathutil.enabled {\n        1\n    } else {\n        0\n    }\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	ifExpr, ok := parseFuncMain(t, f).Body.Exprs[0].(*ast.IfExpr)
+	if !ok {
+		t.Fatalf("got %#v, want *ast.IfExpr", parseFuncMain(t, f).Body.Exprs[0])
+	}
+	if _, ok := ifExpr.Cond.(*ast.FieldExpr); !ok {
+		t.Fatalf("got Cond %#v, want a plain *ast.FieldExpr (not a qualified struct literal)", ifExpr.Cond)
+	}
+}
+
+// TestParse_QualifiedEnumVariantConstructionChainsThroughFieldExpr confirms
+// `alias.EnumType.Variant(...)` needs no dedicated grammar at all — the
+// existing dot-chaining loop in parsePostfixExpr already produces the
+// right nested FieldExpr shape (resolveFieldExpr, sema, is what interprets
+// it as ex5's cross-package enum construction).
+func TestParse_QualifiedEnumVariantConstructionChainsThroughFieldExpr(t *testing.T) {
+	src := "fn main() -> Int {\n    mathutil.Status.Retry(delay: 5)\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	outer, ok := parseFuncMain(t, f).Body.Exprs[0].(*ast.FieldExpr)
+	if !ok || outer.Field != "Retry" || len(outer.Args) != 1 {
+		t.Fatalf("got %#v, want FieldExpr{Field: \"Retry\", 1 arg}", parseFuncMain(t, f).Body.Exprs[0])
+	}
+	inner, ok := outer.Target.(*ast.FieldExpr)
+	if !ok || inner.Field != "Status" || inner.Args != nil {
+		t.Fatalf("got Target %#v, want FieldExpr{Field: \"Status\", Args: nil}", outer.Target)
+	}
+	alias, ok := inner.Target.(*ast.IdentExpr)
+	if !ok || alias.Name != "mathutil" {
+		t.Fatalf("got innermost Target %#v, want IdentExpr{Name: \"mathutil\"}", inner.Target)
+	}
+}
+
+func TestParse_QualifiedTypeAnnotation(t *testing.T) {
+	src := "fn f(p: mathutil.Point) -> Int {\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	fn := f.Decls[0].(*ast.FuncDecl)
+	qt, ok := fn.Params[0].Type.(*ast.QualifiedType)
+	if !ok || qt.Alias != "mathutil" || qt.Name != "Point" {
+		t.Fatalf("got %#v, want QualifiedType{Alias: \"mathutil\", Name: \"Point\"}", fn.Params[0].Type)
+	}
+}
