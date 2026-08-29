@@ -678,6 +678,61 @@ func TestGenerate_DiscardOfLiteralEmitsNothingExtra(t *testing.T) {
 	}
 }
 
+// TestGenerate_DiscardOfBinaryExprStillRunsSideEffectsInsideIt (ex9's
+// discard-path fix, found while implementing short-circuit &&/||): the old
+// genStmt treated every BinaryExpr as unconditionally pure and dropped it
+// entirely, silently skipping any call buried in an operand — e.g.
+// `_ = sideEffecting() + 1` never ran sideEffecting() at all.
+func TestGenerate_DiscardOfBinaryExprStillRunsSideEffectsInsideIt(t *testing.T) {
+	f := mainFile(
+		&ast.DiscardExpr{Value: &ast.BinaryExpr{Op: "+", ResolvedType: "Int64",
+			Left:  &ast.CallExpr{Callee: "sideEffecting", ResolvedType: "Int64"},
+			Right: &ast.IntLit{Value: 1},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "sideEffecting") {
+		t.Errorf("expected the discarded binary expression's call operand to still run; got:\n%s", ir)
+	}
+}
+
+// TestGenerate_ShortCircuitAndOrEmitsIfElseNotAndOrInstruction (ex9)
+// confirms `&&`/`||` lower to an IF/ELSE rather than AMIVM's eager AND/OR
+// instruction, so the right operand's own instructions land inside the
+// branch where short-circuiting doesn't skip them.
+func TestGenerate_ShortCircuitAndOrEmitsIfElseNotAndOrInstruction(t *testing.T) {
+	for _, op := range []string{"&&", "||"} {
+		f := mainFile(
+			&ast.LetExpr{Name: "x", ResolvedType: "Bool", Value: &ast.BinaryExpr{Op: op, ResolvedType: "Bool",
+				Left:  &ast.CallExpr{Callee: "left", ResolvedType: "Bool"},
+				Right: &ast.CallExpr{Callee: "right", ResolvedType: "Bool"},
+			}},
+			&ast.IntLit{Value: 0},
+		)
+		ir, err := Generate(f)
+		if err != nil {
+			t.Fatalf("Generate(%q) error: %v", op, err)
+		}
+		if !strings.Contains(ir, "\tIF\t") || !strings.Contains(ir, "\tELSE\n") || !strings.Contains(ir, "\tENDIF\n") {
+			t.Errorf("%q: expected an IF/ELSE/ENDIF short-circuit; got:\n%s", op, ir)
+		}
+		if strings.Contains(ir, "\tAND\t") || strings.Contains(ir, "\tOR\t") {
+			t.Errorf("%q: did not expect the eager AND/OR instruction; got:\n%s", op, ir)
+		}
+		// `right`'s CALL must be textually inside the branch, not before the
+		// IF — spot-checked by requiring it to appear strictly after IF.
+		ifIdx := strings.Index(ir, "\tIF\t")
+		rightIdx := strings.Index(ir, "!right")
+		if rightIdx < ifIdx {
+			t.Errorf("%q: expected right's call to be emitted after IF (inside a branch), got right at %d, IF at %d; ir:\n%s", op, rightIdx, ifIdx, ir)
+		}
+	}
+}
+
 func TestGenerate_TopLevelFuncWithParamsUsesDollarTokens(t *testing.T) {
 	f := &ast.File{Decls: []ast.TopLevelDecl{
 		&ast.FuncDecl{

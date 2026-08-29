@@ -2,6 +2,18 @@ const Base: Int = 40
 const Bonus: Int = 2
 const Combined: Int = Base + Bonus
 
+// ex9: `&&`/`||` short-circuit — these print as a side effect purely so
+// main can prove (via the print order) whether they actually ran.
+fn loudTrue(tag: String) -> Bool {
+    print(tag)
+    true
+}
+
+fn loudFalse(tag: String) -> Bool {
+    print(tag)
+    false
+}
+
 fn main() -> Int {
     let greeting: String = "Hello" + ", " + "AmiFL!"
     print(greeting)
@@ -34,8 +46,18 @@ fn main() -> Int {
     let precedenceCheck: Int = 2 + 3 * 4
     let grouped: Int = (2 + 3) * 4
 
+    // ex9: short-circuit — loudFalse("skipped &&") never runs (its print
+    // never happens) because the left side of && already makes the whole
+    // expression false; loudTrue("skipped ||") never runs for the same
+    // reason on the || side.
+    let shortAnd: Bool = false && loudFalse("skipped &&")
+    let shortOr: Bool = true || loudTrue("skipped ||")
+    let ranAnd: Bool = true && loudTrue("&& evaluated its right side")
+    let ranOr: Bool = false || loudFalse("|| evaluated its right side")
+    let shortCircuitCheck: Int = (if shortAnd { 0 } else { 1 }) + (if shortOr { 1 } else { 0 }) + (if ranAnd { 1 } else { 0 }) + (if ranOr { 0 } else { 1 })
+
     let total: Int = sum + diff + bits + orBits + xorBits + clearBits + shiftedLeft + shiftedRight + doubleNeg
-    let verified: Int = total + (Combined - 42) + (precedenceCheck - 14) + (grouped - 20)
+    let verified: Int = total + (Combined - 42) + (precedenceCheck - 14) + (grouped - 20) + shortCircuitCheck
 
     verified
 }

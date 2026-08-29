@@ -424,13 +424,26 @@ func (g *gen) genStmt(e ast.Expr) error {
 		g.b.WriteString("\tCONTINUE\n")
 		return nil
 	case *ast.IntLit, *ast.FloatLit, *ast.BoolLit, *ast.StringLit,
-		*ast.IdentExpr, *ast.BinaryExpr, *ast.UnaryExpr:
-		// Pure value expressions have no side effect to run at all. A
+		*ast.IdentExpr:
+		// Unconditionally pure — a literal or a bare variable read never has
+		// a side effect to run, whatever position they're discarded from. A
 		// block's own forced-Unit non-final position never produces one of
 		// these directly (none of these kinds ever resolves to Unit in
 		// sema), but a discarded non-Unit expression's tail can — e.g. the
 		// `2` ending the else-branch in the doc comment's example above.
 		return nil
+	case *ast.BinaryExpr, *ast.UnaryExpr:
+		// Not necessarily pure — either operand can itself be an effectful
+		// call (`_ = sideEffect(1) + sideEffect(2)` must still run both
+		// calls even though the sum is discarded), so — unlike the
+		// unconditionally-pure kinds right above — these have to go through
+		// the normal genValue path and discard the token it hands back, the
+		// same as TupleLit/StructLit/etc. below. (`&&`/`||` specifically
+		// route through genShortCircuitValue, ex9, which already only
+		// evaluates the right operand when short-circuiting doesn't skip
+		// it — discarding the result changes nothing about that.)
+		_, err := g.genValue(v)
+		return err
 	case *ast.FieldExpr:
 		// Step 14's qualified function call (`alias.Name(...)`) needs its
 		// own statement-form path, exactly like genCallStmt/genCallValue's
@@ -835,22 +848,26 @@ func (g *gen) genValue(e ast.Expr) (string, error) {
 
 // binaryInstr maps a BinaryExpr's Op to its AMIVM instruction. "+" is
 // special-cased in genBinaryValue: it's ADD for Numeric operands but
-// CONCAT for String's Concatenable "+" (amifl-spec.md section 6).
+// CONCAT for String's Concatenable "+" (amifl-spec.md section 6). `&&`/`||`
+// are deliberately absent — genBinaryValue special-cases them into
+// genShortCircuitValue before this map is ever consulted (ex9's AND/OR
+// instructions have no short-circuit behavior of their own, so lowering
+// through them directly would evaluate both operands unconditionally).
 var binaryInstr = map[string]string{
 	"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "MOD",
 	"&": "BAND", "|": "BOR", "^": "BXOR", "&^": "BCLEAR",
 	"<<": "SHL", ">>": "SHR",
 	"==": "EQ", "!=": "NEQ", "<": "LT", "<=": "LTE", ">": "GT", ">=": "GTE",
-	"&&": "AND", "||": "OR",
 }
 
 // binaryResultIsBool is the set of operators whose AMIVM instruction
 // always produces a bool, regardless of their operands' (equal) type —
-// comparisons and logical operators. Every other operator's result has
-// the same type as its operands (BinaryExpr.ResolvedType).
+// comparisons. `&&`/`||` also always produce Bool, but never reach this map
+// (genShortCircuitValue hard-codes ^bool for its own result temp instead).
+// Every other operator's result has the same type as its operands
+// (BinaryExpr.ResolvedType).
 var binaryResultIsBool = map[string]bool{
 	"==": true, "!=": true, "<": true, "<=": true, ">": true, ">=": true,
-	"&&": true, "||": true,
 }
 
 // genBinaryValue lowers a BinaryExpr to a sequence of instructions
@@ -860,6 +877,16 @@ var binaryResultIsBool = map[string]bool{
 // so a nested expression like `a + b * c` has to be flattened into one
 // instruction per operator, each writing to its own temp.
 func (g *gen) genBinaryValue(v *ast.BinaryExpr) (string, error) {
+	// ex9: `&&`/`||` short-circuit (amifl-spec.md section 6) — the right
+	// operand must not even be evaluated when the left already decides the
+	// result, so these two can't go through the eager "evaluate both sides,
+	// then apply one instruction" shape below (AND/OR's own AMIVM
+	// instructions have no short-circuit behavior of their own — they're
+	// ordinary two-operand boolean ops).
+	if v.Op == "&&" || v.Op == "||" {
+		return g.genShortCircuitValue(v)
+	}
+
 	leftVal, err := g.genValue(v.Left)
 	if err != nil {
 		return "", err
@@ -889,6 +916,50 @@ func (g *gen) genBinaryValue(v *ast.BinaryExpr) (string, error) {
 	tmp := g.newTemp()
 	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, goType)
 	fmt.Fprintf(g.b, "\t%s\t%%%s\t%s\t%s\n", instr, tmp, leftVal, rightVal)
+	return "%" + tmp, nil
+}
+
+// genShortCircuitValue lowers `&&`/`||` (amifl-spec.md section 6, ex9) via
+// an IF/ELSE on the left operand alone, so the right operand's own
+// instructions are only ever emitted into the one branch where evaluating
+// it is actually necessary — the same "amivm's IF/LOOP generate real nested
+// Go blocks, so no hoisting is needed" property genMinMaxValue and friends
+// already lean on (builtins_numeric.go), applied here to give `&&`/`||`
+// real short-circuit semantics instead of AND/OR's eager two-operand shape:
+//
+//	a && b  ≡  IF a { tmp = b } ELSE { tmp = false }
+//	a || b  ≡  IF a { tmp = true } ELSE { tmp = b }
+//
+// This matters whenever the right operand has a side effect (a function
+// call, a `?`, ...) that must not run once the left side has already
+// decided the result.
+func (g *gen) genShortCircuitValue(v *ast.BinaryExpr) (string, error) {
+	leftVal, err := g.genValue(v.Left)
+	if err != nil {
+		return "", err
+	}
+
+	tmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^bool\n", tmp)
+	fmt.Fprintf(g.b, "\tIF\t%s\n", leftVal)
+	if v.Op == "&&" {
+		rightVal, err := g.genValue(v.Right)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(g.b, "\tSET\t%%%s\t%s\n", tmp, rightVal)
+		g.b.WriteString("\tELSE\n")
+		fmt.Fprintf(g.b, "\tSET\t%%%s\tfalse\n", tmp)
+	} else { // "||"
+		fmt.Fprintf(g.b, "\tSET\t%%%s\ttrue\n", tmp)
+		g.b.WriteString("\tELSE\n")
+		rightVal, err := g.genValue(v.Right)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(g.b, "\tSET\t%%%s\t%s\n", tmp, rightVal)
+	}
+	g.b.WriteString("\tENDIF\n")
 	return "%" + tmp, nil
 }
 
