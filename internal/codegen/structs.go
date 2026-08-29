@@ -91,6 +91,9 @@ func (p *program) resolveGoType(t string) string {
 	if isStreamType(t) {
 		return p.streamGoTypeName(t)
 	}
+	if t == "Range" {
+		return p.rangeGoTypeName()
+	}
 	if goName, ok := p.externTypes[t]; ok {
 		return goName
 	}
@@ -151,6 +154,57 @@ func (p *program) tupleGoTypeName(canonical string) string {
 // level type declarations don't actually require this, but nothing
 // guarantees amivm's own IR parsing doesn't — see Generate's existing
 // comment on the identical concern for FNTYPE).
+// rangeGoTypeName mints (once) the single compiler-synthesized STTYPE
+// behind every Range value (amifl-spec.md section 3.1/7.3, ex2) —
+// `{From, To int64}`, always exactly this one shape (program.rangeGoType's
+// doc comment explains why no canonical-string-keyed map is needed the
+// way tuple/list/etc need). Field names are `From`/`To`, not `F0`/`F1` —
+// unlike Tuple's positional fields (Step 6's ".0"/".1" sugar demands
+// Go-identifier-safe names), Range has no AmiFL-visible field-access
+// syntax at all (ex2's scope cut: not even `.From`/`.To`), so the names
+// exist purely for codegen's own genRangeValue/genForRangeStmt to read
+// and write by.
+func (p *program) rangeGoTypeName() string {
+	if p.rangeGoType != "" {
+		return p.rangeGoType
+	}
+	p.rangeGoType = "AmiflRange"
+	p.typeHeader.WriteString("STTYPE\t^AmiflRange\n")
+	p.typeHeader.WriteString("\tFIELD\t>From\t^int64\n")
+	p.typeHeader.WriteString("\tFIELD\t>To\t^int64\n")
+	p.typeHeader.WriteString("ENDSTTYPE\n")
+	return p.rangeGoType
+}
+
+// genRangeValue emits `a..b` / `a..=b` (ex2, ast.RangeExpr): a fresh
+// AmiflRange temp, FSET field by field — To is bumped by one first when
+// Inclusive is set, so the runtime representation is always a half-open
+// [From,To) pair (ast.RangeExpr's doc comment: Inclusive never survives
+// past this one call, every consumer downstream — genForRangeStmt,
+// genForRangeYieldValue — only ever sees the normalized form).
+func (g *gen) genRangeValue(v *ast.RangeExpr) (string, error) {
+	fromVal, err := g.genValue(v.From)
+	if err != nil {
+		return "", err
+	}
+	toVal, err := g.genValue(v.To)
+	if err != nil {
+		return "", err
+	}
+	if v.Inclusive {
+		bumpedTmp := g.newTemp()
+		fmt.Fprintf(g.b, "\tVAR\t%%%s\t^int64\n", bumpedTmp)
+		fmt.Fprintf(g.b, "\tADD\t%%%s\t%s\t1\n", bumpedTmp, toVal)
+		toVal = "%" + bumpedTmp
+	}
+	goType := g.prog.resolveGoType("Range")
+	tmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", tmp, goType)
+	fmt.Fprintf(g.b, "\tFSET\t%%%s\t>From\t%s\n", tmp, fromVal)
+	fmt.Fprintf(g.b, "\tFSET\t%%%s\t>To\t%s\n", tmp, toVal)
+	return "%" + tmp, nil
+}
+
 func genStructDecl(prog *program, d *ast.StructDecl) {
 	// Every field's Go type is resolved *before* this STTYPE's own header
 	// line is written, not interleaved field-by-field — resolveGoType can

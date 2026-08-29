@@ -809,19 +809,58 @@ func (p *parser) binaryLevel(next func() (ast.Expr, error), ops map[lexer.Kind]s
 	}
 }
 
+// parseRangeExpr parses an optional `a..b` / `a..=b` numeric range
+// (amifl-spec.md section 3.1/7.3, ex2) — sits directly below parsePipeExpr
+// (so `0..10 |> f` parses as `(0..10) |> f`, never `0..(10 |> f)`: see
+// parsePipeExpr's own call site below) and directly above the full
+// binary-operator chain (so `for i in 0..n-1` fully parses the bound
+// `n-1` via parseOrExpr before `..` ever sees it — the same "parse the
+// widest expression first, then look at what's left over" shape
+// parseExpr's assignment detection and step-14's parseFieldCallArgs both
+// already use). Non-chaining by construction: parseOrExpr's own result
+// is used directly as each bound, so `a..b..c` simply leaves a second
+// `..`/`..=` sitting unconsumed for whatever parses next to reject, the
+// same way any other unexpected token would.
+func (p *parser) parseRangeExpr() (ast.Expr, error) {
+	left, err := p.parseOrExpr()
+	if err != nil {
+		return nil, err
+	}
+	inclusive := false
+	switch p.cur.Kind {
+	case lexer.DotDotEq:
+		inclusive = true
+	case lexer.DotDot:
+		// inclusive stays false
+	default:
+		return left, nil
+	}
+	line := p.cur.Line
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+	right, err := p.parseOrExpr()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.RangeExpr{From: left, To: right, Inclusive: inclusive, Line: line}, nil
+}
+
 // parsePipeExpr is the top of the value-expression grammar — every
 // "start of an expression" entry point outside the operator-precedence
 // chain itself (list/tuple/struct/enum literal elements, call args via
 // parseExpr, index/slice bounds, array-size expressions, if/while/for
 // headers, switch case conditions/bodies, for-yield's own expression, ...)
-// parses through here rather than calling parseOrExpr directly, so that
-// `|>` (amifl-spec.md section 9, lower precedence than even `||` — see
-// parseOrExpr's doc comment) is reachable everywhere a value expression
-// already was, the same way the whole operator chain below it already is.
-// Left-associative: `a |> f |> g` parses as `(a |> f) |> g`, matching
-// every other binary-shaped operator here.
+// parses through here rather than calling parseOrExpr/parseRangeExpr
+// directly, so that `|>` (amifl-spec.md section 9, lower precedence than
+// even `||` — see parseOrExpr's doc comment) and `..`/`..=` (ex2's Range,
+// one level tighter than `|>` — parseRangeExpr's own doc comment) are
+// both reachable everywhere a value expression already was, the same way
+// the whole operator chain below them already is. Left-associative: `a |>
+// f |> g` parses as `(a |> f) |> g`, matching every other binary-shaped
+// operator here.
 func (p *parser) parsePipeExpr() (ast.Expr, error) {
-	left, err := p.parseOrExpr()
+	left, err := p.parseRangeExpr()
 	if err != nil {
 		return nil, err
 	}

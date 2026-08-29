@@ -95,6 +95,22 @@ func (l *Lexer) Next() (Token, error) {
 	case c == ':':
 		l.pos++
 		return Token{Kind: Colon, Line: line}, nil
+	case c == '.' && l.byteAt(1) == '.' && l.byteAt(2) == '=':
+		// `a..=b`, ex2's inclusive Range bound (amifl-spec.md section 3.1/
+		// 7.3) — checked before the plain ".." case below since both share
+		// their first two bytes.
+		l.pos += 3
+		return Token{Kind: DotDotEq, Line: line}, nil
+	case c == '.' && l.byteAt(1) == '.':
+		// `a..b`, ex2's half-open Range (amifl-spec.md section 3.1/7.3).
+		// Never mistaken for two adjacent float literals' fractional dots
+		// (lexNumber only ever consumes a single '.' immediately following
+		// a digit run) or for a trailing '.' after an integer (lexNumber's
+		// own isDigit(byteAt(1)) guard leaves a bare "0.." with its second
+		// '.' unconsumed, landing here rather than misparsing as "0." plus
+		// a stray '.').
+		l.pos += 2
+		return Token{Kind: DotDot, Line: line}, nil
 	case c == '.':
 		// A leading '.' never reaches here for a float literal (lexNumber,
 		// entered only when the *first* byte is a digit, consumes a '.'

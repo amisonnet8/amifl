@@ -45,6 +45,8 @@ const (
 	Colon
 	Semicolon
 	Dot
+	DotDot
+	DotDotEq
 	Assign
 
 	// Operators (amifl-spec.md section 6).
@@ -157,6 +159,10 @@ func (k Kind) String() string {
 		return "';'"
 	case Dot:
 		return "'.'"
+	case DotDot:
+		return "'..'"
+	case DotDotEq:
+		return "'..='"
 	case Assign:
 		return "'='"
 	case Plus:

@@ -1,0 +1,28 @@
+fn main() -> Int {
+    let total = 0
+    for i in 0..5 {
+        total = total + i
+    }
+
+    let squares = for i in 0..=5 yield i * i
+
+    let sumSquares = 0
+    for s in squares {
+        sumSquares = sumSquares + s
+    }
+
+    let emptyCount = 0
+    for i in 5..0 {
+        emptyCount = emptyCount + 1
+    }
+
+    let r = 2..8
+    let rSum = 0
+    for i in r {
+        rSum = rSum + i
+    }
+
+    print("range checks done")
+
+    total + sumSquares + emptyCount + rSum + len(squares)
+}

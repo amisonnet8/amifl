@@ -225,6 +225,31 @@ func TestNext_AmpCaretIsNotAmpThenCaret(t *testing.T) {
 	}
 }
 
+func TestNext_DotDotAndDotDotEq(t *testing.T) {
+	// ex2's Range tokens (amifl-spec.md section 3.1/7.3). "0..10" must not
+	// be mistaken for "0." (a malformed float, since lexNumber only
+	// consumes '.' when the *next* byte is a digit — here it's another
+	// '.') plus a stray '.', nor must "0..=10" swallow the '=' into
+	// anything but its own dedicated DotDotEq token.
+	toks := tokenize(t, "0..10 0..=10")
+	want := []Kind{Int, DotDot, Int, Int, DotDotEq, Int, EOF}
+	if len(toks) != len(want) {
+		t.Fatalf("got %d tokens, want %d: %+v", len(toks), len(want), toks)
+	}
+	for i, k := range want {
+		if toks[i].Kind != k {
+			t.Errorf("token %d: got Kind %v, want %v; all: %+v", i, toks[i].Kind, k, toks)
+		}
+	}
+}
+
+func TestNext_DotDotEqIsNotDotDotThenAssign(t *testing.T) {
+	toks := tokenize(t, "..=")
+	if len(toks) != 2 || toks[0].Kind != DotDotEq {
+		t.Fatalf("unexpected tokens: %+v", toks)
+	}
+}
+
 func TestNext_Underscore(t *testing.T) {
 	toks := tokenize(t, "_")
 	if len(toks) != 2 || toks[0].Kind != Ident || toks[0].Value != "_" {

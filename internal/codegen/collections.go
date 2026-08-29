@@ -321,6 +321,9 @@ func (g *gen) genForStmt(v *ast.ForExpr) error {
 	if isStreamType(v.ItemsType) {
 		return g.genForStreamStmt(v, itemsVal)
 	}
+	if v.ItemsType == "Range" {
+		return g.genForRangeStmt(v, itemsVal)
+	}
 
 	iterVal, lenTmp := g.prepareForIteration(v, itemsVal)
 	idxTmp := g.emitIndexLoopHeader(lenTmp)
@@ -351,6 +354,47 @@ func (g *gen) genForStreamStmt(v *ast.ForExpr, itemsVal string) error {
 	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^bool\n", okTmp)
 	fmt.Fprintf(g.b, "\tCHRECV\t%s\t%%%s\t%s\n", v.VarToken, okTmp, itemsVal)
 	g.emitBreakUnlessOk("%" + okTmp)
+
+	if err := g.genStmtBlock(v.Body.Exprs); err != nil {
+		return err
+	}
+	g.b.WriteString("\tENDLOOP\n")
+	return nil
+}
+
+// genForRangeStmt lowers `for i in a..b { ... }` (ex2, ast.ForExpr over a
+// Range) into a dedicated int64 counting loop — unlike every other `for`
+// shape (List/Array/Set/Map: prepareForIteration/emitIndexLoopHeader,
+// both `^int`-typed since they mirror Go's own `len`/index conventions),
+// a Range's counter *is* the user-visible loop variable itself (no
+// separate index needed to AGET/MGET an element with — the value at each
+// step is simply the counter), and its bounds are always `^int64`
+// (ast.RangeExpr's own Int64-only scope), not Go's native `int` — so this
+// reuses emitIndexLoopHeader's increment-first shape (CLAUDE.md's "過去に
+// 踏まれた地雷" #3: the increment must come before the body, not after,
+// or `continue` would skip it) by hand rather than calling it, entirely
+// in int64 throughout, with v.VarToken doing double duty as both the
+// mutated counter (declared once, before LOOP, exactly like
+// emitIndexLoopHeader's own idxTmp) and the value the body reads.
+func (g *gen) genForRangeStmt(v *ast.ForExpr, rangeVal string) error {
+	fromTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^int64\n", fromTmp)
+	fmt.Fprintf(g.b, "\tFGET\t%%%s\t%s\t>From\n", fromTmp, rangeVal)
+	toTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^int64\n", toTmp)
+	fmt.Fprintf(g.b, "\tFGET\t%%%s\t%s\t>To\n", toTmp, rangeVal)
+
+	fmt.Fprintf(g.b, "\tVAR\t%s\t^int64\n", v.VarToken)
+	fmt.Fprintf(g.b, "\tSUB\t%s\t%%%s\t1\n", v.VarToken, fromTmp)
+
+	g.b.WriteString("\tLOOP\n")
+	fmt.Fprintf(g.b, "\tADD\t%s\t%s\t1\n", v.VarToken, v.VarToken)
+	doneTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^bool\n", doneTmp)
+	fmt.Fprintf(g.b, "\tGTE\t%%%s\t%s\t%%%s\n", doneTmp, v.VarToken, toTmp)
+	fmt.Fprintf(g.b, "\tIF\t%%%s\n", doneTmp)
+	g.b.WriteString("\tBREAK\n")
+	g.b.WriteString("\tENDIF\n")
 
 	if err := g.genStmtBlock(v.Body.Exprs); err != nil {
 		return err
@@ -422,6 +466,10 @@ func (g *gen) genForYieldValue(v *ast.ForExpr) (string, error) {
 		return "", err
 	}
 
+	if v.ItemsType == "Range" {
+		return g.genForRangeYieldValue(v, itemsVal)
+	}
+
 	iterVal, lenTmp := g.prepareForIteration(v, itemsVal)
 
 	resultGoType := g.prog.resolveGoType(v.ResolvedType)
@@ -434,6 +482,69 @@ func (g *gen) genForYieldValue(v *ast.ForExpr) (string, error) {
 	elemGoType := g.prog.resolveGoType(v.ElemType)
 	fmt.Fprintf(g.b, "\tVAR\t%s\t^%s\n", v.VarToken, elemGoType)
 	fmt.Fprintf(g.b, "\tAGET\t%s\t%s\t%%%s\n", v.VarToken, iterVal, idxTmp)
+
+	yieldVal, err := g.genValue(v.Yield)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(g.b, "\tASET\t%%%s\t%%%s\t%s\n", resultTmp, idxTmp, yieldVal)
+
+	g.b.WriteString("\tENDLOOP\n")
+	return "%" + resultTmp, nil
+}
+
+// genForRangeYieldValue lowers `for i in a..b yield expr` (ex2) — needs
+// *two* counters running in lockstep, unlike every other piece of Range
+// codegen here: ASET's own index operand must be Go's native `int`
+// (matching every other Yield lowering's emitIndexLoopHeader-shaped
+// counter), while v.VarToken (what Yield itself reads) must stay `int64`
+// (ast.RangeExpr's Int64-only bounds) — mixing the two in one ADD/GTE
+// would be an int64+int Go type error, so this hand-rolls
+// emitIndexLoopHeader's increment-first shape twice over rather than
+// casting one counter from the other every single iteration.
+// SLMAKE's own length must never go negative (Go's `make([]T, n)` panics
+// on n < 0, unlike an ordinary empty range simply running zero
+// iterations) — selectValue clamps To-From to >= 0 before the cast down
+// to `^int`, covering the same "From >= To is a valid empty range, never
+// an error" contract genForRangeStmt gets for free (its loop simply never
+// executes) but SLMAKE's own precondition doesn't share.
+func (g *gen) genForRangeYieldValue(v *ast.ForExpr, rangeVal string) (string, error) {
+	fromTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^int64\n", fromTmp)
+	fmt.Fprintf(g.b, "\tFGET\t%%%s\t%s\t>From\n", fromTmp, rangeVal)
+	toTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^int64\n", toTmp)
+	fmt.Fprintf(g.b, "\tFGET\t%%%s\t%s\t>To\n", toTmp, rangeVal)
+
+	rawCountTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^int64\n", rawCountTmp)
+	fmt.Fprintf(g.b, "\tSUB\t%%%s\t%%%s\t%%%s\n", rawCountTmp, toTmp, fromTmp)
+	clampedTmp := g.selectValue("int64", "GT", "%"+rawCountTmp, "0", "%"+rawCountTmp, "0")
+
+	lenTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^int\n", lenTmp)
+	g.writeCall("%"+lenTmp, "?int", []string{"%" + clampedTmp})
+
+	resultGoType := g.prog.resolveGoType(v.ResolvedType)
+	resultTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^%s\n", resultTmp, resultGoType)
+	fmt.Fprintf(g.b, "\tSLMAKE\t%%%s\t^%s\t%%%s\n", resultTmp, resultGoType, lenTmp)
+
+	idxTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^int\n", idxTmp)
+	fmt.Fprintf(g.b, "\tSET\t%%%s\t-1\n", idxTmp)
+	fmt.Fprintf(g.b, "\tVAR\t%s\t^int64\n", v.VarToken)
+	fmt.Fprintf(g.b, "\tSUB\t%s\t%%%s\t1\n", v.VarToken, fromTmp)
+
+	g.b.WriteString("\tLOOP\n")
+	fmt.Fprintf(g.b, "\tADD\t%%%s\t%%%s\t1\n", idxTmp, idxTmp)
+	fmt.Fprintf(g.b, "\tADD\t%s\t%s\t1\n", v.VarToken, v.VarToken)
+	doneTmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^bool\n", doneTmp)
+	fmt.Fprintf(g.b, "\tGTE\t%%%s\t%%%s\t%%%s\n", doneTmp, idxTmp, lenTmp)
+	fmt.Fprintf(g.b, "\tIF\t%%%s\n", doneTmp)
+	g.b.WriteString("\tBREAK\n")
+	g.b.WriteString("\tENDIF\n")
 
 	yieldVal, err := g.genValue(v.Yield)
 	if err != nil {

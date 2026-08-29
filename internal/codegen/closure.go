@@ -70,6 +70,17 @@ type program struct {
 	streamTypes map[string]string
 	streamSeq   int
 
+	// rangeGoType backs structs.go's rangeGoTypeName — amifl-spec.md
+	// section 3.1/7.3's `a..b`/`a..=b` Range value. Unlike every shape-
+	// keyed map above (Tuple/List/Array/Set/Map/Chan/Stream, one Go type
+	// per distinct element-type shape), Range has exactly one possible
+	// shape at all — its two bounds are always Int64, with no type
+	// parameter of its own (ex2's deliberate scope cut, mirroring how
+	// Error/Unit/File are also fixed, unparameterized types) — so a
+	// single cached string, minted at most once, is enough; "" means not
+	// yet minted.
+	rangeGoType string
+
 	// externTypes backs resolveGoType's own step-13 case: every extern
 	// `type Name` declaration maps its AmiFL name straight to "alias.Name"
 	// (Generate populates this once, up front, from every ast.ExternDecl in

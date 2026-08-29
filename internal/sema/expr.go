@@ -158,6 +158,8 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 		return fc.resolveSliceExpr(v)
 	case *ast.ForExpr:
 		return fc.resolveForExpr(v, expected)
+	case *ast.RangeExpr:
+		return fc.resolveRangeExpr(v)
 	case *ast.SwitchExpr:
 		return fc.resolveSwitchExpr(v, expected)
 	case *ast.TryExpr:
@@ -1525,6 +1527,26 @@ func (fc *funcChecker) resolveSliceExpr(v *ast.SliceExpr) (string, error) {
 // Yield expression to List[String]'s own element type (List[T]'s already-
 // established `expected`-threading precedent, resolveListLit) — the Body
 // form ignores it entirely (always Unit, exactly like WhileExpr).
+
+// resolveRangeExpr type-checks `a..b` / `a..=b` (amifl-spec.md section
+// 3.1/7.3, ex2) — both bounds must be exactly Int64 (principle 2's "暗黙変
+// 換の排除": a non-literal Int8/UInt64/etc bound is rejected outright, same
+// as any other mismatched-width arithmetic operand; an unannotated
+// integer-literal bound resolves to Int64 via checkExpr's ordinary "no
+// context" default, so `0..10`'s bare literals need no special handling
+// here at all). From > To (or From >= To for the half-open default) is
+// never a type error — see ast.RangeExpr's doc comment, it's a valid
+// empty range at runtime.
+func (fc *funcChecker) resolveRangeExpr(v *ast.RangeExpr) (string, error) {
+	if _, err := fc.checkExpr(v.From, "Int64"); err != nil {
+		return "", err
+	}
+	if _, err := fc.checkExpr(v.To, "Int64"); err != nil {
+		return "", err
+	}
+	return "Range", nil
+}
+
 func (fc *funcChecker) resolveForExpr(v *ast.ForExpr, expected string) (string, error) {
 	itemsTyp, err := fc.checkExpr(v.Items, "")
 	if err != nil {
@@ -1564,12 +1586,19 @@ func (fc *funcChecker) resolveForExpr(v *ast.ForExpr, expected string) (string, 
 			// equivalent to even compute one at runtime — CLAUDE.md's
 			// step-12 "確定した設計判断").
 			elemTyp = e
+		} else if itemsTyp == "Range" {
+			// ex2's `for i in a..b` — unlike Stream, a Range's element
+			// count (codegen.go's collections.go genForRangeYieldValue: To -
+			// From) *is* known at runtime without any `?len`-equivalent
+			// call, so (unlike Stream) the Yield form below is fully
+			// supported, not just Body.
+			elemTyp = "Int64"
 		} else {
 			var ok bool
 			elemTyp, ok = forIterableElemType(itemsTyp)
 			if !ok {
 				fc.popScope()
-				return "", fmt.Errorf("line %d: `for` requires a List, Array, Set, or Stream, got %s", v.Line, itemsTyp)
+				return "", fmt.Errorf("line %d: `for` requires a List, Array, Set, Range, or Stream, got %s", v.Line, itemsTyp)
 			}
 		}
 		token := "%" + fc.freshInternalName(v.Var)

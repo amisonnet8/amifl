@@ -1157,6 +1157,54 @@ func TestParse_PipeChainIsLeftAssociative(t *testing.T) {
 	}
 }
 
+func TestParse_RangeExprHalfOpenAndInclusive(t *testing.T) {
+	src := "fn main() -> Int {\n    let a = 0..10\n    let b = 0..=10\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	body := parseFuncMain(t, f).Body.Exprs
+	a := body[0].(*ast.LetExpr).Value.(*ast.RangeExpr)
+	if a.Inclusive {
+		t.Errorf("got Inclusive=true for `0..10`, want false")
+	}
+	b := body[1].(*ast.LetExpr).Value.(*ast.RangeExpr)
+	if !b.Inclusive {
+		t.Errorf("got Inclusive=false for `0..=10`, want true")
+	}
+}
+
+func TestParse_RangeExprBoundsParseFullBinaryExpr(t *testing.T) {
+	// `..` sits below the full operator chain — `n - 1` must fully parse
+	// as one bound, not leave `..` grabbing just `1`.
+	src := "fn main() -> Int {\n    let a = 0..n-1\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	r := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr).Value.(*ast.RangeExpr)
+	to, ok := r.To.(*ast.BinaryExpr)
+	if !ok || to.Op != "-" {
+		t.Fatalf("got To %#v, want BinaryExpr{Op: \"-\"}", r.To)
+	}
+}
+
+func TestParse_RangeExprBindsTighterThanPipe(t *testing.T) {
+	// `0..10 |> f` must parse as `(0..10) |> f`, never `0..(10 |> f)`.
+	src := "fn main() -> Int {\n    let a = 0..10 |> f\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	call := parseFuncMain(t, f).Body.Exprs[0].(*ast.LetExpr).Value.(*ast.CallExpr)
+	if call.Callee != "f" || len(call.Args) != 1 {
+		t.Fatalf("got %#v, want CallExpr{Callee: \"f\", 1 arg}", call)
+	}
+	if _, ok := call.Args[0].(*ast.RangeExpr); !ok {
+		t.Fatalf("got Args[0] %#v, want *ast.RangeExpr", call.Args[0])
+	}
+}
+
 func TestParse_PipeDuplicateUnderscoreIsAnError(t *testing.T) {
 	src := "fn main() -> Int {\n    let a = x |> f(_, _)\n    0\n}\n"
 	if _, err := Parse(src); err == nil {

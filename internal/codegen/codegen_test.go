@@ -59,6 +59,122 @@ func TestGenerate_HelloWorld(t *testing.T) {
 	}
 }
 
+// TestGenerate_RangeExprConstructsNormalizedStruct covers ex2's `a..b` /
+// `a..=b` (ast.RangeExpr) — the runtime representation is always a
+// half-open [From,To) AmiflRange struct, so the inclusive form's own To
+// bound is bumped by one at construction time (structs.go's
+// genRangeValue) rather than carrying an "inclusive" flag any further.
+func TestGenerate_RangeExprConstructsNormalizedStruct(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "r", Token: "%r_1", ResolvedType: "Range", Value: &ast.RangeExpr{From: &ast.IntLit{Value: 0}, To: &ast.IntLit{Value: 10}, Inclusive: true}},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"STTYPE\t^AmiflRange",
+		"FIELD\t>From\t^int64",
+		"FIELD\t>To\t^int64",
+		"ENDSTTYPE",
+		"ADD\t%amifl_tmp1\t10\t1", // Inclusive: To bumped by one
+		"FSET\t%amifl_tmp2\t>From\t0",
+		"FSET\t%amifl_tmp2\t>To\t%amifl_tmp1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+// TestGenerate_ForOverRangeCountsInInt64 covers ex2's `for i in a..b { ...
+// }` — unlike List/Array/Set/Map (prepareForIteration/
+// emitIndexLoopHeader, `^int`-typed throughout), the loop counter here is
+// `^int64` (ast.RangeExpr's Int64-only bounds) and *is* the user-visible
+// loop variable itself, with no separate AGET/index needed at all.
+func TestGenerate_ForOverRangeCountsInInt64(t *testing.T) {
+	f := mainFile(
+		&ast.ForExpr{
+			Items:     &ast.RangeExpr{From: &ast.IntLit{Value: 0}, To: &ast.IntLit{Value: 5}},
+			ItemsType: "Range",
+			Body:      &ast.Block{Exprs: []ast.Expr{&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "hi"}}}}},
+			ElemType:  "Int64",
+			VarToken:  "%i_2",
+		},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"FGET\t%amifl_tmp2\t%amifl_tmp1\t>From",
+		"FGET\t%amifl_tmp3\t%amifl_tmp1\t>To",
+		"VAR\t%i_2\t^int64",
+		"SUB\t%i_2\t%amifl_tmp2\t1",
+		"LOOP",
+		"ADD\t%i_2\t%i_2\t1",
+		"GTE\t%amifl_tmp4\t%i_2\t%amifl_tmp3",
+		"ENDLOOP",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+	// The increment must come before the bounds check, not after the body
+	// (CLAUDE.md's "過去に踏まれた地雷" #3), exactly like every other
+	// `for` shape's loop header.
+	loopIdx := strings.Index(ir, "LOOP\n")
+	incIdx := strings.Index(ir, "ADD\t%i_2\t%i_2\t1")
+	gteIdx := strings.Index(ir, "GTE\t%amifl_tmp4")
+	if !(loopIdx < incIdx && incIdx < gteIdx) {
+		t.Errorf("expected LOOP, then increment, then bounds check, in that order; got:\n%s", ir)
+	}
+}
+
+// TestGenerate_ForYieldOverRangeClampsNegativeLength covers ex2's `for i
+// in a..b yield expr` — SLMAKE's length must never go negative (Go's
+// `make([]T, n)` panics on n < 0), so To-From is clamped to >= 0 via
+// selectValue before the cast down to `^int`, even though From > To
+// itself is a perfectly valid (empty) range, never a type/runtime error.
+func TestGenerate_ForYieldOverRangeClampsNegativeLength(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{
+			Name: "xs", Token: "%xs_1", ResolvedType: "List(Int64)",
+			Value: &ast.ForExpr{
+				Items:        &ast.RangeExpr{From: &ast.IntLit{Value: 0}, To: &ast.IntLit{Value: 5}},
+				ItemsType:    "Range",
+				Yield:        &ast.IdentExpr{Name: "i", ResolvedType: "Int64", Token: "%i_2"},
+				ElemType:     "Int64",
+				VarToken:     "%i_2",
+				ResolvedType: "List(Int64)",
+			},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"SUB\t%amifl_tmp4\t%amifl_tmp3\t%amifl_tmp2", // rawCount = To - From
+		"GT\t%amifl_tmp5\t%amifl_tmp4\t0",            // selectValue's clamp condition
+		"IF\t%amifl_tmp5",
+		"SET\t%amifl_tmp6\t%amifl_tmp4",
+		"ELSE",
+		"SET\t%amifl_tmp6\t0",
+		"ENDIF",
+		"CALL\t%amifl_tmp7\t:\t?int\t%amifl_tmp6",
+		"SLMAKE\t%amifl_tmp8\t^AmiflList1\t%amifl_tmp7",
+		"ASET\t%amifl_tmp8\t%amifl_tmp9\t%i_2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
 func TestGenerate_NoMainIsAnError(t *testing.T) {
 	if _, err := Generate(&ast.File{}); err == nil {
 		t.Fatal("expected an error when there is no fn main")

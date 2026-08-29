@@ -864,6 +864,34 @@ type ForExpr struct {
 	ResolvedType string
 }
 
+// RangeExpr is `a..b` (half-open) / `a..=b` (closed) — amifl-spec.md
+// section 3.1/7.3, ex2 of the post-15-step roadmap ("Range型の追加(for i
+// in 0..10のような数値範囲反復)"). From/To are ordinary expressions (not
+// restricted to literals), always Int64 — no other integer width, no
+// Float, and deliberately no user-writable surface type-annotation syntax
+// at all (a RangeExpr's own resolved type is always the fixed string
+// "Range", which canonicalType never recognizes as a nameable type —
+// mirroring step 5's identical scope cut for Func/ClosureLit: a value
+// exists and can be `let`-bound and consumed, but can never be spelled
+// out in a `: Type`/`-> Type` annotation, a struct field, or a
+// List/Array/Set/Map element-type position). A Range value is consumed
+// only by `for x in range { ... }` / `for x in range yield expr`
+// (ForExpr.ItemsType == "Range") — no `len`/`contains`/other 13.4 builtin
+// wiring, no `.From`/`.To` field access, no descending/stepped ranges;
+// From >= To (half-open) or From > To (closed) is a valid empty range at
+// runtime, never a compile-time error. Codegen represents it as a single
+// compiler-synthesized `{From, To int64}` struct, always normalized to a
+// half-open [From,To) pair at construction time — Inclusive only ever
+// affects how genRangeValue builds that struct (bumping To by one), never
+// surviving into the runtime representation itself, so no separate
+// "inclusive" flag needs to travel any further than that one codegen
+// call (internal/codegen/structs.go's rangeGoTypeName).
+type RangeExpr struct {
+	From, To  Expr
+	Inclusive bool
+	Line      int
+}
+
 // SwitchExpr is `switch subject { case Type.Variant(binding, ...): body ...
 // [default: body] }` (amifl-spec.md section 10) — step 8. This node exists
 // only for the subject-carrying form; the subject-less, Bool-only case
@@ -1045,6 +1073,7 @@ func (*IndexExpr) exprNode()       {}
 func (*IndexAssignExpr) exprNode() {}
 func (*SliceExpr) exprNode()       {}
 func (*ForExpr) exprNode()         {}
+func (*RangeExpr) exprNode()       {}
 func (*SwitchExpr) exprNode()      {}
 func (*TryExpr) exprNode()         {}
 
@@ -1074,5 +1103,6 @@ func (n *IndexExpr) Pos() int       { return n.Line }
 func (n *IndexAssignExpr) Pos() int { return n.Line }
 func (n *SliceExpr) Pos() int       { return n.Line }
 func (n *ForExpr) Pos() int         { return n.Line }
+func (n *RangeExpr) Pos() int       { return n.Line }
 func (n *SwitchExpr) Pos() int      { return n.Line }
 func (n *TryExpr) Pos() int         { return n.Line }

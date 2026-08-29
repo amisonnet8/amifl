@@ -805,6 +805,8 @@ func (g *gen) genValue(e ast.Expr) (string, error) {
 		return g.genSwitchValue(v)
 	case *ast.ForExpr:
 		return g.genForYieldValue(v)
+	case *ast.RangeExpr:
+		return g.genRangeValue(v)
 	case *ast.TryExpr:
 		return g.genTryValue(v)
 	default:

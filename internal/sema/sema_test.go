@@ -1738,6 +1738,91 @@ func TestCheck_ForOverScalarIsAnError(t *testing.T) {
 	}
 }
 
+func TestCheck_RangeExprLetBindingIsValid(t *testing.T) {
+	// ex2: `let r = 0..10` — Range is inferred, never annotated (no
+	// surface type-annotation syntax exists for it, ast.RangeExpr's doc
+	// comment).
+	f := mainFile(
+		&ast.LetExpr{Name: "r", Value: &ast.RangeExpr{From: &ast.IntLit{Value: 0}, To: &ast.IntLit{Value: 10}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_RangeExprNonInt64BoundIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "n", Type: nt("Int8"), Value: &ast.IntLit{Value: 5}},
+		&ast.LetExpr{Name: "r", Value: &ast.RangeExpr{From: &ast.IntLit{Value: 0}, To: &ast.IdentExpr{Name: "n"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a Range bound that isn't Int64")
+	}
+}
+
+func TestCheck_ForOverRangeBindsInt64ElemType(t *testing.T) {
+	f := mainFile(
+		&ast.ForExpr{
+			Var:   "i",
+			Items: &ast.RangeExpr{From: &ast.IntLit{Value: 0}, To: &ast.IntLit{Value: 10}},
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.LetExpr{Name: "doubled", Type: nt("Int"), Value: &ast.BinaryExpr{Op: "+", Left: &ast.IdentExpr{Name: "i"}, Right: &ast.IdentExpr{Name: "i"}}},
+			}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ForYieldOverRangeResolvesToListInt(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{
+			Name: "xs",
+			Value: &ast.ForExpr{
+				Var:   "i",
+				Items: &ast.RangeExpr{From: &ast.IntLit{Value: 0}, To: &ast.IntLit{Value: 10}},
+				Yield: &ast.IdentExpr{Name: "i"},
+			},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	forExpr := f.Decls[0].(*ast.FuncDecl).Body.Exprs[0].(*ast.LetExpr).Value.(*ast.ForExpr)
+	if forExpr.ResolvedType != "List(Int64)" {
+		t.Errorf("got ResolvedType %q, want List(Int64)", forExpr.ResolvedType)
+	}
+}
+
+func TestCheck_ForTwoVarsOverRangeIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.ForExpr{
+			Var: "i", Var2: "j",
+			Items: &ast.RangeExpr{From: &ast.IntLit{Value: 0}, To: &ast.IntLit{Value: 10}},
+			Body:  &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for `for i, j in 0..10`")
+	}
+}
+
+func TestCheck_RangeIsNotAWritableTypeAnnotation(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{Name: "f", Params: []ast.Param{{Name: "r", Type: nt("Range")}}, ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}},
+		&ast.FuncDecl{Name: "main", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}},
+	}}
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for `Range` used as a parameter type annotation")
+	}
+}
+
 func TestCheck_ForVarIsNotReassignable(t *testing.T) {
 	f := mainFile(
 		&ast.LetExpr{Name: "xs", Value: intListLit(1, 2, 3)},
