@@ -834,6 +834,165 @@ func TestCheck_BreakOutsideLoopButInsideIfIsAnError(t *testing.T) {
 	}
 }
 
+// TestCheck_ReturnWithValueIsValid (ex11) checks a plain `return expr`
+// matching the enclosing function's declared return type.
+func TestCheck_ReturnWithValueIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.IfExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Then: &ast.Block{Exprs: []ast.Expr{&ast.ReturnExpr{Value: &ast.IntLit{Value: 5}}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_ReturnValueTypeMismatchIsAnError(t *testing.T) {
+	f := mainFile(&ast.ReturnExpr{Value: &ast.StringLit{Value: "wrong"}}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: main returns Int, not String")
+	}
+}
+
+func TestCheck_BareReturnInUnitFuncIsValid(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:       "f",
+			ReturnType: nt("Unit"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.IfExpr{Cond: &ast.BoolLit{Value: true}, Then: &ast.Block{Exprs: []ast.Expr{&ast.ReturnExpr{}}}},
+				&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "after"}}},
+			}},
+		},
+		&ast.FuncDecl{Name: "main", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{
+			&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "f"}},
+			&ast.IntLit{Value: 0},
+		}}},
+	}}
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_BareReturnInNonUnitFuncIsAnError(t *testing.T) {
+	f := mainFile(&ast.ReturnExpr{}, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: bare `return` needs a value since main returns Int, not Unit")
+	}
+}
+
+// TestCheck_ReturnAsIfBranchIsValid (ex11's main point) checks
+// `if done { return 5 } else { 10 }` — a return branch alongside a sibling
+// of a real, unrelated type.
+func TestCheck_ReturnAsIfBranchIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.IfExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Then: &ast.Block{Exprs: []ast.Expr{&ast.ReturnExpr{Value: &ast.IntLit{Value: 5}}}},
+			Else: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 10}}},
+		},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+// TestCheck_BreakAsIfBranchIsValid (ex11 generalized break/continue to
+// neverType too) checks `if done { break } else { 5 }` inside a loop —
+// previously rejected (step 4's own doc comment invited revisiting this
+// "once return/Never's design is settled for real").
+func TestCheck_BreakAsIfBranchIsValid(t *testing.T) {
+	f := mainFile(
+		&ast.WhileExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.DiscardExpr{Value: &ast.IfExpr{
+					Cond: &ast.BoolLit{Value: true},
+					Then: &ast.Block{Exprs: []ast.Expr{&ast.BreakExpr{}}},
+					Else: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 5}}},
+				}},
+			}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+// TestCheck_AllBranchesDivergeResolvesToNever confirms an if/else whose
+// every branch diverges (here, both return) doesn't force a spurious type
+// mismatch against a differently-typed outer expected — there's genuinely
+// no value produced either way.
+func TestCheck_AllBranchesDivergeResolvesToNever(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Value: &ast.IfExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Then: &ast.Block{Exprs: []ast.Expr{&ast.ReturnExpr{Value: &ast.IntLit{Value: 1}}}},
+			Else: &ast.Block{Exprs: []ast.Expr{&ast.ReturnExpr{Value: &ast.IntLit{Value: 2}}}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: `x` can never actually be bound to a value (every branch diverges)")
+	}
+}
+
+// TestCheck_LetBoundDirectlyToReturnIsAnError confirms `let x = return 5`
+// (Value *directly* a ReturnExpr, not nested inside an if/switch branch)
+// is rejected — there is no value left to bind once control diverges.
+func TestCheck_LetBoundDirectlyToReturnIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Value: &ast.ReturnExpr{Value: &ast.IntLit{Value: 5}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error binding a let directly to a return")
+	}
+}
+
+// TestCheck_AssignDirectlyFromReturnIsAnError is
+// TestCheck_LetBoundDirectlyToReturnIsAnError's counterpart for plain
+// reassignment.
+func TestCheck_AssignDirectlyFromReturnIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Value: &ast.IntLit{Value: 0}},
+		&ast.AssignExpr{Name: "x", Value: &ast.ReturnExpr{Value: &ast.IntLit{Value: 5}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error assigning directly from a return")
+	}
+}
+
+// TestCheck_ReturnInsideClosureUsesClosureRetType confirms a `return`
+// inside a closure body checks against the *closure's* own declared return
+// type, not the enclosing function's — the same closure-boundary save/
+// restore `?`'s fc.retType handling already established (resolveClosureLit).
+func TestCheck_ReturnInsideClosureUsesClosureRetType(t *testing.T) {
+	f := mainFile(
+		// Enclosing main() returns Int, but the closure returns Bool — a
+		// `return true` inside the closure must check against Bool, not Int.
+		&ast.LetExpr{Name: "f", Value: &ast.ClosureLit{
+			Params:     []ast.Param{{Name: "x", Type: nt("Int")}},
+			ReturnType: nt("Bool"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.IfExpr{
+					Cond: &ast.BinaryExpr{Op: "<", Left: &ast.IdentExpr{Name: "x"}, Right: &ast.IntLit{Value: 0}},
+					Then: &ast.Block{Exprs: []ast.Expr{&ast.ReturnExpr{Value: &ast.BoolLit{Value: true}}}},
+					Else: &ast.Block{Exprs: []ast.Expr{&ast.BoolLit{Value: false}}},
+				},
+			}},
+		}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
 func TestCheck_LoopDepthRestoredAfterWhileExits(t *testing.T) {
 	// A break after a while loop has finished checking must still be
 	// rejected — loopDepth must be decremented back down, not just ever

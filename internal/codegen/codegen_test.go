@@ -599,6 +599,95 @@ func TestGenerate_ContinueEmitsContinue(t *testing.T) {
 	}
 }
 
+// TestGenerate_ReturnWithValueEmitsRet (ex11) checks a plain `return expr`
+// used as an ordinary statement.
+func TestGenerate_ReturnWithValueEmitsRet(t *testing.T) {
+	f := mainFile(
+		&ast.IfExpr{
+			Cond: &ast.BoolLit{Value: true},
+			Then: &ast.Block{Exprs: []ast.Expr{&ast.ReturnExpr{Value: &ast.IntLit{Value: 5}}}},
+		},
+		&ast.IntLit{Value: 0},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "\tRET\t5\n") {
+		t.Errorf("generated IR missing RET 5; got:\n%s", ir)
+	}
+}
+
+// TestGenerate_BareReturnEmitsRetWithNoOperand (ex11) checks a bare
+// `return` inside a Unit-returning function — matches the same no-operand
+// RET a Unit-returning body's own ordinary tail already emits.
+func TestGenerate_BareReturnEmitsRetWithNoOperand(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:               "f",
+			ReturnType:         nt("Unit"),
+			ResolvedReturnType: "Unit",
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.IfExpr{Cond: &ast.BoolLit{Value: true}, Then: &ast.Block{Exprs: []ast.Expr{&ast.ReturnExpr{}}}},
+				&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: "after"}}},
+			}},
+		},
+		&ast.FuncDecl{Name: "main", ReturnType: nt("Int"), ResolvedReturnType: "Int64", Body: &ast.Block{Exprs: []ast.Expr{
+			&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "f"}},
+			&ast.IntLit{Value: 0},
+		}}},
+	}}
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	// The early `return`'s own bare RET, plus f's own ordinary Unit tail RET
+	// at the very end of its body (genFuncDecl's unconditional trailing
+	// "RET\n" for a Unit-returning function) — both should be bare (no
+	// operand), and the early one must appear inside the IF/ENDIF.
+	if strings.Count(ir, "\tRET\n") < 2 {
+		t.Errorf("expected at least 2 bare RETs (early return + f's own trailing tail RET); got:\n%s", ir)
+	}
+	ifIdx := strings.Index(ir, "\tIF\t")
+	retIdx := strings.Index(ir, "\tRET\n")
+	endifIdx := strings.Index(ir, "\tENDIF\n")
+	if ifIdx < 0 || retIdx < ifIdx || retIdx > endifIdx {
+		t.Errorf("expected the early return's RET to appear between IF and ENDIF; got:\n%s", ir)
+	}
+}
+
+// TestGenerate_ReturnAsIfBranchTailSkipsSet (ex11) checks
+// `if done { return 5 } else { 10 }` used as a let's value: the diverging
+// `then` branch must RET directly rather than trying to SET anything into
+// the if-expression's own result temp (there's nothing to set — control
+// never reaches the point after ENDIF on that branch at all).
+func TestGenerate_ReturnAsIfBranchTailSkipsSet(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "x", Token: "%x_1", ResolvedType: "Int64", Value: &ast.IfExpr{
+			ResolvedType: "Int64",
+			Cond:         &ast.BoolLit{Value: true},
+			Then:         &ast.Block{Exprs: []ast.Expr{&ast.ReturnExpr{Value: &ast.IntLit{Value: 5}}}},
+			Else:         &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 10}}},
+		}},
+		&ast.IdentExpr{Name: "x", Token: "%x_1", ResolvedType: "Int64"},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "\tRET\t5\n") {
+		t.Errorf("generated IR missing the diverging branch's RET 5; got:\n%s", ir)
+	}
+	// The `then` branch must not SET the if's own result temp at all — only
+	// the `else` branch's SET (writing 10) should appear.
+	ifIdx := strings.Index(ir, "\tIF\t")
+	elseIdx := strings.Index(ir, "\tELSE\n")
+	thenBody := ir[ifIdx:elseIdx]
+	if strings.Contains(thenBody, "\tSET\t") {
+		t.Errorf("expected no SET in the diverging then-branch; got branch:\n%s", thenBody)
+	}
+}
+
 func TestGenerate_ShadowingLetGetsDistinctInternalNames(t *testing.T) {
 	// Regression test for a real bug found via the full amivm -> go build
 	// pipeline (CLAUDE.md's "確定した設計判断" for step 4): two `let`s

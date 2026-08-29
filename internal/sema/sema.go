@@ -442,7 +442,10 @@ func (fc *funcChecker) checkBlock(b *ast.Block, expected string) (string, error)
 			if err != nil {
 				return "", err
 			}
-			if t != unitType {
+			// neverType (return/break/continue, ex11) is fine here too — a
+			// diverging statement never produces a value that would need
+			// discarding in the first place.
+			if t != unitType && t != neverType {
 				return "", fmt.Errorf("line %d: non-final expression in a block must be Unit-typed, got %s (discard it explicitly with `_ = ...` if this is intentional)", e.Pos(), t)
 			}
 			continue

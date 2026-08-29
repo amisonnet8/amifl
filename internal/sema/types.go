@@ -43,6 +43,21 @@ var scalarTypes = map[string]bool{
 // that would even parse one there), only an internal bookkeeping type.
 const unitType = "Unit"
 
+// neverType is the type of `return`/`break`/`continue` (amifl-spec.md
+// section 5, ex11) — these never actually produce a value where they
+// appear (control diverges: out of the enclosing function/closure for
+// `return`, out of the enclosing loop for `break`/`continue`), so
+// checkExpr treats a neverType value as automatically compatible with any
+// expected type (its own doc comment) rather than checking it for an exact
+// match the way every other expression's type is. Like unitType, this is
+// purely an internal bookkeeping type — never in scalarTypes, never
+// writable in a type annotation, and never actually surfaced in an error
+// message (checkExpr's bypass means a neverType value is never the "got"
+// side of a mismatch report). Not named "Never" to a user-facing degree
+// beyond that string showing up nowhere reachable: no AmiFL syntax lets a
+// user reference this identifier at all.
+const neverType = "Never"
+
 // canonicalType resolves a type-annotation identifier to its canonical
 // type name: a scalar (via typeAliases/scalarTypes) or, since step 6, a
 // user-declared `struct` name (c.structs — always its own name verbatim,

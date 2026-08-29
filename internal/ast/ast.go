@@ -1200,10 +1200,35 @@ type WhileExpr struct {
 }
 
 // BreakExpr and ContinueExpr are `break`/`continue` (amifl-spec.md section
-// 7): always Unit-typed, only legal inside a WhileExpr's Body (sema
-// rejects one found outside any loop).
+// 7), only legal inside a WhileExpr's Body (sema rejects one found outside
+// any loop). Resolve to sema's internal "Never" type (ex11) rather than
+// Unit — control diverges (out of the loop) at either one, so neither ever
+// actually produces a value; Never's "matches any expected type" bypass is
+// what makes both usable as one branch of an if/switch alongside sibling
+// branches of a real, unrelated type (`if done { break } else { 5 }`),
+// while still working exactly as before in their much more common role as
+// an ordinary Unit-position statement inside a loop body.
 type BreakExpr struct{ Line int }
 type ContinueExpr struct{ Line int }
+
+// ReturnExpr is `return`/`return expr` (amifl-spec.md section 5, ex11) —
+// AmiFL's only general early-exit construct (`?`, section 3.3, is a
+// narrower postfix sugar for the Tuple2[T,Error]/Error early-return
+// pattern specifically). Value is nil for a bare `return` (legal only when
+// the enclosing function/closure's own declared return type is Unit —
+// sema's own check, ReturnExpr carries no flag of its own for this). Only
+// ever parseable in statement position (parseExpr, the same position
+// `let`/`const`/`_ = expr` are already restricted to) — never reachable
+// from inside a larger expression (a call argument, a binary operand, a
+// list element, ...) the way an ordinary value-producing expression is,
+// which keeps sema's Never-typing (this resolves to sema's internal
+// "Never" type, exactly like BreakExpr/ContinueExpr above) from ever
+// having to be threaded through codegen's genValue for anything but a
+// block's own tail position (genBlock/genValueBlock's own doc comments).
+type ReturnExpr struct {
+	Value Expr // nil for a bare `return`
+	Line  int
+}
 
 func (*FuncDecl) topLevelDeclNode()   {}
 func (*ConstDecl) topLevelDeclNode()  {}
@@ -1228,6 +1253,7 @@ func (*IfExpr) exprNode()          {}
 func (*WhileExpr) exprNode()       {}
 func (*BreakExpr) exprNode()       {}
 func (*ContinueExpr) exprNode()    {}
+func (*ReturnExpr) exprNode()      {}
 func (*ClosureLit) exprNode()      {}
 func (*TupleLit) exprNode()        {}
 func (*StructLit) exprNode()       {}
@@ -1259,6 +1285,7 @@ func (n *IfExpr) Pos() int          { return n.Line }
 func (n *WhileExpr) Pos() int       { return n.Line }
 func (n *BreakExpr) Pos() int       { return n.Line }
 func (n *ContinueExpr) Pos() int    { return n.Line }
+func (n *ReturnExpr) Pos() int      { return n.Line }
 func (n *ClosureLit) Pos() int      { return n.Line }
 func (n *TupleLit) Pos() int        { return n.Line }
 func (n *StructLit) Pos() int       { return n.Line }

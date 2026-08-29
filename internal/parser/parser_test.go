@@ -473,6 +473,88 @@ func TestParse_BreakAndContinue(t *testing.T) {
 	}
 }
 
+// TestParse_ReturnWithValue (ex11) confirms `return expr` parses to
+// ast.ReturnExpr with Value set.
+func TestParse_ReturnWithValue(t *testing.T) {
+	stmt := parseStmtExpr(t, "return 5").(*ast.ReturnExpr)
+	lit, ok := stmt.Value.(*ast.IntLit)
+	if !ok || lit.Value != 5 {
+		t.Fatalf("got Value %#v, want IntLit{Value: 5}", stmt.Value)
+	}
+}
+
+// TestParse_BareReturn confirms a bare `return` (no value) leaves Value
+// nil, and that the block parses on to the following statement correctly
+// (return's own "where does the value stop" detection — Newline/RBrace/EOF
+// — doesn't accidentally swallow anything).
+func TestParse_BareReturn(t *testing.T) {
+	f, err := Parse("fn main() -> Unit {\n    return\n    print(\"after\")\n}\n")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	body := parseFuncMain(t, f).Body.Exprs
+	if len(body) != 2 {
+		t.Fatalf("got %d body exprs, want 2", len(body))
+	}
+	ret, ok := body[0].(*ast.ReturnExpr)
+	if !ok || ret.Value != nil {
+		t.Fatalf("body[0]: got %#v, want a bare *ast.ReturnExpr (Value == nil)", body[0])
+	}
+	if _, ok := body[1].(*ast.CallExpr); !ok {
+		t.Fatalf("body[1]: got %T, want *ast.CallExpr", body[1])
+	}
+}
+
+// TestParse_BareReturnRightBeforeClosingBrace confirms `{ return }` (no
+// newline before the closing brace) parses too — parseReturnExpr's bare-
+// value detection must check for RBrace, not just Newline.
+func TestParse_BareReturnRightBeforeClosingBrace(t *testing.T) {
+	f, err := Parse("fn main() -> Unit {\n    if true { return }\n}\n")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	ifExpr := parseFuncMain(t, f).Body.Exprs[0].(*ast.IfExpr)
+	ret, ok := ifExpr.Then.Exprs[0].(*ast.ReturnExpr)
+	if !ok || ret.Value != nil {
+		t.Fatalf("if-body[0]: got %#v, want a bare *ast.ReturnExpr", ifExpr.Then.Exprs[0])
+	}
+}
+
+// TestParse_ReturnAsIfBranchTail confirms `return` can be an if-branch's
+// tail expression (ex11's main ergonomic point — usable alongside a
+// sibling branch of a real, unrelated type).
+func TestParse_ReturnAsIfBranchTail(t *testing.T) {
+	stmt := parseStmtExpr(t, "if true { return 5 } else { 10 }")
+	ifExpr, ok := stmt.(*ast.IfExpr)
+	if !ok {
+		t.Fatalf("got %T, want *ast.IfExpr", stmt)
+	}
+	if _, ok := ifExpr.Then.Exprs[0].(*ast.ReturnExpr); !ok {
+		t.Fatalf("then-branch[0]: got %T, want *ast.ReturnExpr", ifExpr.Then.Exprs[0])
+	}
+}
+
+// TestParse_ReturnAsCallArgIsAnError confirms `return`/`break`/`continue`
+// cannot be embedded as a call argument — none of the three can be
+// represented as a value inside another instruction's argument list at the
+// AMIVM-IR level (ast.ReturnExpr's doc comment), so parseCallArgs uses
+// parsePipeExpr (which never recognizes any of the three) rather than the
+// fuller parseExpr.
+func TestParse_ReturnAsCallArgIsAnError(t *testing.T) {
+	if _, err := Parse("fn f(x: Int) -> Int { x }\nfn main() -> Int { f(return 1) }\n"); err == nil {
+		t.Fatal("expected an error embedding 'return' as a call argument")
+	}
+}
+
+// TestParse_ReturnAsBinaryOperandIsAnError confirms the same restriction
+// for an ordinary operator position (return/break/continue are reachable
+// only from parseExpr's statement position, never parsePrimaryExpr).
+func TestParse_ReturnAsBinaryOperandIsAnError(t *testing.T) {
+	if _, err := Parse("fn main() -> Int {\n    5 + return 1\n}\n"); err == nil {
+		t.Fatal("expected an error using 'return' as a binary operand")
+	}
+}
+
 func TestParse_SwitchDesugarsToIfChain(t *testing.T) {
 	expr := parseExprSrc(t, `switch {
         case a: 1

@@ -21,6 +21,7 @@ const (
 	KwWhile
 	KwBreak
 	KwContinue
+	KwReturn
 	KwSwitch
 	KwCase
 	KwDefault
@@ -111,6 +112,8 @@ func (k Kind) String() string {
 		return "'break'"
 	case KwContinue:
 		return "'continue'"
+	case KwReturn:
+		return "'return'"
 	case KwSwitch:
 		return "'switch'"
 	case KwCase:

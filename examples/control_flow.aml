@@ -1,3 +1,27 @@
+// ex11: `return`/`return expr` — early exit from the enclosing fn.
+fn earlyIfNegative(x: Int) -> Int {
+    if x < 0 {
+        return 0
+    }
+    x * 2
+}
+
+fn firstOverThreshold(xs: List[Int], threshold: Int) -> Int {
+    for x in xs {
+        if x > threshold {
+            return x
+        }
+    }
+    -1
+}
+
+// `return` may be an if-branch's tail alongside a sibling of a real,
+// unrelated type — it resolves to the compiler-internal Never type, which
+// matches any expected type (amifl-spec.md section 2.2).
+fn describeSign(x: Int) -> String {
+    if x < 0 { return "negative" } else { "non-negative" }
+}
+
 fn main() -> Int {
     let score: Int = 82
     let grade: String = if score >= 90 {
@@ -56,5 +80,11 @@ fn main() -> Int {
 
     let unitIf: Int = if false { 1 } else { 2 }
 
-    total + shadowTest + unitIf + mut + mut2
+    let earlyNeg: Int = earlyIfNegative(-5)
+    let earlyPos: Int = earlyIfNegative(5)
+    let firstOver: Int = firstOverThreshold([1, 2, 3, 10, 4], 5)
+    print(describeSign(-1))
+    print(describeSign(7))
+
+    total + shadowTest + unitIf + mut + mut2 + earlyNeg + earlyPos + firstOver
 }

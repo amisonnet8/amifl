@@ -834,24 +834,52 @@ func (p *parser) parseBlock() (*ast.Block, error) {
 }
 
 // parseExpr parses one expression in statement position: a block's
-// top-level `let`/`const`/`_ = ...`/reassignment/value-expression entries
-// (amifl-spec.md section 5). Reassignment (`name = expr`, `x[i] = v`) is
-// deliberately not reachable from within parseOrExpr's operator chain —
-// it isn't listed among amifl-spec.md section 6's operators, and (like
-// let/const/discard) it's Unit-typed, so nesting it inside a larger
-// expression would only ever be legal in a position that itself has to be
-// Unit-typed. Detecting it no longer needs a peek past the target (step
-// 2's original approach, sufficient when the only assignable target was a
-// bare name): step 7 adds `x[i] = v`, a target that isn't just one token,
-// so this instead parses the target as an ordinary expression first and
-// reclassifies it if `=` follows — the same technique Go itself uses for
-// its own assignment statements.
+// top-level `let`/`const`/`_ = ...`/reassignment/`break`/`continue`/
+// `return`/value-expression entries (amifl-spec.md section 5). Reassignment
+// (`name = expr`, `x[i] = v`) is deliberately not reachable from within
+// parseOrExpr's operator chain — it isn't listed among amifl-spec.md
+// section 6's operators, and (like let/const/discard) it's Unit-typed, so
+// nesting it inside a larger expression would only ever be legal in a
+// position that itself has to be Unit-typed. Detecting it no longer needs a
+// peek past the target (step 2's original approach, sufficient when the
+// only assignable target was a bare name): step 7 adds `x[i] = v`, a target
+// that isn't just one token, so this instead parses the target as an
+// ordinary expression first and reclassifies it if `=` follows — the same
+// technique Go itself uses for its own assignment statements.
+//
+// `break`/`continue`/`return` (ex11 moved the first two here from
+// parsePrimaryExpr — see ast.ReturnExpr's doc comment) are statement-
+// position only for a structural reason, not just a style choice: each one
+// lowers to a single AMIVM control-flow instruction (BREAK/CONTINUE/RET)
+// that has to stand on its own in the generated instruction stream — none
+// of the three can be embedded as a value inside another instruction's
+// argument list (there's no way to "return the value of a jump" at the
+// AMIVM-IR level). Restricting them to statement position (which, since a
+// block's last statement is still just a statement, already includes a
+// block's own tail — enough to write `if done { return 5 } else { 10 }`)
+// means codegen never has to handle one turning up nested inside an
+// arbitrary expression (a call argument, a binary operand, a list
+// element, ...).
 func (p *parser) parseExpr() (ast.Expr, error) {
 	switch p.cur.Kind {
 	case lexer.KwLet:
 		return p.parseLetExpr()
 	case lexer.KwConst:
 		return p.parseConstDecl()
+	case lexer.KwBreak:
+		tok := p.cur
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		return &ast.BreakExpr{Line: tok.Line}, nil
+	case lexer.KwContinue:
+		tok := p.cur
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		return &ast.ContinueExpr{Line: tok.Line}, nil
+	case lexer.KwReturn:
+		return p.parseReturnExpr()
 	case lexer.Ident:
 		if p.cur.Value == "_" {
 			return p.parseDiscardExpr()
@@ -1651,18 +1679,6 @@ func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
 		return p.parseWhileExpr()
 	case lexer.KwFor:
 		return p.parseForExpr()
-	case lexer.KwBreak:
-		tok := p.cur
-		if err := p.advance(); err != nil {
-			return nil, err
-		}
-		return &ast.BreakExpr{Line: tok.Line}, nil
-	case lexer.KwContinue:
-		tok := p.cur
-		if err := p.advance(); err != nil {
-			return nil, err
-		}
-		return &ast.ContinueExpr{Line: tok.Line}, nil
 	case lexer.KwFn:
 		return p.parseClosureLit()
 	default:
@@ -2129,6 +2145,29 @@ func (p *parser) parseDiscardExpr() (ast.Expr, error) {
 	return &ast.DiscardExpr{Value: value, Line: tok.Line}, nil
 }
 
+// parseReturnExpr parses `return`/`return expr` (amifl-spec.md section 5,
+// ex11) — reached only from parseExpr's statement position (see its own
+// doc comment for why). Bare `return` (Value left nil) is recognized
+// exactly when the token right after `return` can't start a value here at
+// all: a Newline (the block's own statement separator) or the block's
+// closing `}` — every other token is parsed as the return value via
+// parsePipeExpr (never parseExpr — a `return`'s own value is an ordinary
+// value expression, not itself another statement).
+func (p *parser) parseReturnExpr() (ast.Expr, error) {
+	tok, err := p.expect(lexer.KwReturn)
+	if err != nil {
+		return nil, err
+	}
+	if p.cur.Kind == lexer.Newline || p.cur.Kind == lexer.RBrace || p.cur.Kind == lexer.EOF {
+		return &ast.ReturnExpr{Line: tok.Line}, nil
+	}
+	val, err := p.parsePipeExpr()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.ReturnExpr{Value: val, Line: tok.Line}, nil
+}
+
 // parseIdentOrCall parses whatever follows a plain identifier used as a
 // value: a call (`name(...)`), a struct literal (`Name{...}` — amifl-spec.md
 // section 2.2, suppressed by noCompositeLit inside an if/elif/while
@@ -2197,6 +2236,15 @@ func (p *parser) parseGenericTypeArgBracket(nameTok lexer.Token) (ast.TypeExpr, 
 	return typeArg, nil
 }
 
+// parseCallArgs parses `(arg1, arg2, ...)` for an ordinary call
+// (`name(...)`). Each argument goes through parsePipeExpr, not parseExpr —
+// call-argument position must never reach any of parseExpr's
+// statement-only forms (ex11's `return`/`break`/`continue` in particular:
+// none of the three can be embedded inside a CALL instruction's argument
+// list at the AMIVM-IR level, ast.ReturnExpr's doc comment — but the same
+// reasoning already applied, more quietly, to `let`/`const`/`_ = expr`/
+// reassignment, all Unit-typed and so never a legal argument value anyway;
+// ex11 just made the restriction load-bearing instead of merely academic).
 func (p *parser) parseCallArgs(nameTok lexer.Token) (ast.Expr, error) {
 	if _, err := p.expect(lexer.LParen); err != nil {
 		return nil, err
@@ -2205,7 +2253,7 @@ func (p *parser) parseCallArgs(nameTok lexer.Token) (ast.Expr, error) {
 	p.noCompositeLit = false
 	defer func() { p.noCompositeLit = saved }()
 
-	args, err := parseCommaList(p, lexer.RParen, p.parseExpr)
+	args, err := parseCommaList(p, lexer.RParen, p.parsePipeExpr)
 	if err != nil {
 		return nil, err
 	}

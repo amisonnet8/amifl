@@ -323,7 +323,9 @@ func (g *gen) newTemp() string {
 // genBlock emits a function body's statements, treating the last
 // expression as the enclosing function's return value (sema's checkBlock
 // guarantees this typechecks against the function's declared return
-// type).
+// type) — unless that last expression is itself a return/break/continue
+// (ex11), which never actually produces a value to RET (control already
+// diverges there on its own): isDivergentExpr's doc comment.
 func (g *gen) genBlock(exprs []ast.Expr) error {
 	if len(exprs) == 0 {
 		return fmt.Errorf("codegen: empty block (sema should have rejected this)")
@@ -331,7 +333,29 @@ func (g *gen) genBlock(exprs []ast.Expr) error {
 	if err := g.genStmtBlock(exprs[:len(exprs)-1]); err != nil {
 		return err
 	}
-	return g.genReturn(exprs[len(exprs)-1])
+	tail := exprs[len(exprs)-1]
+	if isDivergentExpr(tail) {
+		return g.genStmt(tail)
+	}
+	return g.genReturn(tail)
+}
+
+// isDivergentExpr reports whether e is a return/break/continue (ex11) —
+// none of the three ever actually produces a value where it appears
+// (control diverges: RET out of the function/closure, or BREAK/CONTINUE
+// out of the loop), so genBlock/genValueBlock must run it as a statement
+// (genStmt) rather than trying to compute "its value" via genValue and
+// wrap that in a further RET/SET — there is no value to wrap. Mirrors
+// sema's blockEndsInNeverType (internal/sema/expr.go) exactly, but
+// independently — codegen and sema never share logic beyond the AST itself
+// (CLAUDE.md's architecture).
+func isDivergentExpr(e ast.Expr) bool {
+	switch e.(type) {
+	case *ast.ReturnExpr, *ast.BreakExpr, *ast.ContinueExpr:
+		return true
+	default:
+		return false
+	}
 }
 
 // genStmtBlock emits every expression in exprs purely for whatever side
@@ -353,7 +377,13 @@ func (g *gen) genStmtBlock(exprs []ast.Expr) error {
 // like genStmtBlock, and the final expression's value is computed and
 // written into dest (a temp genIfValue already declared) with SET, rather
 // than RET like a function body's genBlock — an if-branch's "return" is a
-// value flowing out of a control-flow block, not out of a function.
+// value flowing out of a control-flow block, not out of a function. As in
+// genBlock above, a divergent tail (return/break/continue, ex11 —
+// `if done { return 5 } else { 10 }`) never produces a value to SET into
+// dest at all, so it's run as a statement instead — dest is simply left
+// however genIfValue's own VAR zero-initialized it in that branch, which
+// is fine, since control never reaches whatever reads dest afterward on
+// that branch (it diverges before getting there).
 func (g *gen) genValueBlock(exprs []ast.Expr, dest string) error {
 	if len(exprs) == 0 {
 		return fmt.Errorf("codegen: empty block used as a value (sema should have rejected this)")
@@ -361,7 +391,11 @@ func (g *gen) genValueBlock(exprs []ast.Expr, dest string) error {
 	if err := g.genStmtBlock(exprs[:len(exprs)-1]); err != nil {
 		return err
 	}
-	val, err := g.genValue(exprs[len(exprs)-1])
+	tail := exprs[len(exprs)-1]
+	if isDivergentExpr(tail) {
+		return g.genStmt(tail)
+	}
+	val, err := g.genValue(tail)
 	if err != nil {
 		return err
 	}
@@ -376,6 +410,23 @@ func (g *gen) genReturn(e ast.Expr) error {
 	}
 	fmt.Fprintf(g.b, "\tRET\t%s\n", val)
 	return nil
+}
+
+// genReturnStmt emits `return`/`return expr` (amifl-spec.md section 5,
+// ex11) — an early exit from the enclosing function/closure, found here
+// wherever it appears as an ordinary statement (genStmt's own dispatch) or
+// (via isDivergentExpr) as a block's tail. The bare form (Value nil, only
+// valid when the enclosing retType is Unit — sema's own check) matches the
+// no-operand `RET` genFuncDecl/genClosureLitInto already emit for a
+// Unit-returning body's own ordinary tail; the value form reuses genReturn
+// verbatim, the same tail-RET emitter a function body's own last
+// expression goes through.
+func (g *gen) genReturnStmt(v *ast.ReturnExpr) error {
+	if v.Value == nil {
+		g.b.WriteString("\tRET\n")
+		return nil
+	}
+	return g.genReturn(v.Value)
 }
 
 // genStmt emits whatever instructions are needed to run e purely for its
@@ -425,6 +476,8 @@ func (g *gen) genStmt(e ast.Expr) error {
 	case *ast.ContinueExpr:
 		g.b.WriteString("\tCONTINUE\n")
 		return nil
+	case *ast.ReturnExpr:
+		return g.genReturnStmt(v)
 	case *ast.IntLit, *ast.FloatLit, *ast.BoolLit, *ast.StringLit,
 		*ast.IdentExpr:
 		// Unconditionally pure — a literal or a bare variable read never has

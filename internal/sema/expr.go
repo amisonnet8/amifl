@@ -41,7 +41,11 @@ func (fc *funcChecker) checkExpr(e ast.Expr, expected string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if expected != "" && expected != "Any" && typ != expected {
+	// neverType (ex11: return/break/continue) never actually produces a
+	// value here — control diverges — so it's compatible with any expected
+	// type rather than being checked for an exact match (types.go's
+	// neverType doc comment).
+	if expected != "" && expected != "Any" && typ != expected && typ != neverType {
 		return "", fmt.Errorf("line %d: expected %s, got %s", e.Pos(), expected, typ)
 	}
 	return typ, nil
@@ -140,6 +144,8 @@ func (fc *funcChecker) resolveType(e ast.Expr, expected string) (string, error) 
 		return fc.resolveBreakExpr(v)
 	case *ast.ContinueExpr:
 		return fc.resolveContinueExpr(v)
+	case *ast.ReturnExpr:
+		return fc.resolveReturnExpr(v)
 	case *ast.TupleLit:
 		return fc.resolveTupleLit(v)
 	case *ast.StructLit:
@@ -443,6 +449,21 @@ func (fc *funcChecker) resolveLetExpr(v *ast.LetExpr) (string, error) {
 	if typ == unitType {
 		return "", fmt.Errorf("line %d: cannot bind %q to a Unit-typed value", v.Line, v.Name)
 	}
+	// ex11: a bare `return`/`break`/`continue` as a let's *direct* value
+	// (`let x = return 5`) never actually reaches the SET that would bind
+	// x — control diverges right there — so, like the Unit case just above,
+	// this is rejected here rather than left for codegen to choke on
+	// genValue's lack of a case for one (genValue never needs one at all:
+	// the only place a neverType expression's "value" is legitimately
+	// computed is a block's own tail, and that's handled separately by
+	// genBlock/genValueBlock routing straight to genStmt instead — see
+	// isDivergentExpr's doc comment). This doesn't affect
+	// `let x = if c { return 5 } else { 10 }`: there v.Value is an IfExpr,
+	// not a bare ReturnExpr — genValueBlock's own divergent-tail handling
+	// covers that branch internally, nothing here even sees it.
+	if typ == neverType {
+		return "", fmt.Errorf("line %d: cannot bind %q directly to `return`/`break`/`continue` (there is no value left to bind once control diverges) — wrap it in an if/switch branch alongside a real value if that's what you meant", v.Line, v.Name)
+	}
 	return fc.declareLet(v, typ)
 }
 
@@ -483,8 +504,14 @@ func (fc *funcChecker) resolveAssignExpr(v *ast.AssignExpr) (string, error) {
 		}
 		return "", fmt.Errorf("line %d: cannot assign to %q: it is %s", v.Line, v.Name, kind)
 	}
-	if _, err := fc.checkExpr(v.Value, b.typ); err != nil {
+	typ, err := fc.checkExpr(v.Value, b.typ)
+	if err != nil {
 		return "", err
+	}
+	// ex11: same reasoning as resolveLetExpr's identical check just above —
+	// `x = return 5` never actually reaches the SET that would reassign x.
+	if typ == neverType {
+		return "", fmt.Errorf("line %d: cannot assign %q directly from `return`/`break`/`continue` (there is no value left once control diverges) — wrap it in an if/switch branch alongside a real value if that's what you meant", v.Line, v.Name)
 	}
 	v.Token = b.token
 	return unitType, nil
@@ -809,7 +836,10 @@ func (fc *funcChecker) collectIfBranches(v *ast.IfExpr) ([]*ast.Block, bool, err
 // decision for binary operators), generalized from 2 operands to N
 // branches, for exactly the same reason: resolving strictly in written
 // order would make `if c { 1 } else { x }` behave differently from
-// `if c { x } else { 1 }` even though they should be symmetric.
+// `if c { x } else { 1 }` even though they should be symmetric. Since
+// ex11, a branch ending in return/break/continue (neverType) is skipped
+// when picking which branch anchors the others' type — see
+// pickBranchAnchor's own doc comment.
 func (fc *funcChecker) resolveBranches(branches []*ast.Block, expected string) (string, error) {
 	checkBranch := func(b *ast.Block, want string) (string, error) {
 		fc.pushScope()
@@ -817,13 +847,7 @@ func (fc *funcChecker) resolveBranches(branches []*ast.Block, expected string) (
 		return fc.checkBlock(b, want)
 	}
 
-	anchor := 0
-	for i, b := range branches {
-		if !blockEndsInAdaptableLiteral(b) {
-			anchor = i
-			break
-		}
-	}
+	anchor := pickBranchAnchor(len(branches), func(i int) *ast.Block { return branches[i] })
 
 	target, err := checkBranch(branches[anchor], expected)
 	if err != nil {
@@ -840,11 +864,56 @@ func (fc *funcChecker) resolveBranches(branches []*ast.Block, expected string) (
 	return target, nil
 }
 
+// pickBranchAnchor selects, among n blocks (accessed via blockAt), the
+// index resolveBranches/resolveSwitchExpr should type-check first and use
+// as every other branch's own `expected` — preferring, in order: (1) a
+// branch with an unambiguous type of its own (neither an untyped-literal
+// tail nor a return/break/continue one, ex11) since only such a branch can
+// safely serve as the type every sibling branch must adapt *to*; (2) any
+// non-diverging branch (possibly an untyped-literal tail, which falls back
+// to the caller's own `expected`, or its own no-context default); (3)
+// branch 0, only once every branch diverges — the only sound situation
+// where the whole if/switch really is neverType itself (every branch
+// returns/breaks/continues, so there's genuinely no value to produce).
+func pickBranchAnchor(n int, blockAt func(int) *ast.Block) int {
+	for i := 0; i < n; i++ {
+		b := blockAt(i)
+		if !blockEndsInAdaptableLiteral(b) && !blockEndsInNeverType(b) {
+			return i
+		}
+	}
+	for i := 0; i < n; i++ {
+		if !blockEndsInNeverType(blockAt(i)) {
+			return i
+		}
+	}
+	return 0
+}
+
 func blockEndsInAdaptableLiteral(b *ast.Block) bool {
 	if len(b.Exprs) == 0 {
 		return false
 	}
 	return isAdaptableLiteral(b.Exprs[len(b.Exprs)-1])
+}
+
+// blockEndsInNeverType reports whether b's last expression is a
+// return/break/continue (ex11) — none of the three ever actually produces
+// a value (control diverges), so — mirroring blockEndsInAdaptableLiteral
+// just above — a branch shaped like this must never be picked as the
+// anchor other branches adapt to (pickBranchAnchor). This is a purely
+// structural, AST-shape check (no type resolution needed to answer it),
+// exactly like isAdaptableLiteral is for the literal case.
+func blockEndsInNeverType(b *ast.Block) bool {
+	if len(b.Exprs) == 0 {
+		return false
+	}
+	switch b.Exprs[len(b.Exprs)-1].(type) {
+	case *ast.ReturnExpr, *ast.BreakExpr, *ast.ContinueExpr:
+		return true
+	default:
+		return false
+	}
 }
 
 // resolveIfExpr type-checks `if`/`elif`/`else` (amifl-spec.md section 7).
@@ -900,29 +969,56 @@ func (fc *funcChecker) resolveWhileExpr(v *ast.WhileExpr) (string, error) {
 // CONTINUE are unlabeled too), so which specific loop is "innermost"
 // never needs to be named, only whether one exists.
 //
-// Both are Unit-typed rather than the Never type amifl-spec.md gives
-// `return` (section 5) — a deliberate, narrower scope for step 4: Never's
-// "unifies with any type" behavior isn't implemented anywhere yet (no
-// `return` *keyword* exists yet — step 5 adds early function values via
-// `fn`/closures but not early-exit `return`; a function/closure body's
-// tail expression remains the only way to produce its value), and
-// break/continue's only real use case here is as a bare Unit-typed
-// statement inside a loop body, which this already covers. Using break/
-// continue as a value-producing if/switch branch (`if done { break } else
-// { 5 }`) is consequently rejected for now — revisit once `return`/
-// Never's design is settled for real.
+// Both resolve to neverType (ex11) — control diverges out of the loop at
+// either one, so neither ever actually produces a value here. This used to
+// be unitType, a deliberate narrower scope from step 4 (Never's "unifies
+// with any type" behavior wasn't implemented anywhere yet, since no
+// `return` existed to motivate it) that this step's own doc comment
+// invited revisiting "once return/Never's design is settled for real" —
+// ex11 is that point. neverType still satisfies every existing Unit-
+// position use (checkExpr's bypass), and additionally now makes
+// `if done { break } else { 5 }` valid, exactly like the equivalent
+// `return`-based branch already is.
 func (fc *funcChecker) resolveBreakExpr(v *ast.BreakExpr) (string, error) {
 	if fc.loopDepth == 0 {
 		return "", fmt.Errorf("line %d: break outside of a loop", v.Line)
 	}
-	return unitType, nil
+	return neverType, nil
 }
 
 func (fc *funcChecker) resolveContinueExpr(v *ast.ContinueExpr) (string, error) {
 	if fc.loopDepth == 0 {
 		return "", fmt.Errorf("line %d: continue outside of a loop", v.Line)
 	}
-	return unitType, nil
+	return neverType, nil
+}
+
+// resolveReturnExpr type-checks `return`/`return expr` (amifl-spec.md
+// section 5, ex11). The enclosing function/closure's own declared return
+// type (fc.retType — set per funcChecker instance in checkFunc, saved/
+// restored across a closure's own body by resolveClosureLit exactly like
+// loopDepth is, so a `return` inside a closure returns from the closure,
+// never the enclosing function) determines what's required after `return`:
+// bare (Value nil) only when fc.retType is Unit, otherwise a value is
+// required and checked against fc.retType exactly like any other typed
+// position (a `?`-propagated early return and an explicit `return` both
+// ultimately have to produce something shaped like the function's own
+// declared return type — this is simply the general form of the exact
+// same requirement resolveTryExpr already enforces for `?`). Resolves to
+// neverType regardless (see its doc comment) — a `return` never actually
+// produces a value where it appears, control diverges out of the function/
+// closure entirely.
+func (fc *funcChecker) resolveReturnExpr(v *ast.ReturnExpr) (string, error) {
+	if v.Value == nil {
+		if fc.retType != unitType {
+			return "", fmt.Errorf("line %d: bare `return` needs a value here (the enclosing function/closure returns %s, not Unit)", v.Line, fc.retType)
+		}
+		return neverType, nil
+	}
+	if _, err := fc.checkExpr(v.Value, fc.retType); err != nil {
+		return "", err
+	}
+	return neverType, nil
 }
 
 // resolveClosureLit type-checks `fn(params) -> R { body }` used as a
@@ -1357,13 +1453,7 @@ func (fc *funcChecker) resolveSwitchExpr(v *ast.SwitchExpr, expected string) (st
 		return checkDefault(want)
 	}
 
-	anchor := 0
-	for i := 0; i < branchCount; i++ {
-		if !blockEndsInAdaptableLiteral(blockAt(i)) {
-			anchor = i
-			break
-		}
-	}
+	anchor := pickBranchAnchor(branchCount, blockAt)
 	target, err := checkAt(anchor, expected)
 	if err != nil {
 		return "", err
@@ -1619,8 +1709,14 @@ func (fc *funcChecker) resolveIndexAssignExpr(v *ast.IndexAssignExpr) (string, e
 	if _, err := fc.checkExpr(v.Index, "Int64"); err != nil {
 		return "", err
 	}
-	if _, err := fc.checkExpr(v.Value, elemTyp); err != nil {
+	valTyp, err := fc.checkExpr(v.Value, elemTyp)
+	if err != nil {
 		return "", err
+	}
+	// ex11: same reasoning as resolveLetExpr's/resolveAssignExpr's identical
+	// check — `xs[i] = return 5` never actually reaches the ASET.
+	if valTyp == neverType {
+		return "", fmt.Errorf("line %d: cannot assign into an index directly from `return`/`break`/`continue` (there is no value left once control diverges)", v.Line)
 	}
 	return unitType, nil
 }
@@ -1649,8 +1745,14 @@ func (fc *funcChecker) resolveFieldAssignExpr(v *ast.FieldAssignExpr) (string, e
 	if !ok {
 		return "", fmt.Errorf("line %d: struct %s has no field %q", v.Line, targetTyp, v.Field)
 	}
-	if _, err := fc.checkExpr(v.Value, fieldTyp); err != nil {
+	valTyp, err := fc.checkExpr(v.Value, fieldTyp)
+	if err != nil {
 		return "", err
+	}
+	// ex11: same reasoning as resolveIndexAssignExpr's identical check —
+	// `p.field = return 5` never actually reaches the FSET.
+	if valTyp == neverType {
+		return "", fmt.Errorf("line %d: cannot assign into a field directly from `return`/`break`/`continue` (there is no value left once control diverges)", v.Line)
 	}
 	v.AmivmField = v.Field
 	return unitType, nil

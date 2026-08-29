@@ -18,6 +18,7 @@ var keywords = map[string]Kind{
 	"while":    KwWhile,
 	"break":    KwBreak,
 	"continue": KwContinue,
+	"return":   KwReturn,
 	"switch":   KwSwitch,
 	"case":     KwCase,
 	"default":  KwDefault,
