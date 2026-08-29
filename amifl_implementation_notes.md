@@ -11,7 +11,7 @@
 
 ## 0. AmiFLが実証した命令
 
-Step 15時点で、以下の命令だけで足りた。**実際に`amivm`→`go build`→実行まで通して動作確認済み。**
+Step 15完了時点で、以下の命令だけで足りていた。**実際に`amivm`→`go build`→実行まで通して動作確認済み。**
 
 ```
 FUNC RET ENDFUNC
@@ -34,6 +34,8 @@ CHTYPE CHMAKE CHSEND CHRECV
 SPAWN DEFER
 METHVAL
 ```
+
+**ロードマップex3（`Func`型の表面構文と高階関数の一般化）が`FUNCVAL`をこのリストへ追加した**——トップレベル`fn`をその名前で値として参照できるようにする際、既存の`resolveCallExpr`/`calleeToken`の呼び出し解決経路（トップレベル`fn`名を`fc.funcs`から引く）をそのまま流用しつつ、値としての参照だけは`FUNCVAL local callname`（`local := callname`）という1命令で実現できた——Step 5以来「AmiFLでは出番が無い見込み」と申し送っていた命令が、実際に使われた最初のケースになった。詳細はCLAUDE.md「ロードマップ3番目の拡張」節参照。
 
 **Step 13（`extern`機構）は`METHVAL`1命令だけを新たに実証した**——Goのレシーバ付きメソッドを「レシーバを普通の第1引数として受け取る関数」として`bind`する（`amifl-spec.md` 15.2節）際、AMIVMの`callname`オペランドがドット1個までしか許さない（`?pkg.Func`は書けても`?pkg.Type.Method`というGoのmethod expression構文は書けない）という制約に直面したが、`METHVAL local receiver <method`（`local := receiver.method`、事前の言語仕様調査時点では「AmiFLでは出番が無い見込み」と申し送っていた命令）で2命令構成にすれば正確に表現できることを実装前に発見できた——**AMIVM本体への機能要求は不要だった**。`ASSERT`は今回も出番が無かった（`Any`型境界の実装が実は`ASSERT`もreflectも必要としない、という発見については下記§1参照）。
 
