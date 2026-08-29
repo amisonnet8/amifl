@@ -606,6 +606,20 @@ func (fc *funcChecker) resolveBinaryExpr(v *ast.BinaryExpr, expected string) (st
 		if fc.isEnumType(leftTyp) {
 			return "", fmt.Errorf("line %d: operator %s is not defined for enum values (use switch to inspect one)", v.Line, v.Op)
 		}
+		// List/Map/Set compile to Go slices/maps, which go/types rejects for
+		// == (Go permits comparing them only to nil, which AmiFL has no
+		// syntax for) — amifl-spec.md section 2.3 marks this "unsupported"
+		// but nothing here previously enforced it, so this check used to
+		// silently reach amivm and fail there as a confusing go/types error
+		// instead of AmiFL's own sema catching it first (CLAUDE.md's
+		// "意味検証の責任分担"). Array/Chan/Stream are deliberately NOT
+		// excluded here — Go arrays compare element-wise and Go channels
+		// compare by identity, both already legitimate and independently
+		// verified to compile and run correctly, so no exclusion is needed
+		// for them (isListType/isMapType/isSetType are false for those).
+		if isListType(leftTyp) || isMapType(leftTyp) || isSetType(leftTyp) {
+			return "", fmt.Errorf("line %d: operator %s is not defined for %s (List/Map/Set have no equality comparison; compare elements individually if needed)", v.Line, v.Op, leftTyp)
+		}
 		v.ResolvedType = leftTyp
 		return "Bool", nil
 

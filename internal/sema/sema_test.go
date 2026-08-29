@@ -2366,6 +2366,65 @@ func TestCheck_EnumEqualityIsAnError(t *testing.T) {
 	}
 }
 
+func TestCheck_ListEqualityIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "a", Type: lt(nt("Int")), Value: intListLit(1, 2)},
+		&ast.LetExpr{Name: "b", Type: lt(nt("Int")), Value: intListLit(1, 2)},
+		&ast.DiscardExpr{Value: &ast.BinaryExpr{Op: "==", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error comparing two List values with ==")
+	}
+}
+
+func TestCheck_MapEqualityIsAnError(t *testing.T) {
+	m := func() *ast.SetOrMapLit {
+		return &ast.SetOrMapLit{Entries: []ast.MapLitEntry{{Key: &ast.StringLit{Value: "a"}, Value: &ast.IntLit{Value: 1}}}}
+	}
+	f := mainFile(
+		&ast.LetExpr{Name: "a", Type: mapt(nt("String"), nt("Int")), Value: m()},
+		&ast.LetExpr{Name: "b", Type: mapt(nt("String"), nt("Int")), Value: m()},
+		&ast.DiscardExpr{Value: &ast.BinaryExpr{Op: "!=", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error comparing two Map values with !=")
+	}
+}
+
+func TestCheck_SetEqualityIsAnError(t *testing.T) {
+	s := func() *ast.SetOrMapLit { return &ast.SetOrMapLit{Elems: []ast.Expr{&ast.IntLit{Value: 1}}} }
+	f := mainFile(
+		&ast.LetExpr{Name: "a", Type: sett(nt("Int")), Value: s()},
+		&ast.LetExpr{Name: "b", Type: sett(nt("Int")), Value: s()},
+		&ast.DiscardExpr{Value: &ast.BinaryExpr{Op: "==", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error comparing two Set values with ==")
+	}
+}
+
+func TestCheck_ArrayEqualityIsValid(t *testing.T) {
+	arr := func() *ast.ListLit {
+		return &ast.ListLit{Elems: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}}}
+	}
+	f := mainFile(
+		&ast.LetExpr{Name: "a", Type: at(nt("Int"), 2), Value: arr()},
+		&ast.LetExpr{Name: "b", Type: at(nt("Int"), 2), Value: arr()},
+		&ast.DiscardExpr{Value: &ast.BinaryExpr{Op: "==", Left: &ast.IdentExpr{Name: "a"}, Right: &ast.IdentExpr{Name: "b"}}},
+		&ast.IntLit{Value: 0},
+	)
+	// Array (a Go native fixed-size array) compares element-wise and stays
+	// unaffected by the List/Map/Set == rejection above — verified against
+	// the real amivm/go build pipeline during this review (amifl-spec.md
+	// section 2.3).
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
 func TestCheck_EnumStructNameCollisionIsAnError(t *testing.T) {
 	f := mainFile(&ast.IntLit{Value: 0})
 	f.Decls = append(f.Decls, statusEnumDecl(), &ast.StructDecl{Name: "Status"})
