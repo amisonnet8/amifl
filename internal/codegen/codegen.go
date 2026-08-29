@@ -780,7 +780,7 @@ func (g *gen) genWhileStmt(v *ast.WhileExpr) error {
 func (g *gen) genValue(e ast.Expr) (string, error) {
 	switch v := e.(type) {
 	case *ast.IntLit:
-		return strconv.FormatUint(v.Value, 10), nil
+		return intLitToken(v), nil
 	case *ast.FloatLit:
 		return formatFloatLit(v.Value), nil
 	case *ast.BoolLit:
@@ -957,7 +957,7 @@ func (g *gen) genUnaryValue(v *ast.UnaryExpr) (string, error) {
 func literalToken(e ast.Expr, negate bool) (string, bool) {
 	switch v := e.(type) {
 	case *ast.IntLit:
-		s := strconv.FormatUint(v.Value, 10)
+		s := intLitToken(v)
 		if negate {
 			return "-" + s, true
 		}
@@ -981,6 +981,19 @@ func literalToken(e ast.Expr, negate bool) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// intLitToken renders v as an AMIVM integer literal token: v.Token (the
+// exact source text, base prefix/underscores included, ex7) when the AST
+// node came from the parser, or a plain decimal re-derivation from
+// v.Value as a fallback for a Token-less node (any hand-built *ast.IntLit
+// with no Token set — parser.go's own literal path is the only production
+// code that ever constructs one, but plenty of tests build one directly).
+func intLitToken(v *ast.IntLit) string {
+	if v.Token != "" {
+		return v.Token
+	}
+	return strconv.FormatUint(v.Value, 10)
 }
 
 // formatFloatLit renders v as an AMIVM float-shaped literal token,

@@ -1,0 +1,30 @@
+// ex7 (amifl-spec.md section 3.1): hex/octal/binary integer literals and
+// the digit-separator `_`.
+
+fn main() -> Int {
+    let hexMask: Int = 0xFF
+    let hexNibble: Int = hexMask & 0x0_F
+    let octPerm: Int = 0o17
+    let binFlags: Int = 0b1010
+
+    let bigCount: Int = 1_000_000
+    let smallPart: Int = bigCount / 1_000
+
+    let negHex: Int = -0x10
+    let negOct: Int = -0o10
+    let negBin: Int = -0b1000
+
+    let floatWithSep: Float = 1_000.5
+
+    print(hexMask)
+    print(hexNibble)
+    print(octPerm)
+    print(binFlags)
+    print(smallPart)
+    print(negHex)
+    print(negOct)
+    print(negBin)
+    print(floatWithSep)
+
+    hexNibble + octPerm + binFlags + smallPart + negHex + negOct + negBin
+}

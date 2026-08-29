@@ -1082,8 +1082,22 @@ type StringLit struct {
 // represent UInt64's full range; a literal is always written without a
 // sign (amifl-spec.md section 3.1), so it's never itself negative — a
 // negative value is a UnaryExpr{Op: "-"} wrapping one of these instead.
+//
+// Token is the exact source text as lexed (base prefix and '_' digit
+// separators included verbatim, e.g. "0x1_A", ex7) — codegen emits this
+// directly as the AMIVM literal token rather than re-deriving decimal text
+// from Value, since amivm's own upgraded literal grammar
+// (ignored/amivm/amivm_spec.md section 6) accepts these forms "そのまま"
+// (as-is) and its documented negative-literal examples (`-0x1A` etc.) are
+// exactly "-" prepended to a raw token like this one — codegen.go's
+// literalToken already prepends "-" this same way for a decimal Token, so
+// no new negation logic was needed. Value still carries the fully-parsed
+// magnitude regardless of base, and is what every semantic check (range/
+// overflow, capability dispatch, ...) operates on — Token only ever
+// matters to codegen's literal rendering.
 type IntLit struct {
 	Value uint64
+	Token string
 	Line  int
 }
 

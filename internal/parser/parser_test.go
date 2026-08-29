@@ -2009,3 +2009,51 @@ func TestParse_QualifiedTypeAnnotation(t *testing.T) {
 		t.Fatalf("got %#v, want QualifiedType{Alias: \"mathutil\", Name: \"Point\"}", fn.Params[0].Type)
 	}
 }
+
+// --- ex7: hex/octal/binary integer literals, digit-separator `_`
+// (amifl-spec.md section 3.1) ---
+
+// TestParse_HexOctalBinaryIntLiteralsResolveToTheirDecimalValue confirms
+// the parser's strconv.ParseUint(text, 0, 64) call (base 0, so the
+// lexer's own token text picks the base) computes the right magnitude
+// regardless of which base the source used, and that IntLit.Token keeps
+// the exact source text for codegen (ast.IntLit's own doc comment).
+func TestParse_HexOctalBinaryIntLiteralsResolveToTheirDecimalValue(t *testing.T) {
+	for _, tc := range []struct {
+		src       string
+		wantValue uint64
+	}{
+		{"0x1A", 26},
+		{"0o17", 15},
+		{"0b101", 5},
+		{"1_000_000", 1000000},
+		{"0x1_A", 26},
+	} {
+		f, err := Parse("fn main() -> Int {\n    " + tc.src + "\n}\n")
+		if err != nil {
+			t.Fatalf("Parse(%q) error: %v", tc.src, err)
+		}
+		lit, ok := parseFuncMain(t, f).Body.Exprs[0].(*ast.IntLit)
+		if !ok {
+			t.Fatalf("Parse(%q): body[0] is %T, want *ast.IntLit", tc.src, parseFuncMain(t, f).Body.Exprs[0])
+		}
+		if lit.Value != tc.wantValue {
+			t.Errorf("Parse(%q): got Value %d, want %d", tc.src, lit.Value, tc.wantValue)
+		}
+		if lit.Token != tc.src {
+			t.Errorf("Parse(%q): got Token %q, want %q", tc.src, lit.Token, tc.src)
+		}
+	}
+}
+
+// TestParse_MalformedDigitForBaseIsAnError confirms a digit invalid for
+// its own base (lexed as one token, per lexer_test.go's
+// TestNext_MalformedPrefixedLiteralLexesAsOneTokenNotSplit) is caught here
+// by strconv.ParseUint's own error, wrapped into the parser's usual
+// "invalid integer literal" message.
+func TestParse_MalformedDigitForBaseIsAnError(t *testing.T) {
+	_, err := Parse("fn main() -> Int {\n    0o18\n}\n")
+	if err == nil {
+		t.Fatal("expected an error: 8 isn't a valid octal digit")
+	}
+}

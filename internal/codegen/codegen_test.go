@@ -3113,6 +3113,63 @@ func TestGenerate_FormatWithCallsAmiflrtFormatWith(t *testing.T) {
 	}
 }
 
+// --- ex7: hex/octal/binary integer literals, digit-separator `_`
+// (amifl-spec.md section 3.1) ---
+
+// TestGenerate_IntLitEmitsItsOwnRawTokenText confirms codegen prefers
+// ast.IntLit.Token (the exact source text, ex7) over re-deriving decimal
+// digits from Value — amivm's own upgraded literal grammar
+// (ignored/amivm/amivm_spec.md section 6) accepts a hex/octal/binary/
+// underscored token "そのまま" (as-is), so there's no reason to lose that
+// formatting on the way through.
+func TestGenerate_IntLitEmitsItsOwnRawTokenText(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 26, Token: "0x1_A"})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "RET\t0x1_A") {
+		t.Errorf("expected the raw token 0x1_A to pass through unchanged; got:\n%s", ir)
+	}
+}
+
+// TestGenerate_IntLitWithNoTokenFallsBackToDecimal is a regression guard
+// for every hand-built *ast.IntLit{Value: N} across this test file (and
+// any other Token-less node) — Token empty must still render Value in
+// plain decimal, exactly as codegen did before ex7.
+func TestGenerate_IntLitWithNoTokenFallsBackToDecimal(t *testing.T) {
+	f := mainFile(&ast.IntLit{Value: 42})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "RET\t42") {
+		t.Errorf("expected a Token-less IntLit to render its Value in decimal; got:\n%s", ir)
+	}
+}
+
+// TestGenerate_UnaryMinusOfHexLiteralInlinesAsNegativeRawToken mirrors
+// TestGenerate_UnaryMinusOfLiteralInlinesAsNegativeLiteral, but over a hex
+// literal — amivm's own grammar documents "-0x1A" as a valid signed
+// literal token (section 6), and literalToken's existing "prepend '-' to
+// whatever the literal's own token text is" logic (codegen.go) needed no
+// change at all to produce it.
+func TestGenerate_UnaryMinusOfHexLiteralInlinesAsNegativeRawToken(t *testing.T) {
+	f := mainFile(
+		&ast.UnaryExpr{Op: "-", Operand: &ast.IntLit{Value: 26, Token: "0x1A"}, ResolvedType: "Int64"},
+	)
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if !strings.Contains(ir, "RET\t-0x1A") {
+		t.Errorf("expected -0x1A to inline as a bare negative literal (no VAR/SUB); got:\n%s", ir)
+	}
+	if strings.Contains(ir, "SUB") {
+		t.Errorf("did not expect a SUB instruction for negating a literal; got:\n%s", ir)
+	}
+}
+
 // TestGenerate_ExitCastsInt64ToNativeIntBeforeOsExit is a regression test
 // for the same "os.Exit takes Go's native int, not AmiFL's fixed-width
 // Int64" gotcha codegen.go's own `!main` wrapper already bridges (CLAUDE.md's

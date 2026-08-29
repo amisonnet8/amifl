@@ -256,3 +256,103 @@ func TestNext_Underscore(t *testing.T) {
 		t.Fatalf("unexpected tokens: %+v", toks)
 	}
 }
+
+// --- ex7: hex/octal/binary integer literals, digit-separator `_`
+// (amifl-spec.md section 3.1, ignored/amivm/amivm_spec.md section 6) ---
+
+func TestNext_HexOctalBinaryIntLiterals(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"0x1A", "0x1A"},
+		{"0X1a", "0X1a"},
+		{"0o17", "0o17"},
+		{"0O17", "0O17"},
+		{"0b101", "0b101"},
+		{"0B101", "0B101"},
+	} {
+		toks := tokenize(t, tc.src)
+		if len(toks) != 2 || toks[0].Kind != Int || toks[0].Value != tc.want {
+			t.Fatalf("tokenize(%q): unexpected tokens: %+v", tc.src, toks)
+		}
+	}
+}
+
+func TestNext_DigitSeparatorInIntAndFloatLiterals(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"1_000_000", "1_000_000"},
+		{"0x1_A", "0x1_A"},
+		{"0o1_7", "0o1_7"},
+		{"0b1_01", "0b1_01"},
+		{"1_000.5", "1_000.5"},
+		{"1_0.5e1_0", "1_0.5e1_0"},
+	} {
+		toks := tokenize(t, tc.src)
+		if len(toks) != 2 || toks[0].Value != tc.want {
+			t.Fatalf("tokenize(%q): unexpected tokens: %+v", tc.src, toks)
+		}
+	}
+}
+
+// TestNext_LeadingZeroDecimalIsAnError is a regression test for a
+// correctness trap ex7 deliberately guards against: strconv.ParseUint's
+// own base-0 mode (used by the parser so hex/octal/binary prefixes
+// resolve correctly) treats a bare "0" prefix as *legacy octal* — so
+// without this lexer-level rejection, "017" would silently parse as 15
+// (octal) instead of the 17 a reader would expect from decimal digits.
+// amivm's own grammar (section 6) already restricts decimal literals to a
+// lone "0" or a run starting 1-9, exactly matching this check.
+func TestNext_LeadingZeroDecimalIsAnError(t *testing.T) {
+	for _, src := range []string{"017", "0_5"} {
+		lx := New(src)
+		if _, err := lx.Next(); err == nil {
+			t.Fatalf("tokenize(%q): expected an error for a leading-zero decimal literal", src)
+		}
+	}
+}
+
+// TestNext_LeadingZeroIsFineForALoneZeroOrAFloat confirms the rejection
+// above doesn't overreach: a bare "0" (no further digits) and "0" as a
+// float's integer part (no octal-legacy ambiguity for floats, since the
+// parser calls strconv.ParseFloat, which has no base-0 prefix behavior at
+// all) both still lex fine.
+func TestNext_LeadingZeroIsFineForALoneZeroOrAFloat(t *testing.T) {
+	toks := tokenize(t, "0 0.5")
+	want := []Kind{Int, Float, EOF}
+	if len(toks) != len(want) {
+		t.Fatalf("got %d tokens, want %d: %+v", len(toks), len(want), toks)
+	}
+	for i, k := range want {
+		if toks[i].Kind != k {
+			t.Errorf("token %d: got Kind %v, want %v; all: %+v", i, toks[i].Kind, k, toks)
+		}
+	}
+}
+
+func TestNext_HexDigitStopsAtNonHexByte(t *testing.T) {
+	// "0x1Ax" — 'x' isn't a valid hex digit, so the literal ends at "0x1A"
+	// and the trailing "x" becomes its own identifier token, exactly like
+	// any other number-immediately-followed-by-identifier adjacency.
+	toks := tokenize(t, "0x1Ax")
+	want := []Kind{Int, Ident, EOF}
+	if len(toks) != len(want) {
+		t.Fatalf("got %d tokens, want %d: %+v", len(toks), len(want), toks)
+	}
+	for i, k := range want {
+		if toks[i].Kind != k {
+			t.Errorf("token %d: got Kind %v, want %v; all: %+v", i, toks[i].Kind, k, toks)
+		}
+	}
+	if toks[0].Value != "0x1A" {
+		t.Errorf("got Int token %q, want \"0x1A\"", toks[0].Value)
+	}
+}
+
+func TestNext_MalformedPrefixedLiteralLexesAsOneTokenNotSplit(t *testing.T) {
+	// "0o18" (8 isn't a valid octal digit) still lexes as a single Int
+	// token — the parser's strconv.ParseUint(text, 0, 64) is what actually
+	// rejects it (lexNumber's own doc comment explains why the digit-set
+	// validity check is deliberately deferred there instead of here).
+	toks := tokenize(t, "0o18")
+	if len(toks) != 2 || toks[0].Kind != Int || toks[0].Value != "0o18" {
+		t.Fatalf("unexpected tokens: %+v", toks)
+	}
+}

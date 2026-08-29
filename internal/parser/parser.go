@@ -1491,14 +1491,21 @@ func (p *parser) parsePrimaryExpr() (ast.Expr, error) {
 		return &ast.StringLit{Value: tok.Value, Line: tok.Line}, nil
 	case lexer.Int:
 		tok := p.cur
-		n, err := strconv.ParseUint(tok.Value, 10, 64)
+		// Base 0: infers the base from tok.Value's own prefix (0x/0o/0b,
+		// or plain decimal otherwise) and accepts '_' digit separators —
+		// exactly amivm's own upgraded literal grammar (ex7,
+		// ignored/amivm/amivm_spec.md section 6). Safe against Go's
+		// legacy "bare 0 prefix means octal" base-0 quirk because the
+		// lexer already rejected any multi-digit token starting with an
+		// unprefixed '0' (lexer.go's lexNumber).
+		n, err := strconv.ParseUint(tok.Value, 0, 64)
 		if err != nil {
 			return nil, fmt.Errorf("line %d: invalid integer literal %q: %w", tok.Line, tok.Value, err)
 		}
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
-		return &ast.IntLit{Value: n, Line: tok.Line}, nil
+		return &ast.IntLit{Value: n, Token: tok.Value, Line: tok.Line}, nil
 	case lexer.Float:
 		tok := p.cur
 		fv, err := strconv.ParseFloat(tok.Value, 64)

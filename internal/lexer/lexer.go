@@ -196,7 +196,7 @@ func (l *Lexer) Next() (Token, error) {
 	case c == '"':
 		return l.lexString(line)
 	case isDigit(c):
-		return l.lexNumber(line), nil
+		return l.lexNumber(line)
 	case isIdentStart(c):
 		return l.lexIdent(line), nil
 	default:
@@ -254,23 +254,51 @@ func (l *Lexer) lexIdent(line int) Token {
 }
 
 // lexNumber reads an integer or floating-point literal (amifl-spec.md
-// section 3.1: "42 ... 3.14 1.23e4"). A '.' only starts a fractional part
-// when followed by a digit — this both rejects a bare trailing '.' and
-// leaves room for a future '.' field-access operator (tuples, step 6) to
-// never be swallowed by a number literal.
-func (l *Lexer) lexNumber(line int) Token {
+// section 3.1: "42 ... 3.14 1.23e4 0x1A 0o17 0b101 1_000_000", ex7). A '.'
+// only starts a fractional part when followed by a digit — this both
+// rejects a bare trailing '.' and leaves room for the '.' field-access
+// operator (tuples, step 6) to never be swallowed by a number literal.
+//
+// ex7 (ignored/amivm/amivm_spec.md section 6, upgraded alongside this
+// change) added hex (`0x1A`)/octal (`0o17`)/binary (`0b101`) integer forms
+// and a digit-separator `_` — the parser hands the raw token text straight
+// to strconv.ParseUint(text, 0, 64)/ParseFloat(text, 64) (base 0 so the
+// prefix picks the base), which already implements amivm's exact
+// underscore-placement rules (no leading/trailing/doubled `_`, matching
+// Go's own numeric-literal grammar) and reports a clear "invalid syntax"
+// error for a malformed one — so this lexer deliberately does *not*
+// re-validate underscore placement or a base's own digit set itself
+// (`0o18`/`0b12` lex as one token same as a well-formed one, then fail at
+// strconv.ParseUint) — it only needs to find the token's *end*.
+func (l *Lexer) lexNumber(line int) (Token, error) {
 	start := l.pos
-	for l.pos < len(l.src) && isDigit(l.src[l.pos]) {
-		l.pos++
+
+	// Prefixed literal: 0x/0X (hex) 0o/0O (octal) 0b/0B (binary). None of
+	// these has a floating-point form (no hex/octal/binary float syntax in
+	// AmiFL, matching amivm's own grammar), so the token ends the moment
+	// the digit-or-underscore run does — no '.'/exponent check needed.
+	if l.src[l.pos] == '0' {
+		var isValidDigit func(byte) bool
+		switch l.byteAt(1) {
+		case 'x', 'X':
+			isValidDigit = isHexDigit
+		case 'o', 'O', 'b', 'B':
+			isValidDigit = isDigit
+		}
+		if isValidDigit != nil {
+			l.pos += 2
+			l.consumeDigitsAndUnderscores(isValidDigit)
+			return Token{Kind: Int, Value: l.src[start:l.pos], Line: line}, nil
+		}
 	}
+
+	l.consumeDigitsAndUnderscores(isDigit)
 
 	isFloat := false
 	if l.pos < len(l.src) && l.src[l.pos] == '.' && isDigit(l.byteAt(1)) {
 		isFloat = true
 		l.pos++
-		for l.pos < len(l.src) && isDigit(l.src[l.pos]) {
-			l.pos++
-		}
+		l.consumeDigitsAndUnderscores(isDigit)
 	}
 
 	if l.pos < len(l.src) && (l.src[l.pos] == 'e' || l.src[l.pos] == 'E') {
@@ -282,14 +310,38 @@ func (l *Lexer) lexNumber(line int) Token {
 
 	text := l.src[start:l.pos]
 	if isFloat {
-		return Token{Kind: Float, Value: text, Line: line}
+		return Token{Kind: Float, Value: text, Line: line}, nil
 	}
-	return Token{Kind: Int, Value: text, Line: line}
+	// amivm's decimal-integer grammar only allows a lone "0", or a run
+	// starting 1-9 (no other leading zero) — anything else starting with
+	// '0' (e.g. "017", "0_5") would otherwise silently reach the parser's
+	// strconv.ParseUint(text, 0, 64) and reparse as *legacy octal* (Go's
+	// base-0 rule: a bare "0" prefix means octal) instead of the decimal
+	// value it looks like — a correctness trap caught here, at lex time,
+	// rather than producing a silently wrong Value.
+	if len(text) > 1 && text[0] == '0' {
+		return Token{}, fmt.Errorf("line %d: a decimal integer literal can't start with a leading zero (%q) — use 0o for octal, or drop the leading zero", line, text)
+	}
+	return Token{Kind: Int, Value: text, Line: line}, nil
 }
 
-// exponentEnd checks for a well-formed exponent suffix ([+-]?digit+)
-// starting at pos (just past the 'e'/'E') and, if found, returns the
-// offset just past its last digit.
+// consumeDigitsAndUnderscores advances l.pos past a maximal run of bytes
+// each satisfying isValidDigit or equal to '_' — see lexNumber's doc
+// comment for why underscore placement isn't validated here.
+func (l *Lexer) consumeDigitsAndUnderscores(isValidDigit func(byte) bool) {
+	for l.pos < len(l.src) && (isValidDigit(l.src[l.pos]) || l.src[l.pos] == '_') {
+		l.pos++
+	}
+}
+
+func isHexDigit(c byte) bool {
+	return isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// exponentEnd checks for a well-formed exponent suffix ([+-]?digit+,
+// digits allowed '_'-separated same as everywhere else, ex7) starting at
+// pos (just past the 'e'/'E') and, if found, returns the offset just past
+// its last digit.
 func (l *Lexer) exponentEnd(pos int) (int, bool) {
 	if pos < len(l.src) && (l.src[pos] == '+' || l.src[pos] == '-') {
 		pos++
@@ -297,7 +349,7 @@ func (l *Lexer) exponentEnd(pos int) (int, bool) {
 	if pos >= len(l.src) || !isDigit(l.src[pos]) {
 		return 0, false
 	}
-	for pos < len(l.src) && isDigit(l.src[pos]) {
+	for pos < len(l.src) && (isDigit(l.src[pos]) || l.src[pos] == '_') {
 		pos++
 	}
 	return pos, true
