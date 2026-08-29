@@ -29,6 +29,10 @@ const (
 	KwFor
 	KwIn
 	KwYield
+	KwExtern
+	KwAs
+	KwBind
+	KwType
 	LParen
 	RParen
 	LBrace
@@ -120,6 +124,14 @@ func (k Kind) String() string {
 		return "'in'"
 	case KwYield:
 		return "'yield'"
+	case KwExtern:
+		return "'extern'"
+	case KwAs:
+		return "'as'"
+	case KwBind:
+		return "'bind'"
+	case KwType:
+		return "'type'"
 	case LParen:
 		return "'('"
 	case RParen:

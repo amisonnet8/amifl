@@ -17,6 +17,8 @@ import (
 // which already checked c.Builtin != "".
 func (g *gen) genBuiltinValue(c *ast.CallExpr) (string, error) {
 	switch c.Builtin {
+	case "typeName":
+		return g.genTypeNameValue(c)
 	case "isError":
 		return g.genIsErrorValue(c)
 	case "cast":
@@ -175,6 +177,27 @@ func (g *gen) genBuiltinStmt(c *ast.CallExpr) error {
 	}
 	_, err := g.genBuiltinValue(c)
 	return err
+}
+
+// genTypeNameValue emits `typeName(v)` (amifl-spec.md section 13.2, step
+// 13) as `fmt.Sprintf("%T", v)` — Go's own reflect-backed verb (via the
+// `fmt` package, already imported for print's own `?fmt.Println`) turns
+// any value at all, `any`-boxed or not, into its Go type's string form
+// with zero amiflrt/ASSERT machinery of its own (CLAUDE.md's
+// design-issue-1 resolution: no runtime type tag is needed anywhere in
+// this feature, on either the producing or consuming end).
+func (g *gen) genTypeNameValue(c *ast.CallExpr) (string, error) {
+	argVal, err := g.genValue(c.Args[0])
+	if err != nil {
+		return "", err
+	}
+	// typeName's one parameter is always "Any" — see boxIntLiteralForAny's
+	// doc comment (extern.go) for exactly which case this guards against.
+	argVal = g.boxIntLiteralForAny(argVal)
+	tmp := g.newTemp()
+	fmt.Fprintf(g.b, "\tVAR\t%%%s\t^string\n", tmp)
+	g.writeCall("%"+tmp, "?fmt.Sprintf", []string{`"%T"`, argVal})
+	return "%" + tmp, nil
 }
 
 // genIsErrorValue emits `isError(v)` (amifl-spec.md section 13.2): a bare

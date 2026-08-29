@@ -26,6 +26,10 @@ var keywords = map[string]Kind{
 	"for":      KwFor,
 	"in":       KwIn,
 	"yield":    KwYield,
+	"extern":   KwExtern,
+	"as":       KwAs,
+	"bind":     KwBind,
+	"type":     KwType,
 }
 
 // Lexer tokenizes AmiFL source text one Token at a time via Next.

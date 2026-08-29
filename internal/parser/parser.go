@@ -107,9 +107,125 @@ func (p *parser) parseTopLevelDecl() (ast.TopLevelDecl, error) {
 		return p.parseStructDecl()
 	case lexer.KwEnum:
 		return p.parseEnumDecl()
+	case lexer.KwExtern:
+		return p.parseExternDecl()
 	default:
-		return nil, p.errorf("expected 'fn', 'const', 'struct', or 'enum' at top level, got %s", p.cur.Kind)
+		return nil, p.errorf("expected 'fn', 'const', 'struct', 'enum', or 'extern' at top level, got %s", p.cur.Kind)
 	}
+}
+
+// parseExternDecl parses `extern "path" as alias { type Name ... bind
+// Name(params) -> Ret [as GoTarget] ... }` (amifl-spec.md section 15) —
+// step 13. `type`/`bind` entries are newline-separated, one per line,
+// mirroring parseEnumDecl's variant layout.
+func (p *parser) parseExternDecl() (*ast.ExternDecl, error) {
+	kwTok, err := p.expect(lexer.KwExtern)
+	if err != nil {
+		return nil, err
+	}
+	pathTok, err := p.expect(lexer.String)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.KwAs); err != nil {
+		return nil, err
+	}
+	aliasTok, err := p.expect(lexer.Ident)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.LBrace); err != nil {
+		return nil, err
+	}
+	if err := p.skipNewlines(); err != nil {
+		return nil, err
+	}
+	var types []ast.ExternTypeDecl
+	var binds []ast.ExternBindDecl
+	for p.cur.Kind != lexer.RBrace {
+		switch p.cur.Kind {
+		case lexer.KwType:
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			nameTok, err := p.expect(lexer.Ident)
+			if err != nil {
+				return nil, err
+			}
+			types = append(types, ast.ExternTypeDecl{Name: nameTok.Value, Line: nameTok.Line})
+		case lexer.KwBind:
+			bind, err := p.parseExternBind()
+			if err != nil {
+				return nil, err
+			}
+			binds = append(binds, bind)
+		default:
+			return nil, p.errorf("expected 'type' or 'bind' inside extern block, got %s", p.cur.Kind)
+		}
+		if p.cur.Kind == lexer.RBrace {
+			break
+		}
+		if p.cur.Kind != lexer.Newline {
+			return nil, p.errorf("expected newline after extern block entry, got %s", p.cur.Kind)
+		}
+		if err := p.skipNewlines(); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RBrace); err != nil {
+		return nil, err
+	}
+	return &ast.ExternDecl{Path: pathTok.Value, Alias: aliasTok.Value, Types: types, Binds: binds, Line: kwTok.Line}, nil
+}
+
+// parseExternBind parses one `bind Name(params) -> Ret [as GoTarget]`
+// entry — GoTarget (see ExternBindDecl's doc comment) is either a bare
+// identifier or a `Type.Method` pair, both just an Ident optionally
+// followed by `.` Ident, so one shared tail handles both shapes.
+func (p *parser) parseExternBind() (ast.ExternBindDecl, error) {
+	if err := p.advance(); err != nil { // consume 'bind'
+		return ast.ExternBindDecl{}, err
+	}
+	nameTok, err := p.expect(lexer.Ident)
+	if err != nil {
+		return ast.ExternBindDecl{}, err
+	}
+	if _, err := p.expect(lexer.LParen); err != nil {
+		return ast.ExternBindDecl{}, err
+	}
+	params, err := p.parseParamList()
+	if err != nil {
+		return ast.ExternBindDecl{}, err
+	}
+	if _, err := p.expect(lexer.Arrow); err != nil {
+		return ast.ExternBindDecl{}, err
+	}
+	retType, err := p.parseTypeExpr()
+	if err != nil {
+		return ast.ExternBindDecl{}, err
+	}
+	goTarget := ""
+	if p.cur.Kind == lexer.KwAs {
+		if err := p.advance(); err != nil {
+			return ast.ExternBindDecl{}, err
+		}
+		t1Tok, err := p.expect(lexer.Ident)
+		if err != nil {
+			return ast.ExternBindDecl{}, err
+		}
+		goTarget = t1Tok.Value
+		if p.cur.Kind == lexer.Dot {
+			if err := p.advance(); err != nil {
+				return ast.ExternBindDecl{}, err
+			}
+			t2Tok, err := p.expect(lexer.Ident)
+			if err != nil {
+				return ast.ExternBindDecl{}, err
+			}
+			goTarget += "." + t2Tok.Value
+		}
+	}
+	return ast.ExternBindDecl{Name: nameTok.Value, GoTarget: goTarget, Params: params, ReturnType: retType, Line: nameTok.Line}, nil
 }
 
 // parseEnumDecl parses `enum Name { Variant1 [(field1: Type1, ...)] ... }`

@@ -205,7 +205,7 @@ Cascade（15ステップ）と同等の規模感。AmiFLはCascadeに無かっ�
 | 10 ✅ | `Set[T]`・`Map[K,V]` | リテラル・集合演算・`for k, v in m` | `MPTYPE` `MPMAKE` `MSET` `MGET` `MPKEYS` | 設計課題5（下記「確定した設計判断」参照） |
 | 11 ✅ | 組み込み関数・`capability`多相・`?`演算子/エラー処理 | 13.2〜13.7節一式（型変換・データ操作・数値）、`Tuple2[T, Error]`規約・後置`?`のsema展開。フェーズ分割で実施：11a✅（`Error`型・`?`演算子・`cast[T]`/`parse[T]`ブラケット構文・`isError`・組み込み関数dispatch基盤）→11b✅（13.4節データ操作28関数）→11c✅（13.5/13.6節Set/Map専用）→11d✅（13.7節数値・`unwrap`/`okOr`） | （`amiflrt`+ネイティブ命令の混在） | 設計課題6（capability多相の実装方式、下記「確定した設計判断」参照） |
 | 12 ✅ | ファイルI/O・`Stream[T]`・並列処理 | `open`/`read`/`lines`等、`Stream[T]`＝`Chan[T]`+goroutineの糖衣、`spawn`/`send`/`recv`/`parallel` | `CHTYPE` `CHMAKE` `CHSEND` `CHRECV` `SPAWN` `DEFER`（`SEL`系は結局不要だった——下記「確定した設計判断」参照） | — |
-| 13 | `extern`機構 | Go資産バインド（15.1〜15.4節）、`Any`型境界の実装方式確定 | `ASSERT`（要否は設計課題1による） | **設計課題1（先例無し・最大の山場の1つ）** |
+| 13 ✅ | `extern`機構 | Go資産バインド（15.1〜15.4節）、`Any`型境界の実装方式確定 | `METHVAL`（`ASSERT`は結局不要だった——下記「確定した設計判断」参照） | 設計課題1（`Any`/externの値境界、下記「確定した設計判断」参照） |
 | 14 | モジュール | `import`/エイリアス/可視性/循環禁止（12節） | — | — |
 | 15 | パイプラインDX機能・CLI・配布 | `tap`/`peek`、ステージ番号付き型エラー表示、CLI（16.2節）実装、`amiflrt`の`go:embed`配布、CI | — | 設計課題8 |
 
@@ -637,6 +637,55 @@ Step 10のSet[T]/Map[T,Bool]（構造的に同じGo mapだが別々の`MPTYPE`�
 `amifl-spec.md` 2.2節の「不透明なファイルハンドル、フィールド・メソッド無し」という制約を、`internal/codegen/codegen.go`の`goTypeNames["File"] = "*amiflrt.FileHandle"`という1行の追加で満たした——`File`はStep6のstruct等とは異なり`STTYPE`/`FIELD`をAmiFL側で発行しない（`amiflrt/file.go`が定義する、AmiFLからは中身の見えないGo構造体をそのままポインタとして持ち回るだけ）。`FileHandle`は`*os.File`と遅延初期化の`*bufio.Reader`を持ち、`readLine`/`lines`のバッファリング読み取りに使う。`readLine`/`lines`の行末処理は`\n`（と、CRLFファイル対応で末尾の`\r`も）を毎回トリムする——「行の値そのものに終端記号は含まれない」という一般的な行指向読み取りの直感に合わせた。
 
 **実地検証（`amivm`→`go build`→実行、`-race`ビルドでの複数回実行も含む）で確認した項目**：`examples/streams_io.aml`——`chan[Int]`+`send`/`recv`+`spawn`によるgoroutine間の値の受け渡し、`open`/`write`/`close`によるファイル書き込み、`lines`でStream化したファイルを`take`で先頭2行だけ取り出し`collect`でListへ、別途`skip`で残りを読み飛ばして`collect`、`parallel`によるNワーカー中継後の`collect`（要素順序に依存しない集計方法で検証）、`for line in stream { ... }`（Body形）、`write(stdout(), ...)`。生成されたIRを目視確認し、`take`/`skip`/`lines`がいずれも`CLOS`+`DEFER ?close`+`SPAWN`の中継として、`collect`が`amiflrt.Push`を使う同期ループとして、`parallel`が`amiflrt.ParallelStream`への単純なCALLとして下がっていることを確認。実行結果は終了コード38（`chanTotal(6)+writtenN(9)+l0+l1(4)+l2(4)+parallelTotal(6)+forStreamTotal(6)+outN(3)=38`という手計算と一致）を、通常ビルドと`go build -race`ビルドの両方で5回ずつ実行し、常に同じ終了コード・データ競合の報告無しで再現することを確認した。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。**これでStep 12（ファイルI/O・`Stream[T]`・並列処理）を完了した。**
+
+### `extern`/`bind`の呼び出しは常に裸の名前——`namespace.Name(...)`という呼び出し構文は導入しなかった（Step 13で確定・仕様の表記ゆれを修正）
+
+着手前にユーザーへ確認したところ、`amifl-spec.md` 15.2節「AmiFLに`.`を使ったメソッド呼び出し構文は存在しない」という明文規定と、同じ節の使用例`time.Now() |> TimeFormat(_, ...)`（`time.Now`がドット付きで書かれている）が矛盾していることが判明した——ユーザーの判断で後者を仕様の表記ミスと確定し、`Now() |> TimeFormat(_, ...)`（裸の名前呼び出しに統一）へ修正した。これにより`extern "パス" as 名前空間 { bind ... }`の`名前空間`（`as`の右辺）は**AmiFLソース内では一切参照されない**——コンパイラが生成コードへ挿入するGo importのエイリアス（amivmの`-i alias=path`マッピング、下記参照）としてのみ使われる。`bind`された名前はそのまま、`fn`と全く同じグローバルスコープの裸の名前としてAmiFLから呼び出す（`internal/sema/expr.go`の`resolveCallExpr`が`fc.funcs[v.Callee]`から解決する際、`fn`由来かextern bind由来かを一切区別しない——両者は同じ`funcSig`テーブルを共有する）。この判断により`ast.CallExpr.Callee`が「常に裸の名前」という既存の不変条件（Step 1以来）を一切崩さずに済んだ——新しい呼び出し構文をパーサーに追加する必要が無かった。
+
+### Goメソッドのbindは`as Type.Method`構文＋`METHVAL`で実現した——AMIVM本体への機能要求は不要だった（Step 13で確定・設計上最大の論点の1つ）
+
+`amifl-spec.md` 15.2節の`bind TimeUnix(t: Time) -> Int // Go: (t Time) Unix() int64`という例は、AmiFL側の名前（`TimeUnix`）とGo側の実名（`Unix`）が異なる——AmiFLは関数オーバーロード禁止（原則4）のため、複数の型が同名メソッド（例えば複数の型がそれぞれ`Format`を持つ）を持つ場合、bind名を書き分ける必要があるが、**実際にどのGoメソッドを呼ぶかを伝える構文が仕様に明記されていなかった**。着手時にユーザーへ設計方針を確認し、「bind構文にGo側の名前を明示する」方向で確定させた。
+
+具体的な構文は`bind Name(params) -> Ret [as GoTarget]`——`GoTarget`は省略可能（省略時は`Name`と同じパッケージレベル関数）で、書く場合は2形式をドットの有無で区別する：
+
+- 裸の識別子（`as Marshal`）：`Name`とは異なる名前のパッケージレベル関数への単純なリネーム
+- `Type.Method`（`as Time.Unix`）：メソッドbind。`Type`は`bind`の**第1引数の宣言型と完全一致**必須（`internal/sema/extern.go`の`registerExternBind`が検証）——一致しない場合・引数が0個の場合はいずれもコンパイルエラー
+
+**コード生成方式**：AMIVMの`callname`オペランドは`?xxx.xxx`という**ドット1個まで**しか許さない（`ignored/amivm/amivm_spec.md`の`callname`オペランドカテゴリ表で確認済み）ため、`?time.Time.Unix`のような3要素のドット区切り（Goのmethod expression構文）を`CALL`へ直接埋め込むことはできない。ここで気づいた解決策が`METHVAL`（`local := variable.method`、Step 5以来「AmiFLでは出番が無い見込み」と申し送っていた命令）——`METHVAL %m <レシーバー値> <メソッド名`でメソッド値を取得してから`CALL %result : %m 残りの引数...`する、という2命令構成で完全に実現できた。**AMIVM本体への機能要求は不要だった**——CLAUDE.mdが事前に警告していた「ロジック上正しそうに見えるだけで次のステップへ進まない」という慎重さの結果、既存命令の組み合わせで足りることを実装前に発見できた。
+
+`internal/sema/extern.go`の`registerExternBind`が`GoTarget`のドット位置で2形式を判定し、`funcSig`に`externCallee`（プレーン関数、`"?alias.GoName"`)または`externMethod`（メソッド名のみ、レシーバーは常に呼び出し側の`Args[0]`）のどちらか一方だけをセットする。`internal/sema/expr.go`の`resolveCallExpr`はこれを`ast.CallExpr.CalleeToken`/`ExternMethod`へそのままコピーするだけ（Step5以来の「semaが計算した情報をASTへアノテーションし、codegenは読むだけ」パターンの直接の延長）。`internal/codegen/extern.go`の`externCallee`ヘルパーが、`ExternMethod`が空でなければ`METHVAL`を発行してから残りの引数（`Args[1:]`）だけを渡す——レシーバーは`METHVAL`が値へ既に折り込むため、Goの`t.Unix()`同様、呼び出し時に二重に渡す必要が無い。
+
+### `Any`型の実行時表現はGoの`any`そのもの——`ASSERT`もreflectベースのamiflrtヘルパーも一切不要だった（Step 13で確定・設計課題1の解決、当初の想定より単純化できた）
+
+設計課題1は当初「`Any`が絡むbindはreflect相当（`ASSERT`+`amiflrt`ヘルパー）に倒す」というハイブリッド設計を想定していたが、実装を始めて`amifl-spec.md` 13節の組み込み関数一覧を精査した結果、**AmiFLには`Any`型の値を具体型へ絞り込む（narrowingする）手段が1つも存在しない**ことに気づいた——`typeName`（動的型名を返すだけ）・`isError`（`Error`専用、`Any`ではない）・`print`系（`Any`を消費するだけで具体型を取り出さない）のいずれも、Go風の型アサーションに相当する機能を提供しない。つまり`Any`値は「他のextern呼び出しへそのまま渡す」「`typeName`で型名だけ覗く」以外の使い道が構造上存在せず、**AmiFLの型システムがAny値を絞り込む必要に迫られる場面が原理的に無い**——Weaveが`gofunc`のreflect経由呼び出しを必要としたのは「呼び出し先の具体型が静的に分からないから」だったが、AmiFLの`extern bind`宣言は常に引数・戻り値の型（`Any`を含め）を宣言時点で確定させるため、この動機自体が最初から存在しなかった。
+
+実装は驚くほど単純になった：`internal/codegen/codegen.go`の`goTypeNames["Any"] = "any"`という1行だけ。**Anyパラメータへ値を渡す方向**は、Goの暗黙のインターフェース変換（具体型の値を`interface{}`引数へ渡す際、変換コード無しでそのまま渡せる）にそのまま乗るだけで済み、`CALL`が生成する引数は普段と全く変わらない。**Any値を消費する方向**（`Any`型の値を別の具体型が期待される場所へ渡そうとする）は、原則2（暗黙変換の排除）どおり拒否する必要があるが、これは`internal/sema/expr.go`の`checkExpr`が既に持つ「`expected`と`typ`が一致しなければエラー」という一般ロジックへ何も足さずとも自然に機能する——`typ`（実際に流れてきた値の型）が`"Any"`で`expected`が具体型なら、単純な文字列不一致として弾かれる。**唯一追加したのは逆方向のバイパス**（`expected == "Any"`のときは`typ`が何であっても許可する）だけで、`ASSERT`はおろか、専用の型判定ロジックさえ1行も要らなかった。
+
+**発見したバグ①**：`checkExpr`の`expected == "Any"`バイパスを素朴に実装すると、`resolveType(e, expected)`へ`"Any"`をそのまま渡してしまい、整数リテラル引数（`someExternFn(5)`）が`resolveIntLit`の「`target`が数値型でなければエラー」という判定に引っかかって拒否される——`"Any"`は数値型ではないため。対策は`checkExpr`内で`expected == "Any"`のときだけ`resolveType`へは`""`（無コンテキスト）を渡す（=リテラルは自身のデフォルト型で解決させる）が、`expected`とtypの一致チェック自体は引き続きスキップする、という2段構えにしたこと。
+
+**発見したバグ②（`go build`まで通して初めて発覚、実地検証必須の教訓が再び効いた例）**：整数リテラル引数がAny境界を越える際、`genValue`が返す値トークンはGoの**無型定数**（例：`"5"`、型注釈なし）のままCALLへ渡される。Goは無型定数を`interface{}`（`any`）へboxingする際、**その定数自身のデフォルト型**（整数なら`int`）を採用する——sema側が`checkExpr`のリテラル解決で「無コンテキストなら`Int64`」と決めていても、それは**AmiFLコンパイラの意味論上の決定**であって、生成されたGoコード自身にはその決定を伝える型注釈が一切残っていない。結果、`typeName(5)`が`"int64"`ではなく`"int"`を返す、という実際に`amivm`→`go build`→実行まで通して初めて発覚したバグを踏んだ（IRの見た目だけでは全く分からない——Goの無型定数の挙動というGo言語自体の意味論に起因するため）。対策は`internal/codegen/extern.go`の`boxIntLiteralForAny`——値トークンの先頭文字が数字または`-`で、かつ`.`/`e`/`E`を含まない（＝整数リテラルらしい）ときだけ、`CALL %tmp : ?int64 <値>`という明示キャストを挟んでから渡す。浮動小数点リテラルはGoの無型浮動小数点定数のデフォルト（`float64`）が`resolveFloatLit`の無コンテキストデフォルトと**既に一致する**ため対策不要、変数参照（`%`/`$`/`&`始まりのトークン）は宣言時に確定した型を持つため無条件で対策不要——この2条件を"数字/`-`始まり"という1文字判定だけで確実に選り分けられる（AMIVMの値トークンは他の全ての形〈変数・真偽値・文字列・`nil`〉が非数字で始まるため）。同じ処理は`typeName`組み込み（`internal/codegen/builtins.go`の`genTypeNameValue`、引数は常に`Any`）にも共通で使う。
+
+### `type Name`（extern型）はGo側の型名と常に同一——リネーム構文は無い、`==`可否は仕様上未規定のまま素通り（Step 13で確定・意図的なスコープ限定）
+
+`extern`ブロック内の`type Name`宣言は、`internal/sema/scope.go`の`checker.externTypes`（存在確認のみの集合）と`internal/codegen/codegen.go`の`program.externTypes`（`AmiFL名 -> "alias.Name"`）という、sema側・codegen側で完全に独立した2つの薄いテーブルで表現した——Tuple/List/Array/Set/Map/Chan/Streamのような「AmiFL正規型文字列につき1つの合成Go型」パターンとは異なり、**extern型はGo側の型が最初から実在する**ため、`STTYPE`/`SLTYPE`等のAMIVM型宣言を一切発行しない（`resolveGoType`が`program.externTypes`を直接引いて`"alias.Name"`を返すだけ）。`bind`の`as GoTarget`のような別名機構は`type`には設けなかった——AmiFLの型名は常にGo側の型名と一字一句一致する、という制約だが、これまでに書いた全ての例で不便を感じておらず、具体的な要求が出るまで先送りする（Step 6のネストしたTupleカット等と同種の判断）。
+
+`==`/`!=`比較の可否も未規定のまま——`canonicalType`がextern型をstruct/enumと同じ経路で「既知の型」として受理するため、`internal/sema/expr.go`の`resolveBinaryExpr`equalityOps分岐（Func型・enum型のみ明示除外）を素通りし、**Goの`==`がコンパイルできる限りextern型どうしの比較を許可してしまう**——`time.Time`のような比較可能な構造体なら動くが、内部にスライス等を持つ比較不能なGo型を`bind`した場合は`go build`が初めて拒否する（AmiFL側semaはそれを事前に検知できない、既知の限界）。「未知の外部Go型が比較可能かどうかはAmiFLには原理的に分からない」という制約そのものが原因で、enum（Step 8で意図的に比較禁止にした）と違い安全側に倒す決め手が無かったため、この限界を許容してStep 13のスコープに含めないことにした。
+
+### `extern`のエイリアスは、AmiFLコンパイラが生成コード内で既に使っている名前（`os`/`fmt`/`strconv`/`strings`/`math`/`amiflrt`）とGoの予約語全体を予約リストで防御する（Step 13で確定・実装前に気づいた地雷）
+
+amivmの`-i alias=path`は生成コードの先頭に**明示的な**`import alias "path"`を追加する（CLAUDE.mdの「amivmのインストール・呼び出し方」参照）。もしユーザーが`extern "何か" as os { ... }`のように、AmiFLコンパイラ自身が内部的に使っている`os`（`?os.Exit`）と同じエイリアスを異なるパスへ割り当てると、生成されたGoファイル内で`os`という識別子が**ユーザーのextern importに上書きされ**、コンパイラ自身の`os.Exit`呼び出しまで壊れる——Goのimportエイリアスと予約語（`int64`・`len`・`panic`・`close`・`delete`等の組み込み識別子含む）は1ファイル内で同じ名前空間を共有するため。`internal/sema/extern.go`の`reservedExternAliases`が、コンパイラが実際に使っている全パッケージエイリアス（`grep`で全codegenファイルを機械的に洗い出して確定）とGoの予約済み識別子全体（型・組み込み関数・定数）を防御的に列挙し、`registerExternTypes`がこの表と衝突する`as alias`を拒否する。実際に問題を踏んでから対策したのではなく、実装前の設計検討段階で気づいて先回りした——将来codegenが新しいGo標準ライブラリ・組み込み識別子を使うようになっても、今のうちに広めに予約しておけば同じ地雷を再び踏むことはない。
+
+### `STTYPE`/`ENDSTTYPE`ブロックの内側でネストした型宣言を発行してはいけない——`genStructDecl`/`tupleGoTypeName`/`genEnumDecl`の3箇所に共通する、Step 6以来ずっと潜在していたバグをStep 13で発見・修正した
+
+`examples/extern.aml`（`Tuple2[Bytes, Error]`を返す`bind`）を`amivm`にかけたところ、`"IR parse error: only FIELD can be used inside STTYPE: SLTYPE ..."`というエラーで失敗した。原因は`tupleGoTypeName`（`internal/codegen/structs.go`）が`STTYPE`ヘッダー行を書いた**直後に**、各フィールドの型を`resolveGoType`で解決するループへ入っていたこと——`Tuple2[Bytes, Error]`の`Bytes`（`List[UInt8]`のエイリアス）がプログラム中で初めて登場すると、`resolveGoType`が`listGoTypeName`を呼び、`listGoTypeName`は**その場で**`SLTYPE`宣言を同じ`typeHeader`バッファへ書き込む——結果、まだ閉じていない`STTYPE`ブロックの途中に`SLTYPE`が挟まってしまう。
+
+同じ「ブロックを開いてから、ネストした型解決をループの中で行う」というパターンは`genStructDecl`（ユーザー`struct`宣言）と`genEnumDecl`（`enum`宣言）にも存在しており、**Step 6/Step 8の時点からずっと潜在していたバグ**だった——これまでの全examplesがstruct/enumのフィールドにList/Array/Set/Map/Tuple/Chan/Stream型を一度も使っていなかった（常にスカラーか別のstruct/enum型のみ）ため、3箇所とも一度も踏まれずに済んでいた。Step 13のextern機構が「プログラム中で初めて登場する複合型」を組み合わせやすい機能（`Tuple2[Bytes, Error]`のような戻り値）だったことで、初めて実地検証を通して顕在化した。
+
+対策は3箇所とも同じ形：**全フィールドのGo型をブロックのヘッダー行を書く前に解決し尽くしてから**、ブロック全体を書き出す（`goTypes := make([]string, len(fields)); for i, f := range fields { goTypes[i] = resolveGoType(...) }`を先に実行し、その後で`STTYPE`〜`ENDSTTYPE`を出力）。ネストした型解決（他の`SLTYPE`/`ARTYPE`/`MPTYPE`/`CHTYPE`/入れ子`STTYPE`の発行を含む）は全て「まだ何のブロックも開いていない」タイミングで完了させることで、`typeHeader`バッファへの書き込みが常に「完結した宣言の連続」になることを保証する——一方、List/Array/Set/Map/Chan/Streamの各`GoTypeName`関数（`resolveGoType`呼び出し→1行の型宣言、という単純な形）は元から正しい順序だった（ネストした解決は必ず自分自身の宣言行を書く前に完了している）ため修正不要だった。**「複数行にまたがるブロック型宣言」だけがこの罠を持つ**、という教訓を`amifl_implementation_notes.md`にも記録する。
+
+### 実地検証（`amivm`→`go build`→実行）で確認した項目（Step 13）
+
+`examples/extern.aml`で以下を確認済み：`extern "time" as time { type Time  bind Now() -> Time  bind TimeUnix(t: Time) -> Int as Time.Unix  bind TimeFormat(t: Time, layout: String) -> String as Time.Format }`（`amifl-spec.md` 15.2節の例そのもの、`METHVAL`経由のメソッドbind2種）、`extern "strings" as strs { bind Contains2(s, substr) -> Bool as Contains }`（プレーン関数のリネームbind）、`extern "encoding/json" as json2 { bind Marshal2(v: Any) -> Tuple2[Bytes, Error] as Marshal }`（`Any`引数・Tuple2ネイティブ複数戻り値の組み立て、`String`と`struct`両方をAnyへ渡すケース）、`typeName(5)`/`typeName(now)`（リテラルboxing対策・extern型の動的型名取得）。生成されたIRを目視確認し、`METHVAL`+`CALL`のペア・`?json2.Marshal`への複数戻り値`CALL`+`FSET`によるTuple2組み立て・`?fmt.Sprintf "%T"`によるtypeName実装が想定どおりであることを確認。実行結果は終了コード12（`unixOk(1)+formattedLen(4)+hasFooVal(1)+bytesLen(4)+hasErrVal(0)+tn1(1)+tn2(1)=12`という手計算と一致）を確認。加えて、予約エイリアス衝突・エイリアス重複宣言・メソッドbindのレシーバー型不一致・`Any`値の具体型への暗黙狭窄化（拒否されるべき方向）をそれぞれ手動でCLIから確認し、いずれも期待どおりコンパイルエラーになることを確認した。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存の`examples/`全ファイルに回帰が無いことも確認済み。**これでStep 13（`extern`機構）を完了した——Step 8（enum）・Step 11（capability多相）と並んで「先例無し」と警戒されていた3領域が全て完了し、コア言語機能はモジュール（Step 14）とDX/配布（Step 15）を残すのみとなった。**
 
 ## 開発の進め方
 

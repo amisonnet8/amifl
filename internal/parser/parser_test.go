@@ -1497,6 +1497,100 @@ func TestParse_StreamTypeAnnotationParsesAsNestedBracket(t *testing.T) {
 	}
 }
 
+// --- step 13: extern/bind ---
+
+func parseExternDeclNamed(t *testing.T, f *ast.File, alias string) *ast.ExternDecl {
+	t.Helper()
+	for _, decl := range f.Decls {
+		if ext, ok := decl.(*ast.ExternDecl); ok && ext.Alias == alias {
+			return ext
+		}
+	}
+	t.Fatalf("no extern block aliased %q found", alias)
+	return nil
+}
+
+func TestParse_ExternPlainFunctionBind(t *testing.T) {
+	src := "extern \"encoding/json\" as json {\n" +
+		"    bind Marshal(v: Any) -> Tuple2[Bytes, Error]\n" +
+		"}\n" +
+		"fn main() -> Int {\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	ext := parseExternDeclNamed(t, f, "json")
+	if ext.Path != "encoding/json" {
+		t.Fatalf("got Path %q, want \"encoding/json\"", ext.Path)
+	}
+	if len(ext.Binds) != 1 {
+		t.Fatalf("got %d binds, want 1", len(ext.Binds))
+	}
+	b := ext.Binds[0]
+	if b.Name != "Marshal" || b.GoTarget != "" {
+		t.Fatalf("got Name=%q GoTarget=%q, want Name=\"Marshal\" GoTarget=\"\"", b.Name, b.GoTarget)
+	}
+	if len(b.Params) != 1 || b.Params[0].Name != "v" || namedTypeName(b.Params[0].Type) != "Any" {
+		t.Fatalf("got Params %#v, want one param v:Any", b.Params)
+	}
+	tt, ok := b.ReturnType.(*ast.TupleType)
+	if !ok || len(tt.Elems) != 2 {
+		t.Fatalf("got ReturnType %#v, want Tuple2[...]", b.ReturnType)
+	}
+}
+
+func TestParse_ExternMethodStyleBindAsTypeDotMethod(t *testing.T) {
+	src := "extern \"time\" as time {\n" +
+		"    type Time\n" +
+		"    bind TimeUnix(t: Time) -> Int as Time.Unix\n" +
+		"}\n" +
+		"fn main() -> Int {\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	ext := parseExternDeclNamed(t, f, "time")
+	if len(ext.Types) != 1 || ext.Types[0].Name != "Time" {
+		t.Fatalf("got Types %#v, want [Time]", ext.Types)
+	}
+	if len(ext.Binds) != 1 {
+		t.Fatalf("got %d binds, want 1", len(ext.Binds))
+	}
+	b := ext.Binds[0]
+	if b.Name != "TimeUnix" || b.GoTarget != "Time.Unix" {
+		t.Fatalf("got Name=%q GoTarget=%q, want Name=\"TimeUnix\" GoTarget=\"Time.Unix\"", b.Name, b.GoTarget)
+	}
+}
+
+func TestParse_ExternBindRenameWithoutDot(t *testing.T) {
+	src := "extern \"encoding/json\" as json {\n" +
+		"    bind Marshal2(v: Any) -> Tuple2[Bytes, Error] as Marshal\n" +
+		"}\n" +
+		"fn main() -> Int {\n    0\n}\n"
+	f, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	ext := parseExternDeclNamed(t, f, "json")
+	if ext.Binds[0].GoTarget != "Marshal" {
+		t.Fatalf("got GoTarget %q, want \"Marshal\"", ext.Binds[0].GoTarget)
+	}
+}
+
+func TestParse_ExternRejectsUnknownEntry(t *testing.T) {
+	src := "extern \"foo\" as foo {\n    let x = 1\n}\nfn main() -> Int {\n    0\n}\n"
+	if _, err := Parse(src); err == nil {
+		t.Fatal("expected an error for a non type/bind entry inside an extern block")
+	}
+}
+
+func TestParse_ExternRequiresAsAlias(t *testing.T) {
+	src := "extern \"foo\" {\n    bind F() -> Int\n}\nfn main() -> Int {\n    0\n}\n"
+	if _, err := Parse(src); err == nil {
+		t.Fatal("expected an error for an extern block missing 'as alias'")
+	}
+}
+
 func TestParse_ChanElemTypeAnnotation(t *testing.T) {
 	src := "fn main() -> Int {\n    let ch: Chan[Int] = chan[Int](0)\n    0\n}\n"
 	f, err := Parse(src)

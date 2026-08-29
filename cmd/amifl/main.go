@@ -154,7 +154,7 @@ func runEmitIR(args []string) error {
 		return err
 	}
 
-	ir, err := compileToIR(srcPath)
+	ir, _, err := compileToIR(srcPath)
 	if err != nil {
 		return err
 	}

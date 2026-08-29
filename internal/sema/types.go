@@ -74,6 +74,9 @@ func (c *checker) canonicalType(name string) (string, bool) {
 	if _, ok := c.enums[name]; ok {
 		return name, true
 	}
+	if c.externTypes[name] {
+		return name, true
+	}
 	return "", false
 }
 

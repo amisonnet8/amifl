@@ -484,7 +484,12 @@ extern "encoding/json" as json {
 }
 ```
 
-`extern "パス" as 名前空間 { bind ... }`はGoパッケージをホワイトリスト方式で取り込む。
+`extern "パス" as 名前空間 { bind ... }`はGoパッケージをホワイトリスト方式で取り込む。`bind`されたGo関数は、`名前空間.関数名`のような修飾なしに、AmiFLのグローバルスコープへ直接束縛される裸の名前として呼び出す（`.`を使った呼び出し構文は存在しない——後述15.2節）。`名前空間`（`as`の右辺）はAmiFLソース内では参照されず、コンパイラが生成コードに挿入するGo importのエイリアスとしてのみ使われる。
+
+`bind`のGo側の実際の呼び出し対象は、既定では`Name`（bind名）と完全に同じ名前のパッケージレベル関数だが、`as GoTarget`で明示的に指定できる（Step 13で確定。関数のオーバーロードを禁止するAmiFLでは、AmiFL側の名前とGoの実際の関数名が食い違う場面——同名メソッドを複数の型がそれぞれ持つ場合等（15.2節参照）——が起こりうるため）。`GoTarget`は次の2形式のいずれか：
+
+- 裸の識別子（例: `as Marshal`）：`Name`とは異なる名前のパッケージレベル関数を指す
+- `Type.Method`（例: `as Time.Unix`）：15.2節のメソッドバインド専用。ドットの有無で2形式を区別する
 
 ### 15.2 Goのメソッドの扱い
 
@@ -494,16 +499,16 @@ extern "encoding/json" as json {
 extern "time" as time {
     type Time
     bind Now() -> Time
-    bind TimeUnix(t: Time) -> Int                      // Go: (t Time) Unix() int64
-    bind TimeFormat(t: Time, layout: String) -> String  // Go: (t Time) Format(layout string) string
+    bind TimeUnix(t: Time) -> Int as Time.Unix
+    bind TimeFormat(t: Time, layout: String) -> String as Time.Format
 }
 
 fn todayString() -> String {
-    time.Now() |> TimeFormat(_, "2006-01-02")
+    Now() |> TimeFormat(_, "2006-01-02")
 }
 ```
 
-AmiFLに`.`を使ったメソッド呼び出し構文は存在しない（`.`はフィールド／タプルアクセス専用、3.2節・3.3節）。よってGo側のメソッド名がそのまま使えるとは限らず、型名を接頭辞にするなどして関数のオーバーロード禁止（原則4）と衝突しないよう命名する必要がある。この命名は`extern`ブロックを書く側の責務とし、コンパイラによる自動解決は行わない。
+AmiFLに`.`を使ったメソッド呼び出し構文は存在しない（`.`はフィールド／タプルアクセス専用、3.2節・3.3節）。よってGo側のメソッド名がそのまま使えるとは限らず、型名を接頭辞にするなどして関数のオーバーロード禁止（原則4）と衝突しないよう命名する必要がある。この命名は`extern`ブロックを書く側の責務とし、コンパイラによる自動解決は行わない——実際にどのGoメソッドを呼ぶかは、`bind`の`as Type.Method`節（第1引数がレシーバ、`Type`はその宣言型と一致必須）で明示する。
 
 ### 15.3 複数文にまたがるGoロジックが必要な場合
 

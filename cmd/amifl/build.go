@@ -52,27 +52,30 @@ func copyAmiflrt(dir string) error {
 	return nil
 }
 
-// compileToIR reads and compiles srcPath down to AMIVM-IR text. Step 1
-// only accepts a single .aml file — package directories and .amlz
-// archives arrive with modules (see CLAUDE.md's implementation step
-// plan).
-func compileToIR(srcPath string) (string, error) {
+// compileToIR reads and compiles srcPath down to AMIVM-IR text, plus one
+// amivm `-i alias=path` mapping string per `extern` block the source
+// declares (codegen.ExternImportMappings, step 13) — compileToGo appends
+// these to the fixed amiflrt mapping it always passes, so every generated
+// `?alias.Xxx`/METHVAL callname resolves deterministically. Step 1 only
+// accepts a single .aml file — package directories and .amlz archives
+// arrive with modules (see CLAUDE.md's implementation step plan).
+func compileToIR(srcPath string) (ir string, externImports []string, err error) {
 	src, err := os.ReadFile(srcPath)
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", srcPath, err)
+		return "", nil, fmt.Errorf("read %s: %w", srcPath, err)
 	}
 	file, err := parser.Parse(string(src))
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", srcPath, err)
+		return "", nil, fmt.Errorf("%s: %w", srcPath, err)
 	}
 	if err := sema.Check(file); err != nil {
-		return "", fmt.Errorf("%s: %w", srcPath, err)
+		return "", nil, fmt.Errorf("%s: %w", srcPath, err)
 	}
-	ir, err := codegen.Generate(file)
+	ir, err = codegen.Generate(file)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", srcPath, err)
+		return "", nil, fmt.Errorf("%s: %w", srcPath, err)
 	}
-	return ir, nil
+	return ir, codegen.ExternImportMappings(file), nil
 }
 
 // compileToGo runs compileToIR and then the external amivm CLI, returning
@@ -81,7 +84,7 @@ func compileToIR(srcPath string) (string, error) {
 // directory to be a Go module (CLAUDE.md's "amivmのインストール・呼び出し方"),
 // so a minimal go.mod is written alongside the IR file.
 func compileToGo(srcPath string, verbose bool) (goSrc string, workDir string, err error) {
-	ir, err := compileToIR(srcPath)
+	ir, externImports, err := compileToIR(srcPath)
 	if err != nil {
 		return "", "", err
 	}
@@ -113,6 +116,9 @@ func compileToGo(srcPath string, verbose bool) (goSrc string, workDir string, er
 
 	goPath := filepath.Join(workDir, "main.go")
 	args := []string{irPath, "-o", goPath, "-i", amiflrtImportMapping}
+	for _, mapping := range externImports {
+		args = append(args, "-i", mapping)
+	}
 	if verbose {
 		args = append(args, "-v")
 	}

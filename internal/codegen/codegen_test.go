@@ -2136,3 +2136,205 @@ func TestGenerate_WriteAssemblesTuple2FromWriteFileCall(t *testing.T) {
 		t.Errorf("generated IR missing %q; got:\n%s", want, ir)
 	}
 }
+
+// --- step 13: extern/bind (Any/extern value boundary, CLAUDE.md design issue 1) ---
+
+func TestGenerate_ExternPlainBindEmitsQualifiedCallAndAssemblesTuple2(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "Marshal", ResolvedType: "Tuple(List(UInt8),Error)",
+		CalleeToken:      "?json.Marshal",
+		Args:             []ast.Expr{&ast.IdentExpr{Name: "v", ResolvedType: "String", Token: "%v_1"}},
+		ExternParamTypes: []string{"Any"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "m", Token: "%m_1", ResolvedType: "Tuple(List(UInt8),Error)", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"SLTYPE\t^AmiflList1\t^uint8",
+		"CALL\t%amifl_tmp1\t%amifl_tmp2\t:\t?json.Marshal\t%v_1",
+		"FSET\t%amifl_tmp3\t>F0\t%amifl_tmp1",
+		"FSET\t%amifl_tmp3\t>F1\t%amifl_tmp2",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_ExternBindRenameUsesGoTargetAsCallname(t *testing.T) {
+	// sema always resolves CalleeToken to the effective Go-side name
+	// (GoTarget if the `bind` gave one, else the bind's own Name — see
+	// registerExternBind) — codegen never sees GoTarget itself, only the
+	// already-resolved CalleeToken, so this is really the same code path
+	// as the plain-bind test above; kept as its own test to document that
+	// a rename is genuinely indistinguishable from an un-renamed bind by
+	// the time codegen runs (CLAUDE.md's "semaが計算した情報をASTへアノ
+	// テーションし、codegenは読むだけ" pattern).
+	call := &ast.CallExpr{
+		Callee: "Marshal2", ResolvedType: "Unit",
+		CalleeToken:      "?json.Marshal",
+		Args:             []ast.Expr{&ast.IdentExpr{Name: "v", ResolvedType: "String", Token: "%v_1"}},
+		ExternParamTypes: []string{"Any"},
+	}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := "CALL\t:\t?json.Marshal\t%v_1"; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+	}
+}
+
+func TestGenerate_ExternMethodBindZeroArgsEmitsMethvalThenCall(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "TimeUnix", ResolvedType: "Int64",
+		ExternMethod:     "Unix",
+		Args:             []ast.Expr{&ast.IdentExpr{Name: "t", ResolvedType: "Time", Token: "%t_1"}},
+		ExternParamTypes: []string{"Time"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "u", Token: "%u_1", ResolvedType: "Int64", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"METHVAL\t%amifl_tmp1\t%t_1\t<Unix",
+		"CALL\t%amifl_tmp2\t:\t%amifl_tmp1\n",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_ExternMethodBindWithExtraArgEmitsMethvalThenCallWithRemainingArgs(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "TimeFormat", ResolvedType: "String",
+		ExternMethod: "Format",
+		Args: []ast.Expr{
+			&ast.IdentExpr{Name: "t", ResolvedType: "Time", Token: "%t_1"},
+			&ast.StringLit{Value: "2006"},
+		},
+		ExternParamTypes: []string{"Time", "String"},
+	}
+	f := mainFile(&ast.LetExpr{Name: "s", Token: "%s_1", ResolvedType: "String", Value: call}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"METHVAL\t%amifl_tmp1\t%t_1\t<Format",
+		"CALL\t%amifl_tmp2\t:\t%amifl_tmp1\t\"2006\"",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_ExternAnyParamBoxesBareIntLiteral(t *testing.T) {
+	// A bare integer literal passed directly to an Any-typed extern
+	// parameter must be explicitly cast to int64 before boxing — Go's own
+	// untyped-constant default ("int") would otherwise silently disagree
+	// with the "int64" sema's literal-defaulting actually resolved it to.
+	// Self-caught by actually running examples/extern.aml's typeName(5)
+	// through the full pipeline (CLAUDE.md's step-13 notes) before ever
+	// writing this test — not derived from reading the code alone.
+	call := &ast.CallExpr{
+		Callee: "Marshal", ResolvedType: "Unit",
+		CalleeToken:      "?json.Marshal",
+		Args:             []ast.Expr{&ast.IntLit{Value: 5}},
+		ExternParamTypes: []string{"Any"},
+	}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"VAR\t%amifl_tmp1\t^int64",
+		"CALL\t%amifl_tmp1\t:\t?int64\t5",
+		"CALL\t:\t?json.Marshal\t%amifl_tmp1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+}
+
+func TestGenerate_ExternAnyParamLeavesVariableArgUnboxed(t *testing.T) {
+	call := &ast.CallExpr{
+		Callee: "Marshal", ResolvedType: "Unit",
+		CalleeToken:      "?json.Marshal",
+		Args:             []ast.Expr{&ast.IdentExpr{Name: "v", ResolvedType: "Int64", Token: "%v_1"}},
+		ExternParamTypes: []string{"Any"},
+	}
+	f := mainFile(call, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := "CALL\t:\t?json.Marshal\t%v_1"; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+	}
+	if strings.Contains(ir, "?int64") {
+		t.Errorf("didn't expect an int64 cast for an already-typed variable argument; got:\n%s", ir)
+	}
+}
+
+func TestGenerate_TypeNameBoxesBareIntLiteralButNotAVariable(t *testing.T) {
+	litCall := &ast.CallExpr{Callee: "typeName", Builtin: "typeName", ResolvedType: "String", Args: []ast.Expr{&ast.IntLit{Value: 5}}, ArgTypes: []string{"Int64"}}
+	f := mainFile(&ast.LetExpr{Name: "tn", Token: "%tn_1", ResolvedType: "String", Value: litCall}, &ast.IntLit{Value: 0})
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"CALL\t%amifl_tmp1\t:\t?int64\t5",
+		"CALL\t%amifl_tmp2\t:\t?fmt.Sprintf\t\"%T\"\t%amifl_tmp1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+
+	varCall := &ast.CallExpr{Callee: "typeName", Builtin: "typeName", ResolvedType: "String", Args: []ast.Expr{&ast.IdentExpr{Name: "v", ResolvedType: "Int64", Token: "%v_1"}}, ArgTypes: []string{"Int64"}}
+	f2 := mainFile(&ast.LetExpr{Name: "tn", Token: "%tn_1", ResolvedType: "String", Value: varCall}, &ast.IntLit{Value: 0})
+	ir2, err := Generate(f2)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := "CALL\t%amifl_tmp1\t:\t?fmt.Sprintf\t\"%T\"\t%v_1"; !strings.Contains(ir2, want) {
+		t.Errorf("generated IR missing %q; got:\n%s", want, ir2)
+	}
+	if strings.Contains(ir2, "?int64") {
+		t.Errorf("didn't expect an int64 cast for an already-typed variable argument; got:\n%s", ir2)
+	}
+}
+
+func TestGenerate_ExternTypeResolvesToAliasQualifiedGoType(t *testing.T) {
+	f := &ast.File{
+		Decls: []ast.TopLevelDecl{
+			&ast.ExternDecl{Path: "time", Alias: "time", Types: []ast.ExternTypeDecl{{Name: "Time"}}},
+			&ast.FuncDecl{
+				Name: "main", ReturnType: nt("Int"), ResolvedReturnType: "Int64",
+				Body: &ast.Block{Exprs: []ast.Expr{
+					&ast.LetExpr{Name: "now", Token: "%now_1", ResolvedType: "Time", Value: &ast.CallExpr{
+						Callee: "Now", ResolvedType: "Time", CalleeToken: "?time.Now",
+					}},
+					&ast.IntLit{Value: 0},
+				}},
+			},
+		},
+	}
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if want := "VAR\t%now_1\t^time.Time"; !strings.Contains(ir, want) {
+		t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+	}
+}

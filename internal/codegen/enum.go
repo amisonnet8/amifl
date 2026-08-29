@@ -30,13 +30,28 @@ import (
 // has already matched, so which variant is "really" live is always known
 // by construction, not by inspecting the otherwise-unused fields.
 func genEnumDecl(prog *program, d *ast.EnumDecl) {
-	fmt.Fprintf(&prog.typeHeader, "STTYPE\t^%s\n", d.Name)
-	prog.typeHeader.WriteString("\tFIELD\t>Tag\t^int\n")
+	// Every field's Go type is resolved before this STTYPE's own header
+	// line is written — see genStructDecl's identical fix/doc comment for
+	// why interleaving resolveGoType calls with FIELD lines is wrong (a
+	// first-use List/Array/Set/Map/Tuple/Chan/Stream field type would mint
+	// its own nested type declaration mid-block otherwise).
+	type fieldEntry struct {
+		name   string
+		goType string
+	}
+	var fields []fieldEntry
 	for _, variant := range d.Variants {
 		for _, f := range variant.Fields {
-			goType := prog.resolveGoType(f.ResolvedType)
-			fmt.Fprintf(&prog.typeHeader, "\tFIELD\t>%s_%s\t^%s\n", variant.Name, f.Name, goType)
+			fields = append(fields, fieldEntry{
+				name:   variant.Name + "_" + f.Name,
+				goType: prog.resolveGoType(f.ResolvedType),
+			})
 		}
+	}
+	fmt.Fprintf(&prog.typeHeader, "STTYPE\t^%s\n", d.Name)
+	prog.typeHeader.WriteString("\tFIELD\t>Tag\t^int\n")
+	for _, fe := range fields {
+		fmt.Fprintf(&prog.typeHeader, "\tFIELD\t>%s\t^%s\n", fe.name, fe.goType)
 	}
 	prog.typeHeader.WriteString("ENDSTTYPE\n")
 }

@@ -64,6 +64,9 @@ func (p *program) resolveGoType(t string) string {
 	if isStreamType(t) {
 		return p.streamGoTypeName(t)
 	}
+	if goName, ok := p.externTypes[t]; ok {
+		return goName
+	}
 	if goType, ok := goTypeNames[t]; ok {
 		return goType
 	}
@@ -85,6 +88,13 @@ func (p *program) tupleGoTypeName(canonical string) string {
 		return name
 	}
 	elems := tupleTypeParts(canonical)
+	// Resolved before this STTYPE's own header line is written — see
+	// genStructDecl's identical fix/doc comment for why interleaving would
+	// be wrong (a nested SLTYPE/etc. minted mid-block).
+	goTypes := make([]string, len(elems))
+	for i, e := range elems {
+		goTypes[i] = p.resolveGoType(e)
+	}
 	p.tupleSeq++
 	name := fmt.Sprintf("AmiflTuple%d", p.tupleSeq)
 	if p.tupleTypes == nil {
@@ -93,8 +103,7 @@ func (p *program) tupleGoTypeName(canonical string) string {
 	p.tupleTypes[canonical] = name
 
 	fmt.Fprintf(&p.typeHeader, "STTYPE\t^%s\n", name)
-	for i, e := range elems {
-		goType := p.resolveGoType(e)
+	for i, goType := range goTypes {
 		fmt.Fprintf(&p.typeHeader, "\tFIELD\t>F%d\t^%s\n", i, goType)
 	}
 	p.typeHeader.WriteString("ENDSTTYPE\n")
@@ -110,10 +119,24 @@ func (p *program) tupleGoTypeName(canonical string) string {
 // guarantees amivm's own IR parsing doesn't — see Generate's existing
 // comment on the identical concern for FNTYPE).
 func genStructDecl(prog *program, d *ast.StructDecl) {
+	// Every field's Go type is resolved *before* this STTYPE's own header
+	// line is written, not interleaved field-by-field — resolveGoType can
+	// itself mint and emit a brand-new nested type declaration (a List/
+	// Array/Set/Map/Tuple/Chan/Stream field's first-ever use anywhere in
+	// the program) directly into this same prog.typeHeader builder, and
+	// amivm's IR parser rejects anything but FIELD lines appearing between
+	// an STTYPE and its ENDSTTYPE — interleaving would splice that nested
+	// declaration into the middle of *this* still-open block. (Found via
+	// step 13's extern.aml actually triggering it for a first-use
+	// Tuple2[Bytes,Error] — see tupleGoTypeName's identical fix and
+	// CLAUDE.md's step 13 notes.)
+	goTypes := make([]string, len(d.Fields))
+	for i, f := range d.Fields {
+		goTypes[i] = prog.resolveGoType(f.ResolvedType)
+	}
 	fmt.Fprintf(&prog.typeHeader, "STTYPE\t^%s\n", d.Name)
-	for _, f := range d.Fields {
-		goType := prog.resolveGoType(f.ResolvedType)
-		fmt.Fprintf(&prog.typeHeader, "\tFIELD\t>%s\t^%s\n", f.Name, goType)
+	for i, f := range d.Fields {
+		fmt.Fprintf(&prog.typeHeader, "\tFIELD\t>%s\t^%s\n", f.Name, goTypes[i])
 	}
 	prog.typeHeader.WriteString("ENDSTTYPE\n")
 }

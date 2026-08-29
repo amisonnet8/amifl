@@ -28,12 +28,20 @@ const reservedMainName = "amifl_main"
 // (structs, enums, collections, capability resolution, ...) grows across
 // later steps — see CLAUDE.md's implementation step plan.
 func Check(f *ast.File) error {
-	c := &checker{globals: map[string]*binding{}, funcs: map[string]funcSig{}, structs: map[string]*structInfo{}, enums: map[string]*enumInfo{}}
+	c := &checker{
+		globals:       map[string]*binding{},
+		funcs:         map[string]funcSig{},
+		structs:       map[string]*structInfo{},
+		enums:         map[string]*enumInfo{},
+		externTypes:   map[string]bool{},
+		externAliases: map[string]string{},
+	}
 
 	var consts []*ast.ConstDecl
 	var funcs []*ast.FuncDecl
 	var structs []*ast.StructDecl
 	var enums []*ast.EnumDecl
+	var externs []*ast.ExternDecl
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *ast.ConstDecl:
@@ -44,21 +52,29 @@ func Check(f *ast.File) error {
 			structs = append(structs, d)
 		case *ast.EnumDecl:
 			enums = append(enums, d)
+		case *ast.ExternDecl:
+			externs = append(externs, d)
 		default:
 			return fmt.Errorf("sema: unknown top-level declaration %T", decl)
 		}
 	}
 
-	// Pass 0: register every struct's and enum's name (0a) and then their
-	// fields/variants (0b), before anything else — a `fn`'s param/return
-	// type, a `const`'s annotation/initializer, a struct field, or an enum
-	// variant's own field can all name a struct or enum type regardless of
-	// where in the file (or even which of the two declaration kinds) it's
-	// declared. registerStructName/registerEnumName each check *both*
-	// c.structs and c.enums for a name collision, so running structs before
-	// enums here still catches a struct/enum sharing one name regardless of
-	// which of the two comes first in the file (whichever is registered
-	// second finds the first already present).
+	// Pass 0: register every extern block's own alias plus its `type`
+	// entries, then every struct's and enum's name (0a), and then structs'/
+	// enums' fields/variants (0b), before anything else — a `fn`'s param/
+	// return type, a `const`'s annotation/initializer, a struct field, or
+	// an enum variant's own field can all name a struct, enum, or extern
+	// type regardless of where in the file (or which of the three
+	// declaration kinds) it's declared. registerStructName/registerEnumName
+	// each check c.structs, c.enums, *and* c.externTypes for a name
+	// collision (registerExternTypes running first here is what makes that
+	// last check meaningful), so a struct/enum/extern-type sharing one name
+	// is caught regardless of which of the three comes first in the file.
+	for _, ext := range externs {
+		if err := c.registerExternTypes(ext); err != nil {
+			return err
+		}
+	}
 	for _, st := range structs {
 		if err := c.registerStructName(st); err != nil {
 			return err
@@ -94,10 +110,21 @@ func Check(f *ast.File) error {
 	// Pass 1: register every function's signature (and validate its own
 	// parameter list) before checking any body, so a call can reference a
 	// function declared later in the file, or itself, or another function
-	// that in turn calls back into it.
+	// that in turn calls back into it. Every extern bind's own signature is
+	// registered here too (into the same c.funcs table a `fn` uses — see
+	// registerExternBind), so a bind can likewise be called before or after
+	// its own declaration, and a `fn` can call into a bind exactly as it
+	// would call another `fn`.
 	for _, fn := range funcs {
 		if err := c.registerFuncSig(fn); err != nil {
 			return err
+		}
+	}
+	for _, ext := range externs {
+		for bi := range ext.Binds {
+			if err := c.registerExternBind(ext.Alias, &ext.Binds[bi]); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -174,6 +201,9 @@ func (c *checker) registerStructName(d *ast.StructDecl) error {
 	if _, exists := c.enums[d.Name]; exists {
 		return fmt.Errorf("line %d: %q is already declared as an enum", d.Line, d.Name)
 	}
+	if _, exists := c.externTypes[d.Name]; exists {
+		return fmt.Errorf("line %d: %q is already declared as an extern type", d.Line, d.Name)
+	}
 	c.structs[d.Name] = &structInfo{Name: d.Name}
 	return nil
 }
@@ -190,6 +220,9 @@ func (c *checker) registerEnumName(d *ast.EnumDecl) error {
 	}
 	if _, exists := c.structs[d.Name]; exists {
 		return fmt.Errorf("line %d: %q is already declared as a struct", d.Line, d.Name)
+	}
+	if _, exists := c.externTypes[d.Name]; exists {
+		return fmt.Errorf("line %d: %q is already declared as an extern type", d.Line, d.Name)
 	}
 	c.enums[d.Name] = &enumInfo{Name: d.Name}
 	return nil

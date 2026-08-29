@@ -1,0 +1,46 @@
+extern "time" as time {
+    type Time
+    bind Now() -> Time
+    bind TimeUnix(t: Time) -> Int as Time.Unix
+    bind TimeFormat(t: Time, layout: String) -> String as Time.Format
+}
+
+extern "strings" as strs {
+    bind Contains2(s: String, substr: String) -> Bool as Contains
+}
+
+extern "encoding/json" as json2 {
+    bind Marshal2(v: Any) -> Tuple2[Bytes, Error] as Marshal
+}
+
+struct Point {
+    x: Int,
+    y: Int
+}
+
+fn main() -> Int {
+    let now = Now()
+    let unixSeconds = TimeUnix(now)
+    let unixOk = if unixSeconds > 0 { 1 } else { 0 }
+
+    let formatted = now |> TimeFormat(_, "2006")
+    let formattedLen = len(formatted)
+
+    let hasFoo = Contains2("foobar", "foo")
+    let hasFooVal = if hasFoo { 1 } else { 0 }
+
+    let marshaled = Marshal2("hi")
+    let bytesLen = len(marshaled.0)
+    let hasErrVal = if isError(marshaled.1) { 1 } else { 0 }
+
+    let p = Point{x: 3, y: 4}
+    let structMarshaled = Marshal2(p)
+    _ = structMarshaled.0
+
+    let tn1 = if typeName(5) == "int64" { 1 } else { 0 }
+    let tn2 = if typeName(now) == "time.Time" { 1 } else { 0 }
+
+    print(formatted)
+
+    unixOk + formattedLen + hasFooVal + bytesLen + hasErrVal + tn1 + tn2
+}

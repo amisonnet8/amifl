@@ -47,6 +47,17 @@ var goTypeNames = map[string]string{
 	// except through 13.10's built-ins, so a bare pointer type with no
 	// AmiFL-visible fields/methods is all codegen ever needs to know.
 	"File": "*amiflrt.FileHandle",
+	// Any (amifl-spec.md section 2.2, step 13) is Go's own `any` — no
+	// synthesized wrapper type needed at all, since every place an Any
+	// value is produced or consumed already goes through a plain CALL
+	// whose Go-side signature genuinely reads `any` (an extern bind's own
+	// declared Any parameter/return, or typeName's %T-based
+	// implementation), and Go boxes/unboxes `any` implicitly at both
+	// those boundaries with zero codegen of its own (sema's checkExpr
+	// "Any" bypass is what makes the *type-checking* side of this equally
+	// free of any ASSERT/reflect machinery — see CLAUDE.md's
+	// design-issue-1 resolution).
+	"Any": "any",
 }
 
 // Generate lowers a sema-checked AmiFL file into AMIVM-IR text. Step 5
@@ -61,13 +72,25 @@ func Generate(f *ast.File) (string, error) {
 
 	prog := &program{}
 	// User `struct`/`enum` declarations are emitted first, ahead of every
-	// function body — see genStructDecl's/genEnumDecl's doc comments.
+	// function body — see genStructDecl's/genEnumDecl's doc comments. Every
+	// extern `type Name` (step 13) is registered into prog.externTypes here
+	// too — resolveGoType consults it before falling back to goTypeNames,
+	// mapping the AmiFL name straight to "alias.Name" with no STTYPE/FNTYPE
+	// of its own to emit (an opaque Go-native type needs no AMIVM type
+	// declaration at all, unlike every other case resolveGoType handles).
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *ast.StructDecl:
 			genStructDecl(prog, d)
 		case *ast.EnumDecl:
 			genEnumDecl(prog, d)
+		case *ast.ExternDecl:
+			for _, t := range d.Types {
+				if prog.externTypes == nil {
+					prog.externTypes = map[string]string{}
+				}
+				prog.externTypes[t.Name] = d.Alias + "." + t.Name
+			}
 		}
 	}
 
@@ -110,6 +133,24 @@ func Generate(f *ast.File) (string, error) {
 	b.WriteString("ENDFUNC\n")
 
 	return b.String(), nil
+}
+
+// ExternImportMappings returns one amivm `-i alias=path` mapping string
+// (CLAUDE.md's "amivmのインストール・呼び出し方") per extern block in f —
+// cmd/amifl/build.go appends these to the fixed amiflrt mapping it always
+// passes, so every `?alias.Xxx`/METHVAL callname genExternCallValue/
+// genExternCallStmt emit resolves deterministically regardless of whether
+// alias happens to already match the target package's own name (sema's
+// registerExternTypes has already rejected a colliding or reserved alias
+// by the time codegen ever runs, so no validation is needed here).
+func ExternImportMappings(f *ast.File) []string {
+	var mappings []string
+	for _, decl := range f.Decls {
+		if ext, ok := decl.(*ast.ExternDecl); ok {
+			mappings = append(mappings, ext.Alias+"="+ext.Path)
+		}
+	}
+	return mappings
 }
 
 func findMain(f *ast.File) *ast.FuncDecl {
@@ -352,6 +393,9 @@ func (g *gen) genCallStmt(c *ast.CallExpr) error {
 	if c.Builtin != "" {
 		return g.genBuiltinStmt(c)
 	}
+	if isExternCall(c) {
+		return g.genExternCallStmt(c)
+	}
 	calleeToken, err := g.calleeToken(c)
 	if err != nil {
 		return err
@@ -370,6 +414,9 @@ func (g *gen) genCallStmt(c *ast.CallExpr) error {
 func (g *gen) genCallValue(c *ast.CallExpr) (string, error) {
 	if c.Builtin != "" {
 		return g.genBuiltinValue(c)
+	}
+	if isExternCall(c) {
+		return g.genExternCallValue(c)
 	}
 	calleeToken, err := g.calleeToken(c)
 	if err != nil {

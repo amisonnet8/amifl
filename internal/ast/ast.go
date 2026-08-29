@@ -218,6 +218,72 @@ type EnumVariant struct {
 	Line   int
 }
 
+// ExternDecl is a top-level `extern "path" as alias { type Name ... bind
+// Name(params) -> Ret [as GoTarget] ... }` declaration (amifl-spec.md
+// section 15) — step 13's mechanism for binding Go package assets. Alias
+// is used two ways: as the amivm `-i alias=path` import mapping codegen
+// requests (cmd/amifl/build.go's ExternImportMappings) so `?alias.Xxx`
+// resolves deterministically regardless of whether alias happens to match
+// the package's own name, and as the literal prefix codegen emits for
+// every plain-function bind's callname. There is deliberately no AmiFL-
+// level `alias.Name(...)` call syntax (amifl-spec.md section 15.2 rules
+// this out explicitly: "AmiFLに`.`を使ったメソッド呼び出し構文は存在しな
+// い") — every bind (and, symmetrically, every extern type) becomes an
+// ordinary bare top-level name in scope, sharing FuncDecl's/StructDecl's
+// no-overloading namespace (sema's registerExternBind/registerExternTypes
+// check collisions against c.funcs/c.structs/c.enums/c.globals exactly
+// like a `fn`/`struct` declaration would).
+type ExternDecl struct {
+	Path  string
+	Alias string
+	Types []ExternTypeDecl
+	Binds []ExternBindDecl
+	Line  int
+}
+
+// ExternTypeDecl is one `type Name` entry inside an ExternDecl — an opaque
+// Go type (amifl-spec.md section 2.2's "Anyとは異なり、具体的な1つのGo型
+// を指す不透明な型"-style handle, the same treatment File already gets)
+// with no AmiFL-visible fields or operators. codegen maps it straight to
+// `alias.Name` (no separate Go-side rename knob, unlike ExternBindDecl's
+// GoTarget — a deliberate step-13 scope cut: every example needing this
+// so far names the AmiFL type identically to the Go type it wraps).
+type ExternTypeDecl struct {
+	Name string
+	Line int
+}
+
+// ExternBindDecl is one `bind Name(params) -> Ret [as GoTarget]` entry
+// (amifl-spec.md section 15.1/15.2). GoTarget is empty when the `as`
+// clause is omitted, meaning "call the package-level Go function named
+// Name verbatim" (15.1's common case — `bind Marshal(...) -> ...` calls
+// `alias.Marshal`). Written explicitly, GoTarget takes one of two shapes,
+// told apart by whether it contains a `.`:
+//
+//   - a bare identifier: still a plain package-level function, just under
+//     a different Go name than Name (renaming to dodge a collision with
+//     another bind already using Name, or simply for AmiFL-side clarity);
+//   - `Type.Method`: amifl-spec.md section 15.2's method-as-function
+//     convention. Params[0]'s declared type must equal Type exactly (sema's
+//     registerExternBind checks this) — it supplies the receiver value,
+//     dispatched at codegen time via AMIVM's METHVAL (`local :=
+//     receiver.method`) rather than a plain CALL, since AMIVM's callname
+//     grammar has no way to spell a package-qualified method-expression
+//     name directly (only one `.` is ever allowed in a callname token).
+//     Every call site's sema resolution copies just the bare method name
+//     onto that CallExpr's own ExternMethod field (never GoTarget itself,
+//     nor the Type prefix — codegen only ever needs the method name, since
+//     the receiver comes from evaluating Args[0], not from a fixed token).
+type ExternBindDecl struct {
+	Name       string
+	GoTarget   string
+	Params     []Param
+	ReturnType TypeExpr
+	Line       int
+
+	ResolvedReturnType string // filled by sema, mirrors FuncDecl's own field
+}
+
 // ConstDecl is a `const` declaration (amifl-spec.md section 4): a
 // compile-time-only binding that is inlined at every reference site
 // rather than compiled to a runtime variable. It doubles as both a
@@ -382,6 +448,26 @@ type CallExpr struct {
 	// itself (mirroring how every other Resolved* field here exists so
 	// codegen only ever reads what sema already computed).
 	ArgTypes []string
+	// ExternMethod is set (step 13) exactly when Callee resolves to a
+	// method-style extern bind (amifl-spec.md section 15.2 — see
+	// ExternBindDecl's doc comment) — the bare Go method name to invoke via
+	// AMIVM's METHVAL, with Args[0] (already type-checked as the receiver)
+	// supplying the receiver value and Args[1:] the method's own arguments.
+	// CalleeToken is left empty in this case: there's no fixed callname to
+	// derive ahead of time, since the callable value only exists once
+	// METHVAL extracts it from the receiver at codegen time.
+	ExternMethod string
+	// ExternParamTypes is set (step 13) exactly when Callee resolves to any
+	// extern bind (plain or method-style) — the bind's own *declared*
+	// parameter types, parallel to Args (unlike ArgTypes above, which
+	// records an argument's own resolved type and only for a Builtin call).
+	// codegen/extern.go's externCallee reads this to find any position
+	// declared "Any" and, only there, guards against a subtle Go gotcha: a
+	// bare untyped integer-literal argument boxed directly into an `any`
+	// parameter defaults to Go's own "int", not the "int64" AmiFL's
+	// literal-defaulting (sema's resolveIntLit) actually gave it — see
+	// that function's own doc comment for the full explanation.
+	ExternParamTypes []string
 }
 
 // ClosureLit is `fn(params) -> R { body }` used as an expression — a
@@ -854,6 +940,7 @@ func (*FuncDecl) topLevelDeclNode()   {}
 func (*ConstDecl) topLevelDeclNode()  {}
 func (*StructDecl) topLevelDeclNode() {}
 func (*EnumDecl) topLevelDeclNode()   {}
+func (*ExternDecl) topLevelDeclNode() {}
 
 func (*ConstDecl) exprNode()       {}
 func (*LetExpr) exprNode()         {}

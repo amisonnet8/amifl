@@ -3166,3 +3166,220 @@ func TestCheck_ForYieldOverStreamIsAnError(t *testing.T) {
 		t.Fatal("expected an error: `for ... yield ...` over a Stream[T] isn't supported")
 	}
 }
+
+// --- step 13: extern/bind (Any/extern value boundary, CLAUDE.md design issue 1) ---
+
+// externFile builds a *ast.File with ext prepended ahead of `fn main`
+// (mirroring TestCheck_TopLevelConstVisibleInMain's own pattern for a
+// const), main's body built from mainExprs.
+func externFile(ext *ast.ExternDecl, mainExprs ...ast.Expr) *ast.File {
+	return &ast.File{
+		Decls: []ast.TopLevelDecl{
+			ext,
+			&ast.FuncDecl{Name: "main", ReturnType: nt("Int"), Body: &ast.Block{Exprs: mainExprs}},
+		},
+	}
+}
+
+func TestCheck_ExternPlainBindCallResolvesAndSetsCalleeToken(t *testing.T) {
+	ext := &ast.ExternDecl{
+		Path:  "encoding/json",
+		Alias: "json",
+		Binds: []ast.ExternBindDecl{
+			{Name: "Marshal", Params: []ast.Param{{Name: "v", Type: nt("Any")}}, ReturnType: &ast.TupleType{Elems: []ast.TypeExpr{nt("Bytes"), nt("Error")}}},
+		},
+	}
+	call := &ast.CallExpr{Callee: "Marshal", Args: []ast.Expr{&ast.StringLit{Value: "hi"}}}
+	f := externFile(ext,
+		&ast.LetExpr{Name: "m", Value: call},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.CalleeToken != "?json.Marshal" {
+		t.Fatalf("got CalleeToken %q, want \"?json.Marshal\"", call.CalleeToken)
+	}
+	if call.ExternMethod != "" {
+		t.Fatalf("got ExternMethod %q, want \"\"", call.ExternMethod)
+	}
+}
+
+func TestCheck_ExternBindRenameSetsCalleeTokenToGoTarget(t *testing.T) {
+	ext := &ast.ExternDecl{
+		Path:  "encoding/json",
+		Alias: "json",
+		Binds: []ast.ExternBindDecl{
+			{Name: "Marshal2", GoTarget: "Marshal", Params: []ast.Param{{Name: "v", Type: nt("Any")}}, ReturnType: &ast.TupleType{Elems: []ast.TypeExpr{nt("Bytes"), nt("Error")}}},
+		},
+	}
+	call := &ast.CallExpr{Callee: "Marshal2", Args: []ast.Expr{&ast.StringLit{Value: "hi"}}}
+	f := externFile(ext, &ast.DiscardExpr{Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.CalleeToken != "?json.Marshal" {
+		t.Fatalf("got CalleeToken %q, want \"?json.Marshal\"", call.CalleeToken)
+	}
+}
+
+func TestCheck_ExternMethodBindSetsExternMethod(t *testing.T) {
+	ext := &ast.ExternDecl{
+		Path:  "time",
+		Alias: "time",
+		Types: []ast.ExternTypeDecl{{Name: "Time"}},
+		Binds: []ast.ExternBindDecl{
+			{Name: "Now", ReturnType: nt("Time")},
+			{Name: "TimeUnix", GoTarget: "Time.Unix", Params: []ast.Param{{Name: "t", Type: nt("Time")}}, ReturnType: nt("Int")},
+		},
+	}
+	call := &ast.CallExpr{Callee: "TimeUnix", Args: []ast.Expr{&ast.CallExpr{Callee: "Now"}}}
+	f := externFile(ext, &ast.LetExpr{Name: "u", Value: call}, &ast.IntLit{Value: 0})
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+	if call.ExternMethod != "Unix" {
+		t.Fatalf("got ExternMethod %q, want \"Unix\"", call.ExternMethod)
+	}
+	if call.CalleeToken != "" {
+		t.Fatalf("got CalleeToken %q, want \"\" (method-style bind has no fixed callname)", call.CalleeToken)
+	}
+	if len(call.ExternParamTypes) != 1 || call.ExternParamTypes[0] != "Time" {
+		t.Fatalf("got ExternParamTypes %#v, want [\"Time\"]", call.ExternParamTypes)
+	}
+}
+
+func TestCheck_ExternMethodBindReceiverTypeMismatchIsAnError(t *testing.T) {
+	ext := &ast.ExternDecl{
+		Path:  "time",
+		Alias: "time",
+		Types: []ast.ExternTypeDecl{{Name: "Time"}},
+		Binds: []ast.ExternBindDecl{
+			{Name: "BadUnix", GoTarget: "Time.Unix", Params: []ast.Param{{Name: "s", Type: nt("String")}}, ReturnType: nt("Int")},
+		},
+	}
+	f := externFile(ext, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: method-style bind's first parameter type must match the receiver type in GoTarget")
+	}
+}
+
+func TestCheck_ExternMethodBindWithNoParamsIsAnError(t *testing.T) {
+	ext := &ast.ExternDecl{
+		Path:  "time",
+		Alias: "time",
+		Types: []ast.ExternTypeDecl{{Name: "Time"}},
+		Binds: []ast.ExternBindDecl{
+			{Name: "BadUnix", GoTarget: "Time.Unix", ReturnType: nt("Int")},
+		},
+	}
+	f := externFile(ext, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: a method-style bind needs at least one parameter to serve as the receiver")
+	}
+}
+
+func TestCheck_ExternDuplicateAliasIsAnError(t *testing.T) {
+	f := &ast.File{
+		Decls: []ast.TopLevelDecl{
+			&ast.ExternDecl{Path: "a", Alias: "dup"},
+			&ast.ExternDecl{Path: "b", Alias: "dup"},
+			&ast.FuncDecl{Name: "main", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}},
+		},
+	}
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for two extern blocks reusing one alias")
+	}
+}
+
+func TestCheck_ExternReservedAliasIsAnError(t *testing.T) {
+	ext := &ast.ExternDecl{Path: "somepkg", Alias: "os"}
+	f := externFile(ext, &ast.IntLit{Value: 0})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for an extern block claiming the reserved \"os\" alias")
+	}
+}
+
+func TestCheck_ExternTypeCollidesWithStructIsAnError(t *testing.T) {
+	f := &ast.File{
+		Decls: []ast.TopLevelDecl{
+			&ast.ExternDecl{Path: "time", Alias: "time", Types: []ast.ExternTypeDecl{{Name: "Point"}}},
+			&ast.StructDecl{Name: "Point", Fields: []ast.Param{{Name: "x", Type: nt("Int")}}},
+			&ast.FuncDecl{Name: "main", ReturnType: nt("Int"), Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}}},
+		},
+	}
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for an extern type name colliding with a struct")
+	}
+}
+
+func TestCheck_ExternBindNameCollidesWithFuncIsAnError(t *testing.T) {
+	ext := &ast.ExternDecl{
+		Path:  "strings",
+		Alias: "strs",
+		Binds: []ast.ExternBindDecl{{Name: "helper", ReturnType: nt("Int")}},
+	}
+	f := externFile(ext, &ast.IntLit{Value: 0})
+	f.Decls = append(f.Decls, &ast.FuncDecl{
+		Name: "helper", ReturnType: nt("Int"),
+		Body: &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+	})
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for a bind name colliding with a top-level fn")
+	}
+}
+
+func TestCheck_ExternAnyParamAcceptsConcreteType(t *testing.T) {
+	ext := &ast.ExternDecl{
+		Path:  "encoding/json",
+		Alias: "json",
+		Binds: []ast.ExternBindDecl{
+			{Name: "Marshal", Params: []ast.Param{{Name: "v", Type: nt("Any")}}, ReturnType: &ast.TupleType{Elems: []ast.TypeExpr{nt("Bytes"), nt("Error")}}},
+		},
+	}
+	f := externFile(ext,
+		&ast.LetExpr{Name: "x", Value: &ast.IntLit{Value: 5}},
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "Marshal", Args: []ast.Expr{&ast.IdentExpr{Name: "x"}}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v (an Any-typed parameter should accept any concrete argument type)", err)
+	}
+}
+
+func TestCheck_ExternAnyValueCannotNarrowToConcreteType(t *testing.T) {
+	ext := &ast.ExternDecl{
+		Path:  "encoding/json",
+		Alias: "json",
+		Binds: []ast.ExternBindDecl{
+			{Name: "MakeAny", ReturnType: nt("Any")},
+		},
+	}
+	f := externFile(ext,
+		&ast.LetExpr{Name: "x", Type: nt("Int"), Value: &ast.CallExpr{Callee: "MakeAny"}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: an Any-typed value can't implicitly narrow to a concrete `let` annotation")
+	}
+}
+
+func TestCheck_TypeNameAcceptsAnyConcreteValue(t *testing.T) {
+	f := mainFile(
+		&ast.LetExpr{Name: "tn", Value: &ast.CallExpr{Callee: "typeName", Args: []ast.Expr{&ast.IntLit{Value: 5}}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
+	}
+}
+
+func TestCheck_TypeNameWrongArgCountIsAnError(t *testing.T) {
+	f := mainFile(
+		&ast.DiscardExpr{Value: &ast.CallExpr{Callee: "typeName", Args: []ast.Expr{&ast.IntLit{Value: 1}, &ast.IntLit{Value: 2}}}},
+		&ast.IntLit{Value: 0},
+	)
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error: typeName takes exactly 1 argument")
+	}
+}

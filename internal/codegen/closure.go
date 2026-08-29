@@ -69,6 +69,15 @@ type program struct {
 	chanSeq     int
 	streamTypes map[string]string
 	streamSeq   int
+
+	// externTypes backs resolveGoType's own step-13 case: every extern
+	// `type Name` declaration maps its AmiFL name straight to "alias.Name"
+	// (Generate populates this once, up front, from every ast.ExternDecl in
+	// the file — see its own doc comment) — unlike every map above, this
+	// one is never minted lazily on first use, since there's no synthesized
+	// Go type to deduplicate here at all: the Go type already exists,
+	// verbatim, in the target package.
+	externTypes map[string]string
 }
 
 // newFuncTypeDecl emits one FNTYPE line for a closure shaped by

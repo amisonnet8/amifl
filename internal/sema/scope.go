@@ -44,6 +44,19 @@ type binding struct {
 type funcSig struct {
 	params []string
 	ret    string
+	// externCallee/externMethod are set only for a signature registered
+	// from an extern `bind` (registerExternBind, step 13) — at most one is
+	// ever non-empty. externCallee is the full AMIVM callname ("?alias.
+	// GoName") for a plain package-level function bind, copied verbatim
+	// onto CallExpr.CalleeToken at each call site exactly like a closure
+	// call already does (codegen's calleeToken treats any non-empty
+	// CalleeToken as "already resolved, use as-is" regardless of source).
+	// externMethod is the bare Go method name for a method-style bind
+	// (amifl-spec.md section 15.2) — copied onto CallExpr.ExternMethod
+	// instead, since there's no fixed callname to precompute (see that
+	// field's own doc comment).
+	externCallee string
+	externMethod string
 }
 
 // structInfo is a top-level `struct`'s resolved shape (amifl-spec.md
@@ -119,6 +132,18 @@ type checker struct {
 	funcs   map[string]funcSig
 	structs map[string]*structInfo
 	enums   map[string]*enumInfo
+	// externTypes is the set of `type Name` names declared inside any
+	// extern block (step 13) — just existence, unlike structs/enums, since
+	// an extern type has no fields/variants of its own for canonicalType to
+	// need; codegen independently derives the actual Go type string
+	// ("alias.Name") by walking ast.ExternDecl directly (ast is sema's and
+	// codegen's only shared vocabulary — see CLAUDE.md's リポジトリ構成).
+	externTypes map[string]bool
+	// externAliases tracks every extern block's own `as alias` (alias ->
+	// path) purely to reject a second block reusing an alias already
+	// claimed in this file — see reservedExternAliases's doc comment for
+	// why alias collisions matter beyond ordinary name-shadowing.
+	externAliases map[string]string
 }
 
 // scope is one lexical block's bindings, chained to its enclosing scope

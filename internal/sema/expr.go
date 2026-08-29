@@ -16,11 +16,31 @@ import (
 // gets checked against it here, in one place, uniformly (principle 2: no
 // implicit conversion between differently-typed values).
 func (fc *funcChecker) checkExpr(e ast.Expr, expected string) (string, error) {
-	typ, err := fc.resolveType(e, expected)
+	// "Any" (amifl-spec.md section 2.2, step 13) accepts a value of *any*
+	// concrete type here — an extern bind's Any-typed parameter (or
+	// typeName's own argument) boxes whatever concrete-typed value flows in
+	// via Go's ordinary implicit interface satisfaction (assigning a
+	// concrete type where `any` is expected needs no conversion in Go), so
+	// codegen never needs any ASSERT/reflect machinery for *this*
+	// direction — only passing an Any-typed value where a *concrete* type
+	// is expected stays rejected (principle 2, no implicit narrowing): that
+	// direction still falls through to the exact match below unchanged,
+	// since it's typ (not expected) that would be "Any" then. See
+	// CLAUDE.md's design-issue-1 resolution for the full reasoning behind
+	// why no runtime type tag is needed at all. resolveExpected is "" (not
+	// "Any" itself) when expected is "Any" so that e.g. a bare integer
+	// literal argument still resolves via its own ordinary "no context"
+	// default (Int64) instead of resolveIntLit rejecting "Any" as if it
+	// were an unrecognized concrete numeric type.
+	resolveExpected := expected
+	if expected == "Any" {
+		resolveExpected = ""
+	}
+	typ, err := fc.resolveType(e, resolveExpected)
 	if err != nil {
 		return "", err
 	}
-	if expected != "" && typ != expected {
+	if expected != "" && expected != "Any" && typ != expected {
 		return "", fmt.Errorf("line %d: expected %s, got %s", e.Pos(), expected, typ)
 	}
 	return typ, nil
@@ -182,6 +202,16 @@ func (fc *funcChecker) resolveCallExpr(v *ast.CallExpr) (string, error) {
 	if sig, ok := fc.funcs[v.Callee]; ok {
 		if err := fc.checkCallArgs(v, sig.params); err != nil {
 			return "", err
+		}
+		// A plain top-level `fn` has neither field set (codegen's
+		// calleeToken derives "!"+Callee for those, unchanged since step
+		// 1); an extern bind (step 13, registerExternBind) sets exactly
+		// one of the two, mirroring how a closure call sets CalleeToken to
+		// its own binding's token above.
+		v.CalleeToken = sig.externCallee
+		v.ExternMethod = sig.externMethod
+		if sig.externCallee != "" || sig.externMethod != "" {
+			v.ExternParamTypes = sig.params
 		}
 		v.ResolvedType = sig.ret
 		return sig.ret, nil

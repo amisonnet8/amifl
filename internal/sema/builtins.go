@@ -67,7 +67,7 @@ func init() {
 		"exit":       notYetImplemented("a later pass", "amifl-spec.md section 13.1 generalization, deferred alongside print"),
 
 		// 13.2 型・値判定
-		"typeName": notYetImplemented("step 13", "requires the Any/extern value boundary — CLAUDE.md design issue 1"),
+		"typeName": resolveTypeName,
 		"isError":  resolveIsError,
 
 		// 13.3 変換
@@ -129,6 +129,28 @@ func (fc *funcChecker) resolveBuiltinCall(v *ast.CallExpr) (string, bool, error)
 	v.Builtin = v.Callee
 	v.ResolvedType = typ
 	return typ, true, nil
+}
+
+// resolveTypeName type-checks `typeName(v: Any) -> String` (amifl-spec.md
+// section 13.2, step 13) — v may be any value at all, not only one whose
+// own static type already reads "Any": passing a concrete AmiFL value
+// boxes it into Go's `any` at the call boundary exactly like an extern
+// bind's own Any-typed parameter would (checkExpr's "Any" bypass), and
+// codegen's %T-based implementation (codegen/extern.go's
+// genTypeNameValue) reveals the underlying Go runtime type name either
+// way — a genuinely `extern`-derived Any value's real dynamic type in the
+// case the spec text describes, or just a concrete AmiFL type's own Go
+// representation name (e.g. "int64") when called on an ordinary value.
+func resolveTypeName(fc *funcChecker, v *ast.CallExpr) (string, error) {
+	if len(v.Args) != 1 {
+		return "", fmt.Errorf("line %d: typeName expects exactly 1 argument, got %d", v.Line, len(v.Args))
+	}
+	argTyp, err := fc.checkExpr(v.Args[0], "Any")
+	if err != nil {
+		return "", err
+	}
+	v.ArgTypes = []string{argTyp}
+	return "String", nil
 }
 
 // resolveIsError type-checks `isError(v: Error) -> Bool` (amifl-spec.md
