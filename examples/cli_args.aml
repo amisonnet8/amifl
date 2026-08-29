@@ -1,0 +1,16 @@
+fn main(args: List[String]) -> Int {
+    let sumLen = fn(acc: Int, s: String) -> Int { acc + len(s) }
+    let totalChars = reduce(args, 0, sumLen)
+
+    for a in args {
+        print(a)
+    }
+
+    if len(args) == 0 {
+        print("no arguments given")
+    } else {
+        print("arguments received")
+    }
+
+    len(args) * 100 + totalChars
+}

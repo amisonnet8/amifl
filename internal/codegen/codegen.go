@@ -103,7 +103,8 @@ func GenerateProgram(units []Unit) (string, error) {
 			break
 		}
 	}
-	if rootIdx < 0 || findMain(units[rootIdx].Decls) == nil {
+	mainDecl := findMain(units[rootIdx].Decls)
+	if rootIdx < 0 || mainDecl == nil {
 		return "", fmt.Errorf("codegen: no fn main in the root package (sema should have rejected this)")
 	}
 
@@ -177,7 +178,27 @@ func GenerateProgram(units []Unit) (string, error) {
 	b.WriteString("FUNC\t!main\t:\n")
 	b.WriteString("\tVAR\t%code\t^int64\n")
 	b.WriteString("\tVAR\t%exitCode\t^int\n")
-	fmt.Fprintf(&b, "\tCALL\t%%code\t:\t!%s\n", entryFunc)
+	// mainDecl's one-parameter form (amifl-spec.md section 14, `fn
+	// main(args: List[String])`) needs argv fed in ahead of the call into
+	// amifl_main — sema has already required this single parameter to be
+	// exactly List[String] (findAndValidateMain), so codegen trusts that
+	// without re-deriving it (CLAUDE.md's "意味検証の責任分担"). This
+	// resolveGoType("List(String)") call is a cache hit, not a fresh
+	// mint — genFuncDecl already minted (and flushed into b via
+	// prog.typeHeader above) the exact same SLTYPE while emitting
+	// amifl_main's own FUNC header for this same parameter; calling it a
+	// second time here would silently emit a second, never-flushed SLTYPE
+	// declaration into prog.typeHeader if it ever *weren't* a cache hit
+	// (typeHeader was already written into b above, step 13's "STTYPE
+	// nested type declaration" lesson generalized).
+	if len(mainDecl.Params) == 1 {
+		listGoType := prog.resolveGoType("List(String)")
+		fmt.Fprintf(&b, "\tVAR\t%%args\t^%s\n", listGoType)
+		b.WriteString("\tCALL\t%args\t:\t?amiflrt.Args\n")
+		fmt.Fprintf(&b, "\tCALL\t%%code\t:\t!%s\t%%args\n", entryFunc)
+	} else {
+		fmt.Fprintf(&b, "\tCALL\t%%code\t:\t!%s\n", entryFunc)
+	}
 	b.WriteString("\tCALL\t%exitCode\t:\t?int\t%code\n")
 	b.WriteString("\tCALL\t:\t?os.Exit\t%exitCode\n")
 	b.WriteString("ENDFUNC\n")

@@ -65,6 +65,52 @@ func TestGenerate_NoMainIsAnError(t *testing.T) {
 	}
 }
 
+// TestGenerate_MainWithListStringArgsBridgesArgv covers amifl-spec.md
+// section 14's `fn main(args: List[String]) -> Int` form: the `!main`
+// wrapper must build the arg list via amiflrt.Args() and pass it into
+// amifl_main, rather than the zero-arg form's plain `CALL %code : !amifl_
+// main` (still covered separately by TestGenerate_HelloWorld above).
+func TestGenerate_MainWithListStringArgsBridgesArgv(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:               "main",
+			Params:             []ast.Param{{Name: "args", Type: &ast.ListType{Elem: nt("String")}, ResolvedType: "List(String)"}},
+			ReturnType:         nt("Int"),
+			ResolvedReturnType: "Int64",
+			Body:               &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		},
+	}}
+
+	ir, err := Generate(f)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+
+	for _, want := range []string{
+		"SLTYPE\t^AmiflList1\t^string",
+		"FUNC\t!amifl_main\t^AmiflList1\t:\t^int64",
+		"VAR\t%args\t^AmiflList1",
+		"CALL\t%args\t:\t?amiflrt.Args",
+		"CALL\t%code\t:\t!amifl_main\t%args",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR missing %q; got:\n%s", want, ir)
+		}
+	}
+
+	// The synthesized List[String] Go type must be minted exactly once —
+	// resolveGoType("List(String)") is called a second time while
+	// building the !main wrapper (to look up the already-minted type
+	// name), and that second call must be a pure cache hit rather than
+	// emitting a second SLTYPE that lands after prog.typeHeader has
+	// already been flushed into the output (this codebase's step-13
+	// "STTYPE nested type declaration" lesson, generalized — see
+	// codegen.go's GenerateProgram comment at the call site).
+	if n := strings.Count(ir, "SLTYPE"); n != 1 {
+		t.Errorf("expected exactly one SLTYPE declaration, got %d; IR:\n%s", n, ir)
+	}
+}
+
 func TestGenerate_StringWithQuoteIsEscaped(t *testing.T) {
 	f := mainFile(
 		&ast.CallExpr{Callee: "print", Args: []ast.Expr{&ast.StringLit{Value: `say "hi"`}}},

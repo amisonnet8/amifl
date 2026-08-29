@@ -779,6 +779,22 @@ CLAUDE.md「開発の進め方」5番（新しい構文・組み込み関数の�
 
 対策：`Map[K,V]`の2要素分割で使われていた深さ追跡分割（Step 10で確立済みの`mapKeyValueTypes`）を任意個の要素へ一般化した`splitTopLevelCommas`を新設し、`funcTypeParts`/`tupleTypeParts`（sema/codegen双方）をこれで置き換え、`genClosureLitInto`は`resolveGoType`経由へ差し替えた。`internal/sema/sema_test.go`（`TestCheck_ReduceAcceptsTupleTypedAccumulator`）・`internal/codegen/codegen_test.go`（`TestGenerate_ClosureLitWithTupleParamUsesSynthesizedTupleGoType`）に回帰テストを追加。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、新規10本を含む`examples/`全ファイルの実行結果を手計算と照合して確認済み。
 
+### `amifl-spec.md`全面刷新後の最初の拡張：`fn main(args: List[String]) -> Int`（旧spec 17.3節ex1）
+
+15ステップ完了・`amifl-spec.md`の全面刷新（実装との1行ずつの突き合わせ）が終わった直後、ユーザーから今後の拡張ロードマップとして6項目（新spec 17.3節相当）が示され、最初に着手する項目としてこの`main`の引数対応が選ばれた。Step 5時点で「`List`が無いため0引数のみ」と暫定にしていたものを、Step 7で`List`が入った後も追随し忘れていた（新spec 17.1節が指摘した「旧版の記述と実装の食い違い」の1つ）——今回それを実装で解消した。
+
+**設計は完全に新spec 14節が既に確定させていた**とおりに実装しただけで、新しい設計判断はほぼ無かった：`fn main`は「引数無し」または「`args: List[String]`という単一引数」のどちらか一方のみを許し、後者の`args`はGoの`os.Args[0]`（実行ファイル自身のパス）を含まない`os.Args[1:]`——多くの言語のCLI慣習（argv[0]はプログラム名でユーザーが関心を持つデータではない）にならった。
+
+**実装は3箇所の変更で完結した**：
+
+1. `amiflrt/args.go`を新設し、`func Args() []string { ...os.Args[1:]（無ければ空スライス）... }`という1関数だけのファイルを追加（`amiflrt/embed.go`が`//go:embed *.go`でワイルドカード埋め込みしているため、ファイル追加だけで自動的に配布対象になる——登録作業は一切不要）。
+2. `internal/sema/sema.go`の`findAndValidateMain`——`len(main.Params)`を`switch`で0/1/それ以外の3方向に分岐させ、1個の場合は`main.Params[0].ResolvedType != "List(String)"`を検査するよう変更しただけ（`registerFuncSig`が既にPass 1で`ResolvedType`を解決済みなので、`findAndValidateMain`が読むタイミングには何の懸念も無かった——Step 5以来の既存の2パス構成にそのまま乗った）。
+3. `internal/codegen/codegen.go`の`GenerateProgram`——`!main`ラッパー生成部分で`mainDecl.Params`の有無によって`CALL %code : !amifl_main`（従来どおり）と、`args`変数を`amiflrt.Args()`から`CALL`で取得してから`CALL %code : !amifl_main %args`という形の2パターンへ分岐させた。
+
+**唯一の実装上の注意点は「型ヘッダーの二重発行」を踏まないことだった**——`List[String]`のGo型（`AmiflListN`）は、`amifl_main`自身のFUNC見出し行を生成する際（既存の`genFuncDecl`が`fn.Params`をループしてそこで`resolveGoType`を呼ぶ）に**既に一度**発行されているため、`!main`ラッパー側で同じ型を求めるために`prog.resolveGoType("List(String)")`をもう一度呼んでも、`listGoTypeName`のキャッシュ（`p.listTypes map[string]string`）によって**必ずキャッシュヒットになり、2つ目の`SLTYPE`は発行されない**——これがキャッシュヒットにならない設計だったら、Step 13で発見した「STTYPEブロックの内側でネストした型宣言を発行してはいけない」というのと同根の罠（`prog.typeHeader`は`!main`ラッパーを書き始める**前**に既に`b`へフラッシュ済みなので、後から追記しても出力に反映されない）を踏むところだった。テスト（`TestGenerate_MainWithListStringArgsBridgesArgv`）に「`SLTYPE`が正確に1回しか出現しない」という明示的な回帰検査を含めてこの前提を固定した。
+
+**実地検証（`amivm`→`go build`→実行）で確認した項目**：`examples/cli_args.aml`（`args`を`for`で列挙しつつ`print`、`reduce`で全文字数を合計、`len(args)*100+合計文字数`を終了コードとして返す）を、引数`ab cde`付き（期待値205）・引数無し（期待値0）の両方で実行し、生成された`!main`ラッパーのIR・Goコードを目視確認したうえで、実際の終了コードが期待値と一致することを確認した。`internal/sema/sema_test.go`（`TestCheck_MainWithListStringArgsParamIsValid`・`TestCheck_MainWithTwoParamsIsAnError`・既存`TestCheck_MainWithParamsIsAnError`を`TestCheck_MainWithWrongSingleParamTypeIsAnError`へ改名）・`internal/codegen/codegen_test.go`（`TestGenerate_MainWithListStringArgsBridgesArgv`）に回帰テストを追加。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存`examples/`全ファイル（新規`cli_args.aml`含む28本）に回帰が無いことも確認済み。`amifl-spec.md`の14節・17.1節・冒頭注記も実装に合わせて更新した。
+
 ## 開発の進め方
 
 1. `amifl-spec.md`を正として実装する。仕様に曖昧な点や矛盾を見つけたら、まず仕様側を疑い、確定させてからコードを直す

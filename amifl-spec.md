@@ -2,7 +2,7 @@
 
 > 汎用データ処理特化言語AmiFLの詳細仕様書。`ignored/amifl-concept.md`の設計方針に基づく。
 >
-> **本書は実装完了後（全15ステップ完了、`CLAUDE.md`参照）に、実装（`internal/lexer` `internal/parser` `internal/sema` `internal/codegen` `amiflrt`）と1行ずつ突き合わせて全面的に書き直したものである。** 旧版には「仕様として書いたが実装されなかった」項目（`return`/`Never`型、`Range`リテラル、16進/8進/2進数値リテラル、桁区切り`_`、`main(args: List[String])`、パイプ右辺インラインクロージャー、`switch`の`is Type`/`in [...]`パターン、`map`/`filter`/`reduce`のStream/Chan対応等）が複数残っていた。本書はそれらを全て**実装の実際の挙動**に合わせて訂正し、未実装の項目は「未実装」として明記する（17節に一覧化）。実装とAPIが今後変わった場合は、まず本書の記述を疑い、確定させてからコードを直すこと（`CLAUDE.md`の開発方針どおり）。
+> **本書は実装完了後（全15ステップ完了、`CLAUDE.md`参照）に、実装（`internal/lexer` `internal/parser` `internal/sema` `internal/codegen` `amiflrt`）と1行ずつ突き合わせて全面的に書き直したものである。** 旧版には「仕様として書いたが実装されなかった」項目（`return`/`Never`型、`Range`リテラル、16進/8進/2進数値リテラル、桁区切り`_`、パイプ右辺インラインクロージャー、`switch`の`is Type`/`in [...]`パターン、`map`/`filter`/`reduce`のStream/Chan対応等）が複数残っていた。本書はそれらを全て**実装の実際の挙動**に合わせて訂正し、未実装の項目は「未実装」として明記する（17節に一覧化）。実装とAPIが今後変わった場合は、まず本書の記述を疑い、確定させてからコードを直すこと（`CLAUDE.md`の開発方針どおり）。この刷新の直後に`fn main(args: List[String]) -> Int`（14節）が実装され、本書はその時点で追随済み——17.3節の「将来的な拡張の余地」からは既に除外してある。
 
 **ライセンス**: MIT
 
@@ -600,7 +600,13 @@ fn main() -> Int {
 }
 ```
 
-`main`はルートパッケージにのみ書ける予約名で、**引数を一切取れない**（`fn main() -> Int`のみが有効なシグネチャ）。**`fn main(args: List[String]) -> Int`は実装されていない**——旧版はこの形を書けるかのように記していたが、実際には常に0引数のみが許可される（コマンドライン引数へアクセスする組み込み関数も存在しない）。戻り値の`Int`（`Int64`）はプロセスの終了コードとしてOSへ渡される（Goの`os.Exit`が要求する固定幅ではない`int`へ、内部的に1回明示キャストしてから渡す）。
+```amifl
+fn main(args: List[String]) -> Int {
+    len(args)
+}
+```
+
+`main`はルートパッケージにのみ書ける予約名で、**2つのシグネチャのどちらか一方のみ**が有効：引数無し（`fn main() -> Int`）、または`args`という単一の`List[String]`引数を取る形（`fn main(args: List[String]) -> Int`）。後者の`args`は、実行ファイル自身の名前（Goの`os.Args[0]`相当）を含まない、プログラムへ渡されたコマンドライン引数そのもの（`os.Args[1:]`）。2個以上の引数、あるいは`List[String]`以外の型の単一引数はコンパイルエラーになる。戻り値の`Int`（`Int64`）はプロセスの終了コードとしてOSへ渡される（Goの`os.Exit`が要求する固定幅ではない`int`へ、内部的に1回明示キャストしてから渡す）。
 
 ---
 
@@ -727,7 +733,6 @@ amifl <command> [flags] <file.aml | package-dir | package.amlz>
 | `Range`（`0..10`） | 3.1節にリテラルとして掲載 | **未実装**（レキサーが`..`トークンを持たない） |
 | 数値リテラル表記 | `0x1F` `0o17` `0b101` `1_000_000` | **未実装**（10進の整数・小数・指数表記のみ） |
 | `+`演算子のConcatenable | `String`/`Bytes`/`List`/`Array`に効く | **`String`専用**。`List`/`Bytes`の連結は`concat()`を使う |
-| `main`の引数 | `fn main(args: List[String]) -> Int` | **`fn main() -> Int`のみ**（引数0個固定） |
 | `print`のシグネチャ | `(v: Any) -> Unit` | **`(v: String) -> Unit`**（`Any`への一般化は未実装） |
 | `eprint`/`format`/`formatWith`/`exit` | 実装済みとして掲載 | **未実装**（予約名のみ、呼ぶとエラー） |
 | `switch`のパターン | `is Type` / `in [...]` パターンをサポート | **未実装**。Bool専用形（サブジェクト無し）とenum専用形（`Type.Variant(...)`）の2形のみ |

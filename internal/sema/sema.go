@@ -187,9 +187,10 @@ func CheckPackage(files []*ast.File, prefix string, imports map[string]Exports) 
 
 // findAndValidateMain locates `fn main` among funcs (whose signatures
 // registerFuncSig must have already resolved) and enforces amifl-spec.md
-// section 14's entry-point shape: exactly one `fn main`, taking no
-// parameters (the `List[String] args` form is deferred to step 7, once
-// `List` exists) and returning `Int`.
+// section 14's entry-point shape: exactly one `fn main`, returning `Int`,
+// taking either no parameters or a single `args: List[String]` parameter
+// (codegen.go's GenerateProgram is what actually supplies argv — see
+// amiflrt.Args — when the latter form is declared).
 func findAndValidateMain(funcs []*ast.FuncDecl) (*ast.FuncDecl, error) {
 	var main *ast.FuncDecl
 	for _, fn := range funcs {
@@ -204,8 +205,15 @@ func findAndValidateMain(funcs []*ast.FuncDecl) (*ast.FuncDecl, error) {
 	if main == nil {
 		return nil, fmt.Errorf("missing entry point: no `fn main` declared (amifl-spec.md section 14)")
 	}
-	if len(main.Params) != 0 {
-		return nil, fmt.Errorf("line %d: fn main must take no parameters in step 5 (List[String] args land in step 7)", main.Line)
+	switch len(main.Params) {
+	case 0:
+		// fn main() -> Int — the argument-less form.
+	case 1:
+		if main.Params[0].ResolvedType != "List(String)" {
+			return nil, fmt.Errorf("line %d: fn main's single parameter must be List[String], got %s", main.Line, main.Params[0].ResolvedType)
+		}
+	default:
+		return nil, fmt.Errorf("line %d: fn main must take no parameters or a single args: List[String] parameter, got %d", main.Line, len(main.Params))
 	}
 	if main.ResolvedReturnType != "Int64" {
 		return nil, fmt.Errorf("line %d: fn main must return Int, got %s", main.Line, main.ReturnType)

@@ -981,7 +981,11 @@ func TestCheck_ReservedMainNameIsAnError(t *testing.T) {
 	}
 }
 
-func TestCheck_MainWithParamsIsAnError(t *testing.T) {
+func TestCheck_MainWithWrongSingleParamTypeIsAnError(t *testing.T) {
+	// A single parameter is allowed (amifl-spec.md section 14's
+	// `fn main(args: List[String])` form) but only if it's exactly
+	// List[String] — anything else, including a bare scalar like Int, is
+	// still rejected.
 	f := &ast.File{Decls: []ast.TopLevelDecl{
 		&ast.FuncDecl{
 			Name:       "main",
@@ -991,7 +995,38 @@ func TestCheck_MainWithParamsIsAnError(t *testing.T) {
 		},
 	}}
 	if err := Check(f); err == nil {
-		t.Fatal("expected an error for fn main taking parameters in step 5")
+		t.Fatal("expected an error for fn main's single parameter not being List[String]")
+	}
+}
+
+func TestCheck_MainWithTwoParamsIsAnError(t *testing.T) {
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:       "main",
+			Params:     []ast.Param{{Name: "x", Type: nt("Int")}, {Name: "y", Type: nt("Int")}},
+			ReturnType: nt("Int"),
+			Body:       &ast.Block{Exprs: []ast.Expr{&ast.IntLit{Value: 0}}},
+		},
+	}}
+	if err := Check(f); err == nil {
+		t.Fatal("expected an error for fn main taking more than one parameter")
+	}
+}
+
+func TestCheck_MainWithListStringArgsParamIsValid(t *testing.T) {
+	// amifl-spec.md section 14's `fn main(args: List[String]) -> Int` form.
+	f := &ast.File{Decls: []ast.TopLevelDecl{
+		&ast.FuncDecl{
+			Name:       "main",
+			Params:     []ast.Param{{Name: "args", Type: lt(nt("String"))}},
+			ReturnType: nt("Int"),
+			Body: &ast.Block{Exprs: []ast.Expr{
+				&ast.CallExpr{Callee: "len", Args: []ast.Expr{&ast.IdentExpr{Name: "args"}}},
+			}},
+		},
+	}}
+	if err := Check(f); err != nil {
+		t.Fatalf("Check() error: %v", err)
 	}
 }
 
