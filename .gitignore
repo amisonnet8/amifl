@@ -9,6 +9,10 @@ examples/**/*.ir
 examples/**/*.go
 testdata/**/*.ir
 testdata/**/*.go
+# ただしexamples/local_go_extern/配下は例外——amifl-spec.md 15.3節(ex14)の
+# extern経由でローカルGoファイルを束ねる機能を実演する、手書きの.goファイルが
+# 実際に置かれているディレクトリ(生成物ではない)
+!examples/local_go_extern/*.go
 
 # エディタ・OS由来
 .DS_Store
