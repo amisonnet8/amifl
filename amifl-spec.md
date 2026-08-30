@@ -783,7 +783,7 @@ amifl <command> [flags] <file.aml | package-dir | package.amlz>
 | コマンド | 説明 |
 |---|---|
 | `build` | ネイティブ実行ファイルへコンパイルする |
-| `run` | コンパイルして即座に実行する（stdin/stdout/stderrをストリームする） |
+| `run` | コンパイルして即座に実行する（stdin/stdout/stderrをストリームする。`amifl run <src> [プログラム引数...]`——`<src>`の後に続けた引数は`go run`同様、プログラム自身の`os.Args[1:]`（`fn main(args: List[String])`、14節）としてそのまま渡る） |
 | `emit-ir` | AMIVM-IRへコンパイルする |
 | `emit-go` | Goソースへコンパイルする（amivm経由） |
 | `archive` | ディレクトリ直下の`.aml`ファイル群を`.amlz`アーカイブへまとめる |

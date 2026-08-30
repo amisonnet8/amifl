@@ -75,6 +75,11 @@ Commands:
 	archive    package a directory's .aml files into a .amlz archive
 	help       show this help message
 
+"amifl run <src> [program args...]" forwards any arguments after <src>
+straight through to the compiled program as its own argv (like "go run
+main.go arg1 arg2") — this is how a "fn main(args: List[String])" program
+(amifl-spec.md section 14) receives them.
+
 Flags (build, emit-ir, emit-go):
 
 	-o <file>  output file path (default: derived from the input path)
@@ -130,11 +135,15 @@ func runBuild(args []string) error {
 	return nil
 }
 
+// runRun compiles srcPath and executes the resulting binary, forwarding any
+// arguments after srcPath straight through as that program's own os.Args[1:]
+// (mirroring `go run main.go arg1 arg2`) — this is how a `fn main(args:
+// List[String])` program (amifl-spec.md section 14) receives them.
 func runRun(args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("usage: amifl run <file.aml | package-dir | package.amlz>")
+	if len(args) < 1 {
+		return fmt.Errorf("usage: amifl run <file.aml | package-dir | package.amlz> [program args...]")
 	}
-	srcPath := args[0]
+	srcPath, progArgs := args[0], args[1:]
 
 	tmp, err := os.MkdirTemp("", "amifl-run-*")
 	if err != nil {
@@ -147,7 +156,7 @@ func runRun(args []string) error {
 		return err
 	}
 
-	runCmd := exec.Command(binPath)
+	runCmd := exec.Command(binPath, progArgs...)
 	runCmd.Stdin = os.Stdin
 	runCmd.Stdout = os.Stdout
 	runCmd.Stderr = os.Stderr

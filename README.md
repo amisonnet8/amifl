@@ -51,7 +51,7 @@ A package directory (or a `.amlz` archive of one, §16.2 of the spec) compiles e
 | Command | Output |
 |---|---|
 | `build` | a native executable |
-| `run` | compiles and immediately runs, streaming its stdin/stdout/stderr |
+| `run` | compiles and immediately runs, streaming its stdin/stdout/stderr (any arguments after the source path are forwarded to the program, like `go run`) |
 | `emit-ir` | the AMIVM-IR |
 | `emit-go` | the Go source (via amivm) |
 | `archive` | packages a directory's direct `.aml` files into a `.amlz` archive |

@@ -1014,6 +1014,14 @@ tour/examplesのドキュメント総点検を依頼された流れで、ユー�
 
 **実地検証（`amivm`→`go build`→実行）で確認した項目**：使い捨てプログラムで、`extern "." as h`（`main.aml`と同じディレクトリの`helpers.go`、`Square`/`Greet`の2関数）・`extern "./govendor" as a`と`extern "./govendor" as b`（同じサブディレクトリを指す2つの別名、コピーが1回だけ行われ両方から正しく呼べること）・`import`で読み込んだ非ルートパッケージ内の`extern "."`（**そのサブパッケージ自身のディレクトリ**を基準に解決されること、ルートのディレクトリではないこと）を確認。エラー系として、存在しないローカルパス・`*.go`ファイルを含まないディレクトリの2パターンが明確なメッセージでコンパイルエラーになることも確認した。新規`examples/local_go_extern/`（`mathhelpers.go`のユークリッドの互除法`GCD`を`extern "."`で束ね、`Gcd(48,18)+Gcd(17,5)=6+1=7`を終了コードとして返す）を追加し、`make test-examples`が自動的にディレクトリ丸ごとビルドすることを確認した。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreenで、既存`examples/`全ファイルに回帰が無いことも確認済み（`cmd/amifl`はプロジェクト発足当初からGoユニットテストを持たない層のため、この機能も既存の慣行どおり実地検証〈CLIからの手動確認＋`examples/`〉のみで検証した）。`amifl-spec.md` 15.3節・冒頭注記を実装の実際の挙動に合わせて更新した。
 
+### CLIバグ修正：`amifl run <src>`がプログラム自身へのコマンドライン引数を渡す手段を持っていなかった——`go run`と同じ「ソース引数の後ろはそのままプログラムへ転送する」規約に揃えた
+
+`fn main(args: List[String]) -> Int`（14節、ex1）は`os.Args[1:]`（実行ファイル自身のパスを除く実際のプロセス引数）をそのまま受け取る設計だが、`cmd/amifl/main.go`の`runRun`は`len(args) != 1`を要求し、`<src>`以外の引数を一切受け付けなかった——`amifl build`した実行ファイルを直接叩けば`./myprog arg1 arg2`のように普通に引数を渡せるにもかかわらず、`amifl run`という「コンパイルして即座に実行する」コマンドだけがこの経路を持たない非対称な状態になっていた（`args: List[String]`の実地検証はStep 14完了時点で`amifl build`経由でのみ行われており、`amifl run`経由の確認が抜けていたための見落とし）。
+
+対策は`go run main.go arg1 arg2`が確立している慣習をそのまま踏襲：`runRun`は`args[0]`を`<src>`、`args[1:]`をプログラム自身の引数として扱い、`exec.Command(binPath, progArgs...)`へ素通しするだけ——`amifl run`自体はこれらの引数を一切解釈せず（`-o`/`-v`のようなamifl自身のフラグは`<src>`より前にしか置けない、という既存の制約と整合)、コンパイル対象のプログラムだけがそれらを`main`の`args`として受け取る。新しいASTノードもsema/codegenの変更も不要——`cmd/amifl`層だけで完結するCLIの配線ミスだった。
+
+**実地検証**：`examples/cli_args.aml`（Step 14完了時に作成済み、`fn main(args: List[String])`で`len(args)*100+全文字数`を終了コードとして返す）を`./amifl run examples/cli_args.aml ab cde`で実行し、終了コード205（既存の`amifl build`経由の実地検証値と同一）を確認。引数無し実行（`no arguments given`、終了コード0）・`amifl run`自体を引数無しで呼んだ場合の使用法エラーメッセージも確認した。`gofmt`/`go vet`/`go test`/`make test-examples`はすべてgreen。`amifl-spec.md` 16.2節・`README.md`・`README_ja.md`のコマンド一覧を更新した。
+
 ## 開発の進め方
 
 1. `amifl-spec.md`を正として実装する。仕様に曖昧な点や矛盾を見つけたら、まず仕様側を疑い、確定させてからコードを直す

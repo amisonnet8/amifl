@@ -51,7 +51,7 @@ amifl <コマンド> [フラグ] <file.aml | package-dir | package.amlz>
 | コマンド | 出力 |
 |---|---|
 | `build` | 実行ファイル |
-| `run` | コンパイルして即座に実行(stdin/stdout/stderrをそのまま引き継ぐ) |
+| `run` | コンパイルして即座に実行(stdin/stdout/stderrをそのまま引き継ぐ。ソースパスの後に続けた引数は`go run`同様プログラム自身へそのまま渡される) |
 | `emit-ir` | AMIVM-IR |
 | `emit-go` | Goソースコード(amivm経由) |
 | `archive` | ディレクトリ直下の`.aml`ファイル群を`.amlz`アーカイブへまとめる |
