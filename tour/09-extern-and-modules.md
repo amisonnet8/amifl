@@ -60,6 +60,38 @@ fn main() -> Int {
 
 `typeName(v: Any) -> String`で、`extern`由来の値を含むあらゆる値の動的な型名を覗くことができます(§13.2)。
 
+### 同じディレクトリの手書き`.go`ファイルを束ねる(§15.3)
+
+単一の関数・メソッド呼び出しに収まらない複雑なGoロジックが必要な場合、専用構文は増やさず、`.aml`ファイルと同じ場所(またはその配下の任意のディレクトリ)に普通の`.go`ファイルを置き、それを`extern`で束ねます。`extern "パス"`の`パス`が`.`・`./...`・`../...`で始まると(`import alias "./x"`と同じ相対パスの慣習)、Go標準ライブラリではなく**ローカルの手書きGoファイル**として解釈されます。
+
+```go
+// mathhelpers.go(main.amlと同じディレクトリに置く)
+package mathhelpers
+
+func GCD(a, b int64) int64 {
+    for b != 0 {
+        a, b = b, a%b
+    }
+    if a < 0 {
+        return -a
+    }
+    return a
+}
+```
+
+```amifl
+extern "." as mh {
+    bind Gcd(a: Int, b: Int) -> Int as GCD
+}
+
+fn main() -> Int {
+    print(Gcd(48, 18))   // 6
+    0
+}
+```
+
+そのディレクトリ直下にある`.go`ファイルが自動的にコンパイル対象になります(サブディレクトリは見ません、`amifl build`が別途`go.mod`を用意する必要もありません)。ファイル自身が宣言する`package`名はAmiFLからは一切参照されません——常に`extern`の`as`名(ここでは`mh`)で参照するためです。
+
 ## モジュールと複数ファイルの統合(§12)
 
 同じディレクトリに置かれた`.aml`ファイル群は、`import`不要で1つの共有スコープとしてコンパイルされます(§12.1)。別のディレクトリのパッケージを使いたい場合だけ`import`します。
@@ -107,6 +139,7 @@ let iv: mathutil.Interval = mathutil.Interval{lo: 0, hi: 10}
 
 1. Go標準ライブラリの`math`パッケージから`Sqrt(x float64) float64`を`extern`で取り込み(`bind Sqrt(x: Float) -> Float`)、`16.0`の平方根を`print`するプログラムを書いてください。
 2. `Rectangle`という`struct{width: Int, height: Int}`と、その面積を返す`fn area(r: Rectangle) -> Int`を持つ`shapes`という別パッケージを作り、ルート側からその`struct`を構築して`area`を呼ぶプログラムを書いてください(ディレクトリ構成は`main.aml`と`shapes/shapes.aml`)。
+3. `main.aml`と同じディレクトリに`double.go`(`package doubler` `func Double(x int64) int64 { return x * 2 }`)を置き、`extern "." as d { bind Double(x: Int) -> Int }`で束ねて、`Double(21)`を`print`するプログラムを書いてください。
 
 <details>
 <summary>解答例</summary>
@@ -143,6 +176,24 @@ fn main() -> Int {
 ```
 
 `area`は小文字始まりなので、実際にはこの構成では他パッケージから見えません——`fn Area(r: Rectangle) -> Int`のように大文字始まりへ直す必要があります。実際に試して、意図的にこのエラーを確認してみるのもよい練習になります。
+
+```go
+// double.go(main.amlと同じディレクトリ)
+package doubler
+
+func Double(x int64) int64 { return x * 2 }
+```
+
+```amifl
+extern "." as d {
+    bind Double(x: Int) -> Int
+}
+
+fn main() -> Int {
+    print(Double(21))   // 42
+    0
+}
+```
 
 </details>
 

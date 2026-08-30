@@ -55,20 +55,78 @@ func copyAmiflrt(dir string) error {
 	return nil
 }
 
+// externImport is one deduped extern binding the program's compiled units
+// declare, resolved down to exactly one of two forms: Path is a Go import
+// path to hand amivm unchanged (a standard-library/module target, e.g.
+// "time"), or — when the source `extern "..."` string starts with "."
+// (isLocalExternPath) — LocalDir is instead the resolved absolute
+// directory of hand-written .go files compileToGo must copy into the
+// scratch module before amivm can be pointed at them (amifl-spec.md
+// 15.3's "同じディレクトリに手書きの.goファイルを置き...extern束ねる";
+// a bare relative/absolute filesystem path isn't a valid Go import string
+// on its own, so it can never be handed to `-i` as-is the way a package
+// name can).
+type externImport struct {
+	Alias    string
+	Path     string
+	LocalDir string
+}
+
+// externTarget renders whichever of externImport's two forms is set, for
+// error messages (the "bound to both X and Y" collision check below).
+func (e externImport) externTarget() string {
+	if e.LocalDir != "" {
+		return e.LocalDir
+	}
+	return e.Path
+}
+
+// isLocalExternPath reports whether path (an `extern "path"` string) names
+// a local filesystem location rather than a Go standard-library/module
+// import path — exactly Go's own convention for telling "./foo" and
+// "../foo" apart from "strings" or "github.com/x/y" (a real Go import
+// path never starts with "."), which amifl-spec.md 15.3 deliberately
+// reuses rather than inventing a separate marker (CLAUDE.md principle 3;
+// it also mirrors `import alias "./x"`'s own local-vs-package convention,
+// section 12.2).
+func isLocalExternPath(path string) bool {
+	return path == "." || strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../")
+}
+
+// resolveLocalExternDir resolves a local `extern` path against pkgDir —
+// the AmiFL package declaring it, since amifl-spec.md 15.3's "同じディレ
+// クトリ" and 12.2's "パスは参照元ファイル自身のディレクトリからの相対
+// パス" are the same rule applied to two different things (a hand-written
+// .go file vs. an imported AmiFL package) — and confirms it names a real
+// directory before compileToGo commits to copying anything out of it.
+func resolveLocalExternDir(pkgDir, path string) (string, error) {
+	dir := filepath.Clean(filepath.Join(pkgDir, path))
+	info, err := os.Stat(dir)
+	if err != nil {
+		return "", fmt.Errorf("extern path %q: %w", path, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("extern path %q resolves to %s, which is not a directory", path, dir)
+	}
+	return dir, nil
+}
+
 // compileToIR loads and compiles srcPath down to AMIVM-IR text, plus one
-// amivm `-i alias=path` mapping string per distinct extern alias declared
-// anywhere in the program (codegen.ExternImportMappings, step 13) —
-// compileToGo appends these to the fixed amiflrt mapping it always passes,
-// so every generated `?alias.Xxx`/METHVAL callname resolves
-// deterministically. srcPath is a directory (amifl-spec.md section 12.1's
-// package) or a single .aml file (its own independent one-file package);
-// modloader.Load resolves every `import` it (transitively) declares into
-// the full package DAG, in dependency order — sema.CheckPackage then runs
-// once per package, left to right, so each import's Exports (step 14) are
-// always ready by the time its importer needs them, and codegen.
-// GenerateProgram compiles every package's own declarations into one
-// combined AMIVM-IR program (section 12.4).
-func compileToIR(srcPath string) (ir string, externImports []string, err error) {
+// externImport per distinct extern alias declared anywhere in the program
+// (codegen.ExternImportMappings, step 13, plus this file's own local-path
+// resolution on top of it, see isLocalExternPath) — compileToGo turns
+// these into the amivm `-i alias=path` mappings it appends to the fixed
+// amiflrt one it always passes, so every generated `?alias.Xxx`/METHVAL
+// callname resolves deterministically. srcPath is a directory
+// (amifl-spec.md section 12.1's package) or a single .aml file (its own
+// independent one-file package); modloader.Load resolves every `import`
+// it (transitively) declares into the full package DAG, in dependency
+// order — sema.CheckPackage then runs once per package, left to right, so
+// each import's Exports (step 14) are always ready by the time its
+// importer needs them, and codegen.GenerateProgram compiles every
+// package's own declarations into one combined AMIVM-IR program
+// (section 12.4).
+func compileToIR(srcPath string) (ir string, externImports []externImport, err error) {
 	_, order, err := modloader.Load(srcPath)
 	if err != nil {
 		return "", nil, err
@@ -76,7 +134,7 @@ func compileToIR(srcPath string) (ir string, externImports []string, err error) 
 
 	exportsByKey := map[string]sema.Exports{}
 	var units []codegen.Unit
-	externMap := map[string]string{}
+	externMap := map[string]externImport{}
 	for _, pkg := range order {
 		imports := map[string]sema.Exports{}
 		for alias, key := range pkg.Imports {
@@ -96,10 +154,18 @@ func compileToIR(srcPath string) (ir string, externImports []string, err error) 
 
 		for _, mapping := range codegen.ExternImportMappings(decls) {
 			alias, path, _ := strings.Cut(mapping, "=")
-			if existing, ok := externMap[alias]; ok && existing != path {
-				return "", nil, fmt.Errorf("extern alias %q is bound to both %q and %q across different packages", alias, existing, path)
+			ei := externImport{Alias: alias, Path: path}
+			if isLocalExternPath(path) {
+				dir, err := resolveLocalExternDir(pkg.Dir, path)
+				if err != nil {
+					return "", nil, err
+				}
+				ei = externImport{Alias: alias, LocalDir: dir}
 			}
-			externMap[alias] = path
+			if existing, ok := externMap[alias]; ok && existing != ei {
+				return "", nil, fmt.Errorf("extern alias %q is bound to both %q and %q across different packages", alias, existing.externTarget(), ei.externTarget())
+			}
+			externMap[alias] = ei
 		}
 	}
 
@@ -114,9 +180,47 @@ func compileToIR(srcPath string) (ir string, externImports []string, err error) 
 	}
 	sort.Strings(aliases)
 	for _, alias := range aliases {
-		externImports = append(externImports, alias+"="+externMap[alias])
+		externImports = append(externImports, externMap[alias])
 	}
 	return ir, externImports, nil
+}
+
+// copyLocalExternDir copies srcDir's own direct *.go files (non-recursive
+// — a Go package, like an AmiFL package, amifl-spec.md section 12.1, is
+// exactly one directory's own files, never a subtree) into dstDir, so the
+// scratch Go module compileToGo builds in can resolve them as a local
+// package. The declared `package` clause inside those files never has to
+// match the extern block's own `as alias` — the generated code always
+// references them through an explicit `import alias "..."`, which
+// overrides whatever package name Go itself sees, exactly like amiflrt's
+// own `import amiflrt "amiflbuild/amiflrt"` doesn't care that amiflrt.go
+// happens to also declare `package amiflrt`.
+func copyLocalExternDir(srcDir, dstDir string) error {
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+	found := false
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		found = true
+		data, err := os.ReadFile(filepath.Join(srcDir, e.Name()))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dstDir, e.Name()), data, 0o644); err != nil {
+			return err
+		}
+	}
+	if !found {
+		return fmt.Errorf("extern path resolves to %s, but it contains no .go files", srcDir)
+	}
+	return nil
 }
 
 // compileToGo runs compileToIR and then the external amivm CLI, returning
@@ -157,8 +261,28 @@ func compileToGo(srcPath string, verbose bool) (goSrc string, workDir string, er
 
 	goPath := filepath.Join(workDir, "main.go")
 	args := []string{irPath, "-o", goPath, "-i", amiflrtImportMapping}
-	for _, mapping := range externImports {
-		args = append(args, "-i", mapping)
+	// localScratchNames dedupes local extern directories that end up
+	// referenced by more than one alias (two different `extern "./x" as
+	// a`/`as b` blocks, or the same relative path resolved from two
+	// different packages) — copied into the scratch module exactly once,
+	// under a fresh externN subdirectory each, in the same deterministic
+	// alias-sorted order externImports already comes in.
+	localScratchNames := map[string]string{}
+	for _, ei := range externImports {
+		path := ei.Path
+		if ei.LocalDir != "" {
+			name, ok := localScratchNames[ei.LocalDir]
+			if !ok {
+				name = fmt.Sprintf("extern%d", len(localScratchNames))
+				if err := copyLocalExternDir(ei.LocalDir, filepath.Join(workDir, name)); err != nil {
+					cleanup()
+					return "", "", err
+				}
+				localScratchNames[ei.LocalDir] = name
+			}
+			path = scratchModule + "/" + name
+		}
+		args = append(args, "-i", ei.Alias+"="+path)
 	}
 	if verbose {
 		args = append(args, "-v")
